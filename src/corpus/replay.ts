@@ -89,7 +89,13 @@ export async function replayCorpus(corpus: readonly LabeledCase[], deps: ReplayD
   const byDefectClass: ReplayReport["byDefectClass"] = {};
 
   for (const c of corpus) {
-    const scm: ScmReader = { getChangedFiles: async () => c.files };
+    const scm: ScmReader = {
+      getChangedFiles: async () => c.files,
+      // Corpus replay scores the poison gate only; the range reader is never hit.
+      getChangedFilesInRange: async () => {
+        throw new Error("range read not supported in poison corpus replay");
+      },
+    };
     const { decision } = await runPoisonAnalysis(c.subject, {
       scm,
       analyzers: deps.analyzers,

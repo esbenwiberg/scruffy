@@ -3,7 +3,13 @@ import { createPool, type Pool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
 import { Scruffy } from "../../src/app/scruffy.js";
 import { FakeScm } from "../../src/providers/scm/fake.js";
-import { defaultAnalyzers, defaultValidator, POISON_BLOCKABLE_CLASSES } from "../../src/providers/registry.js";
+import {
+  defaultAnalyzers,
+  defaultValidator,
+  POISON_BLOCKABLE_CLASSES,
+  NIGHTLY_REPORTABLE_CLASSES,
+  NIGHTLY_FIXABLE_CLASSES,
+} from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
 import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
 
@@ -19,6 +25,10 @@ export const HARNESS_POLICY: EffectivePolicy = {
   poison: {
     blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES],
     requireValidation: true,
+  },
+  nightly: {
+    reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
+    fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
   },
 };
 
@@ -38,7 +48,9 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
   const pool = createPool();
   await migrate(pool);
   // Fresh state each boot: truncate everything the skeleton writes.
-  await pool.query("truncate outbox, poison_decisions, run_transitions, evaluation_runs cascade");
+  await pool.query(
+    "truncate outbox, poison_decisions, nightly_decisions, review_watermarks, run_transitions, evaluation_runs cascade",
+  );
 
   const clock = new FixedClock(new Date("2026-07-15T00:00:00.000Z"));
   const ids = new SeededIdGenerator("harness");

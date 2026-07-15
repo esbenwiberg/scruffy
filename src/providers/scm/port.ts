@@ -15,9 +15,22 @@ export interface ChangedFile {
   patch: string;
 }
 
+/**
+ * An immutable revision range for nightly review: everything reached by `headSha`
+ * but not by `baseSha`. `baseSha` is null for a branch's first-ever review, in
+ * which case the adapter returns the head candidate's own change set.
+ */
+export interface RevisionRange {
+  repository: string;
+  baseSha: string | null;
+  headSha: string;
+}
+
 export interface ScmReader {
   /** Changed files for a PR/subject, by immutable revision. */
   getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]>;
+  /** Changed files across a range (base, head]. Used by the nightly gate. */
+  getChangedFilesInRange(range: RevisionRange): Promise<ChangedFile[]>;
 }
 
 export type CheckConclusion = "success" | "failure" | "neutral";

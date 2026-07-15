@@ -3,6 +3,7 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  RevisionRange,
   ScmReader,
   ScmWriter,
 } from "./port.js";
@@ -20,6 +21,7 @@ import type {
  */
 export class FakeScm implements ScmReader, ScmWriter {
   readonly #files = new Map<string, ChangedFile[]>();
+  readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   #idSeq = 0;
 
@@ -27,8 +29,16 @@ export class FakeScm implements ScmReader, ScmWriter {
     this.#files.set(this.#subjectKey(subject), files);
   }
 
+  seedChangedFilesInRange(range: RevisionRange, files: ChangedFile[]): void {
+    this.#rangeFiles.set(this.#rangeKey(range), files);
+  }
+
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {
     return this.#files.get(this.#subjectKey(subject)) ?? [];
+  }
+
+  async getChangedFilesInRange(range: RevisionRange): Promise<ChangedFile[]> {
+    return this.#rangeFiles.get(this.#rangeKey(range)) ?? [];
   }
 
   async upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult> {
@@ -52,5 +62,9 @@ export class FakeScm implements ScmReader, ScmWriter {
 
   #subjectKey(subject: SubjectRevision): string {
     return `${subject.repository}@${subject.commitSha}`;
+  }
+
+  #rangeKey(range: RevisionRange): string {
+    return `${range.repository}@${range.baseSha ?? "∅"}..${range.headSha}`;
   }
 }

@@ -33,6 +33,16 @@ export const EvaluationRun = z.object({
   subject: SubjectRevision,
   /** Merge-group sha when the run evaluates a merge queue candidate. */
   mergeGroupSha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+  /**
+   * Nightly range base: the last-reviewed head this run advances from. Null for
+   * poison runs, and for a branch's first-ever nightly review. `subject.commitSha`
+   * is the range head. Persisting the base on the run keeps a nightly run
+   * self-contained, so reconciliation re-drives it against its frozen range
+   * rather than a watermark that may have since moved.
+   */
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+  /** Branch the nightly range belongs to. Null for poison runs. */
+  branch: z.string().min(1).nullable(),
   policyVersion: z.string().min(1),
   state: RunState,
   attempt: z.number().int().nonnegative(),
