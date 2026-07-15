@@ -1,6 +1,7 @@
 import type { Finding, SubjectRevision } from "../../domain/evidence/types.js";
 import type { ChangedFile } from "../scm/port.js";
 import type { Analyzer } from "./port.js";
+import { addedLines } from "./diff.js";
 
 /**
  * Deterministic secret-introduction analyzer — the skeleton's one poison defect
@@ -32,36 +33,6 @@ const PATTERNS: SecretPattern[] = [
     regex: /\bAKIA[0-9A-Z]{16}\b/,
   },
 ];
-
-interface AddedLine {
-  text: string;
-  line: number;
-}
-
-/**
- * Extract added lines with their new-file line numbers from a unified diff.
- * Hunk headers look like `@@ -a,b +c,d @@`; c is the starting new-file line.
- */
-function addedLines(patch: string): AddedLine[] {
-  const out: AddedLine[] = [];
-  let newLine = 0;
-  for (const raw of patch.split("\n")) {
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-    if (hunk) {
-      newLine = Number(hunk[1]);
-      continue;
-    }
-    if (raw.startsWith("+++")) continue;
-    if (raw.startsWith("+")) {
-      out.push({ text: raw.slice(1), line: newLine });
-      newLine += 1;
-    } else if (!raw.startsWith("-")) {
-      // context line advances the new-file counter
-      newLine += 1;
-    }
-  }
-  return out;
-}
 
 export class SecretScanAnalyzer implements Analyzer {
   readonly id = "secret-scan";

@@ -1,5 +1,4 @@
-import { SecretScanAnalyzer } from "../providers/analyzers/secret-scan.js";
-import { SecretValidator } from "../providers/validation/secret-validator.js";
+import { defaultAnalyzers, defaultValidator, POISON_BLOCKABLE_CLASSES } from "../providers/registry.js";
 import type { PoisonPolicy } from "../domain/policy/types.js";
 import { replayCorpus } from "./replay.js";
 import { SYNTHETIC_CORPUS } from "./synthetic.js";
@@ -10,7 +9,7 @@ import { SYNTHETIC_CORPUS } from "./synthetic.js";
  * -> decision measurement.
  */
 
-const POLICY: PoisonPolicy = { blockableDefectClasses: ["leaked-credential"], requireValidation: true };
+const POLICY: PoisonPolicy = { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true };
 
 function pct(n: number | null): string {
   return n === null ? "n/a" : `${(n * 100).toFixed(1)}%`;
@@ -18,8 +17,8 @@ function pct(n: number | null): string {
 
 async function main(): Promise<void> {
   const report = await replayCorpus(SYNTHETIC_CORPUS, {
-    analyzers: [new SecretScanAnalyzer()],
-    validator: new SecretValidator(),
+    analyzers: defaultAnalyzers(),
+    validator: defaultValidator(),
     policy: POLICY,
   });
 

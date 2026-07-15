@@ -3,8 +3,7 @@ import { createPool, type Pool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
 import { Scruffy } from "../../src/app/scruffy.js";
 import { FakeScm } from "../../src/providers/scm/fake.js";
-import { SecretScanAnalyzer } from "../../src/providers/analyzers/secret-scan.js";
-import { SecretValidator } from "../../src/providers/validation/secret-validator.js";
+import { defaultAnalyzers, defaultValidator, POISON_BLOCKABLE_CLASSES } from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
 import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
 
@@ -18,7 +17,7 @@ import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
 export const HARNESS_POLICY: EffectivePolicy = {
   version: "policy-v1",
   poison: {
-    blockableDefectClasses: ["leaked-credential"],
+    blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES],
     requireValidation: true,
   },
 };
@@ -52,8 +51,8 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
     policy: HARNESS_POLICY,
     scmReader: scm,
     scmWriter: scm,
-    analyzers: [new SecretScanAnalyzer()],
-    validator: new SecretValidator(),
+    analyzers: defaultAnalyzers(),
+    validator: defaultValidator(),
     webhookSecret: WEBHOOK_SECRET,
     ...(options.leaseMs !== undefined ? { leaseMs: options.leaseMs } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
