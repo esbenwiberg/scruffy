@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: scruffy
+      POSTGRES_PASSWORD: scruffy
+      POSTGRES_DB: scruffy
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scruffy -d scruffy"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      # Ephemeral storage: the DB is rebuilt from migrations, never authoritative
+      # across restarts in dev/test.
+      - /var/lib/postgresql/data
