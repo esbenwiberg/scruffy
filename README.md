@@ -54,6 +54,29 @@ signed webhook → verify + parse → ensureRun (idempotent)
 - **Deterministic edges** (`src/providers/*/`, `test/fixtures/`): FixedClock +
   SeededIdGenerator, fake SCM/model, seeded PR fixtures.
 
+## Model backends
+
+Analysis/validation model calls go through one `ModelProvider` port
+(`src/providers/models/`). `SCRUFFY_MODEL_BACKEND` selects the implementation:
+
+- `fake` (default) — deterministic, no network. Tests, harness, and corpus
+  always use this; nothing fires a live model unless explicitly asked.
+- `claude-cli` — local dev, reuses the authenticated `claude` CLI session (no API
+  key in config).
+- `anthropic` — local dev via the Anthropic SDK (`ant` profile / `ANTHROPIC_API_KEY`).
+- `azure` — deployed service via Azure AI Foundry.
+
+The `ModelValidator` (`src/providers/validation/model-validator.ts`) is the
+adversarial critic: it asks the model to **refute** a deterministic finding.
+Even a `validated` verdict still requires deterministic supporting evidence for
+the poison kernel to block, and any provider/parse failure becomes `failed`
+(abstain) — so the model can never manufacture a block. Fire it against synthetic
+findings:
+
+```bash
+SCRUFFY_MODEL_BACKEND=claude-cli npm run llm-smoke
+```
+
 ## What is NOT built yet
 
 Honest gaps against ADR 0003's acceptance list:
