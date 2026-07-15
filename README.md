@@ -4,10 +4,12 @@ Service-controlled three-gate review system for organization repositories. See
 `docs/product/vision.md` for the product thesis and `docs/decisions/` for the
 accepted trust, language, and stack ADRs.
 
-This repository currently contains the **walking skeleton**: one poison-gate
-defect class driven end-to-end through the real durable path, with the trust
-edges (GitHub, model) faked so the whole thing runs deterministically and
-offline.
+This repository currently contains the **walking skeleton**: the poison gate
+driven end-to-end through the real durable path, with the trust edges (GitHub,
+model) faked so the whole thing runs deterministically and offline. Three
+deterministic defect classes are wired — `leaked-credential`,
+`destructive-schema-change` (silent data loss), and `disabled-tls-verification`
+(exploitable security) — each with an adversarial validator.
 
 ## Run it
 
@@ -68,8 +70,15 @@ Honest gaps against ADR 0003's acceptance list:
 
 ## Layout
 
-`src/domain` typed evidence/policy/evaluation contracts · `src/gates/poison`
-decision kernel + analysis orchestration · `src/providers` SCM/model/analyzer/
-validator ports and fakes · `src/persistence` Postgres, migrations, runs,
-outbox · `src/effects` idempotent SCM writes · `src/ingest` webhook verify +
-parse · `src/app` wiring · `test/harness` end-to-end boot.
+`src/domain` typed evidence/policy/evaluation/validation contracts ·
+`src/gates/poison` decision kernel + analysis orchestration · `src/providers`
+SCM/model/analyzer/validator ports, deterministic analyzers, and the registry
+that binds analyzers ↔ validators ↔ blockable classes · `src/persistence`
+Postgres, migrations, runs, outbox · `src/effects` idempotent SCM writes ·
+`src/ingest` webhook verify + parse · `src/corpus` labeled corpus + replay
+metrics · `src/app` wiring + reconciler · `test/` unit, persistence, e2e.
+
+New deterministic defect classes plug in via `src/providers/registry.ts`: add an
+analyzer, a validator for its class, and the class name — the registry keeps
+harness, corpus, and production wiring in sync, and any blockable class without a
+validator abstains rather than blocking.
