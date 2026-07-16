@@ -55,17 +55,40 @@ AI the instant they are fetched, so the rules apply *before* the first fetch:
 2. **No customer data, no PII.** A case may not carry personal or customer data
    at rest. If a candidate diff contains either and cannot be cleanly sanitized,
    **drop the case** — do not "mostly" sanitize it.
-3. **Sanitize, then stamp provenance.** Every committed case is
-   `source: sanitized-historical` with an `author` and `createdAt`
-   (`corpus-labeling-protocol.md`). Real secrets become obviously-fake
-   placeholders; internal hostnames, customer names, and identifiers are
-   replaced; the **defect semantics are preserved** so the case still tests what
-   it claims to.
-4. **If in doubt, escalate.** Ambiguous data provenance → DISCO / Enterprise,
+3. **This repo is PUBLIC → structure-grounded, not sanitize-in-place (default).**
+   The corpus lives in a public repo, so the safe default is *not* to sanitize
+   real bytes and commit them — AI sanitization is error-prone (one missed
+   internal identifier leaks forever). Instead, read a real merged defect's
+   **shape** (its class, why review missed it, its rough structure), then rebuild
+   the case from scratch with **100% invented identifiers**. Stamp it
+   `source: seeded-mutation` with `grounding: real-merged-defect` and an auditable
+   `sourceRepo` + `sourceRef` — the lineage is recorded without any real bytes
+   crossing over. Reserve `source: sanitized-historical` for a **private** corpus
+   destination only; if a case truly needs real (sanitized) bytes, keep it out of
+   this public repo.
+4. **No customer data, no PII — and never credential-scan the source.** A case may
+   not carry personal or customer data. Read defect *shapes* from normal file
+   history; do not grep the source repo for secrets (AKIA/ghp_/sk-…) to seed a
+   public corpus.
+5. **If in doubt, escalate.** Ambiguous data provenance → DISCO / Enterprise,
    not a judgment call in the pipeline.
 
 A case that cannot pass this preflight never enters the corpus. Silent
 truncation of the rule is the failure mode to avoid.
+
+## Grounded corpus — real defect shape, all three gates
+
+The first structure-grounded case lives in `src/corpus/grounded.ts`
+(`npm run corpus:grounded`): a **fail-open ownership guard** — a
+`missing-authorization` bypass — modeled on a real merged defect in
+`context-and/portfolio-simulation` (`d745dcf`), rebuilt with invented
+identifiers. It is a *semantic* defect the deterministic analyzers cannot see, so
+it is scored with a deterministic, **offline fake model** wired in, and one
+change is run through all three gates: poison **allows** (out of blocking scope,
+no false-block), nightly **reports** (model-asserted, not auto-fixed), release
+requires **sign-off** (no silent ship, no fabricated stop). The trust posture is
+enforced by the kernels — a model-asserted finding can never manufacture a poison
+block or a release stop.
 
 # What a "case" is, per gate
 

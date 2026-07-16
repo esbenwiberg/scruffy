@@ -29,7 +29,9 @@ import { addedLines } from "./diff.js";
  */
 
 const VERSION = "1.0.0";
-const PROMPT_VERSION = "model-analyze-v1";
+/** The prompt-version key the model is called with. Exported so a fake model can
+ * key a canned response to the exact request this analyzer makes. */
+export const PROMPT_VERSION = "model-analyze-v1";
 const MAX_ADDED_LINES = 300; // prompt bound; beyond this the context is truncated
 const MAX_FINDINGS = 25; // cap a runaway model
 
