@@ -1,5 +1,7 @@
 import type { RunStore } from "../persistence/runs.js";
+import type { EvaluationRun } from "../domain/evaluation/types.js";
 import type { PoisonService } from "../gates/poison/service.js";
+import type { NightlyService } from "../gates/nightly/service.js";
 
 /**
  * Durable reconciliation, independent of webhook delivery. It recovers work that
@@ -20,6 +22,7 @@ export class Reconciler {
   constructor(
     private readonly runs: RunStore,
     private readonly poison: PoisonService,
+    private readonly nightly?: NightlyService,
   ) {}
 
   /** One reconciliation pass. Returns how many runs it acted on. */
@@ -28,10 +31,16 @@ export class Reconciler {
     let acted = 0;
 
     for (const run of candidates) {
+      // Route by gate: each gate owns its abandonment and drive semantics. A
+      // nightly run with no nightly service wired is skipped (never mis-driven
+      // through the poison path).
+      const maxAttempts = run.kind === "nightly" ? this.nightly?.maxAttempts : this.poison.maxAttempts;
+      if (maxAttempts === undefined) continue;
+
       if (run.state === "analyzing") {
         // The query only returns analyzing runs with an EXPIRED lease.
-        if (run.attempt >= this.poison.maxAttempts) {
-          await this.poison.abandon(run, "lease expired");
+        if (run.attempt >= maxAttempts) {
+          await this.#abandon(run);
           acted += 1;
           continue;
         }
@@ -39,10 +48,26 @@ export class Reconciler {
         if (!reclaimed) continue; // lost the race to another reconciler
       }
 
-      // Pending (originally, or just reclaimed): drive it through the gate.
-      await this.poison.evaluate(run.subject);
+      // Pending (originally, or just reclaimed): drive it through its gate.
+      await this.#drive(run);
       acted += 1;
     }
     return acted;
+  }
+
+  async #abandon(run: EvaluationRun): Promise<void> {
+    if (run.kind === "nightly") {
+      await this.nightly?.abandon(run, "lease expired");
+    } else {
+      await this.poison.abandon(run, "lease expired");
+    }
+  }
+
+  async #drive(run: EvaluationRun): Promise<void> {
+    if (run.kind === "nightly") {
+      await this.nightly?.reconcile(run);
+    } else {
+      await this.poison.evaluate(run.subject);
+    }
   }
 }

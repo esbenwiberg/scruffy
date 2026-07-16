@@ -21,6 +21,19 @@ export const POISON_BLOCKABLE_CLASSES = [
   "disabled-tls-verification",
 ] as const;
 
+/**
+ * Nightly reportable classes: everything the deterministic analyzers can emit.
+ * Nightly re-reviews the day's range and surfaces findings poison abstained on.
+ */
+export const NIGHTLY_REPORTABLE_CLASSES = [...POISON_BLOCKABLE_CLASSES] as const;
+
+/**
+ * Subset eligible for an automated fix PR once validated + deterministically
+ * supported. Kept narrow: a disabled TLS-verification flag is a mechanical,
+ * low-ambiguity revert. Fix *generation* is a later slice.
+ */
+export const NIGHTLY_FIXABLE_CLASSES = ["disabled-tls-verification"] as const;
+
 export function defaultAnalyzers(): Analyzer[] {
   return [new SecretScanAnalyzer(), new DestructiveMigrationAnalyzer(), new DisabledTlsAnalyzer()];
 }
