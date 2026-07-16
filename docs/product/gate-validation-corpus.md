@@ -23,8 +23,25 @@ regression-free fixes).
 
 This playbook turns real pull requests and change ranges from our own repos into
 **sanitized, labeled corpus cases**, so we can replay the gates and read honest
-metrics **before** any gate touches live traffic or becomes authoritative. The
-`/goal` prompt (`gate-validation.goal.md`) operationalizes it step by step.
+metrics **before** any gate touches live traffic or becomes authoritative.
+
+Drive it autonomously with the built-in `/goal` command, whose argument is an
+inline completion condition (not a file) evaluated against the conversation
+transcript. A worked condition that encodes the phases and the data-safety
+preflight below:
+
+> `/goal` Validate the poison and nightly gates against real, sanitized seed
+> data, with all evidence printed to this conversation. Complete when ALL are
+> shown in the transcript: (1) a poison `LabeledCase` from a real PR mixing a
+> critical security defect with nitpicks — sanitized, provenance
+> `sanitized-historical` — is committed and `npm run corpus` output shows it
+> blocking correctly with zero false blocks; (2) a nightly range-corpus +
+> range-replay harness is built and committed with tests shown passing, and a
+> real sanitized change-range case is replayed with disposition + fix results
+> printed; (3) a release fixture *shape* is authored and committed, marked
+> no-runner. HARD PRECONDITION: state the data-safety preflight as passed before
+> fetching any real repo data; never commit or echo raw data. Stop after 40
+> turns if not complete.
 
 # Data-safety preflight — the first hard gate
 
