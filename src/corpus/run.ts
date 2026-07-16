@@ -2,6 +2,7 @@ import { defaultAnalyzers, defaultValidator, POISON_BLOCKABLE_CLASSES } from "..
 import type { PoisonPolicy } from "../domain/policy/types.js";
 import { replayCorpus } from "./replay.js";
 import { SYNTHETIC_CORPUS } from "./synthetic.js";
+import { SEEDED_CORPUS } from "./seeded.js";
 
 /**
  * `npm run corpus` — replays the synthetic corpus and prints the confusion
@@ -16,7 +17,7 @@ function pct(n: number | null): string {
 }
 
 async function main(): Promise<void> {
-  const report = await replayCorpus(SYNTHETIC_CORPUS, {
+  const report = await replayCorpus([...SYNTHETIC_CORPUS, ...SEEDED_CORPUS], {
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     policy: POLICY,
