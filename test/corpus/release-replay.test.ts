@@ -20,7 +20,7 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
   it("reaches the right outcome for every seeded range, and never unsafely ships", async () => {
     const r = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, deps);
 
-    expect(r.total).toBe(4);
+    expect(r.total).toBe(5);
     expect(r.metrics.outcomeAccuracy).toBe(1);
     expect(r.metrics.unsafeShips).toBe(0);
     expect(r.metrics.indeterminates).toBe(0);
@@ -37,6 +37,9 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
     expect(byId.get("release-signoff-unconfirmed-drop")!.outcome).toBe("sign-off-required");
     expect(byId.get("release-signoff-tls")!.outcome).toBe("sign-off-required");
     expect(byId.get("release-ship-clean")!.outcome).toBe("ship");
+    // Agent-harness-grounded: shipping a hardcoded key stops the release,
+    // mirroring the harness's outbound push checkpoint blocking on secrets.
+    expect(byId.get("release-harness-secret-stop")!.outcome).toBe("stop");
   });
 
   it("counts an unsafe ship when a stop range is mislabeled shippable", async () => {
