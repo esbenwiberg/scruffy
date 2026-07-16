@@ -1,9 +1,11 @@
 import type { Analyzer } from "./analyzers/port.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "./fixers/port.js";
+import type { ModelProvider } from "./models/port.js";
 import { SecretScanAnalyzer } from "./analyzers/secret-scan.js";
 import { DestructiveMigrationAnalyzer } from "./analyzers/destructive-migration.js";
 import { DisabledTlsAnalyzer } from "./analyzers/disabled-tls.js";
+import { ModelAnalyzer, MODEL_DEFECT_CLASSES } from "./analyzers/model-analyzer.js";
 import { SecretValidator } from "./validation/secret-validator.js";
 import { MigrationValidator } from "./validation/migration-validator.js";
 import { TlsValidator } from "./validation/tls-validator.js";
@@ -24,10 +26,13 @@ export const POISON_BLOCKABLE_CLASSES = [
 ] as const;
 
 /**
- * Nightly reportable classes: everything the deterministic analyzers can emit.
- * Nightly re-reviews the day's range and surfaces findings poison abstained on.
+ * Nightly reportable classes: the deterministic classes PLUS the model
+ * analyzer's semantic vocabulary. Nightly re-reviews the day's range and surfaces
+ * findings poison abstained on — including model-detected semantic defects. The
+ * model classes are deliberately NOT in POISON_BLOCKABLE_CLASSES: a model finding
+ * feeds nightly (report), never the fast blocking gate.
  */
-export const NIGHTLY_REPORTABLE_CLASSES = [...POISON_BLOCKABLE_CLASSES] as const;
+export const NIGHTLY_REPORTABLE_CLASSES = [...POISON_BLOCKABLE_CLASSES, ...MODEL_DEFECT_CLASSES] as const;
 
 /**
  * Subset eligible for an automated fix PR once validated + deterministically
@@ -38,6 +43,16 @@ export const NIGHTLY_FIXABLE_CLASSES = ["disabled-tls-verification"] as const;
 
 export function defaultAnalyzers(): Analyzer[] {
   return [new SecretScanAnalyzer(), new DestructiveMigrationAnalyzer(), new DisabledTlsAnalyzer()];
+}
+
+/**
+ * Model-backed analyzers, wired only when a model backend is configured. Kept
+ * OUT of defaultAnalyzers so tests, corpus replay, and the deterministic
+ * critical path never make a model call. Append to defaultAnalyzers() for a
+ * model-enabled run: `[...defaultAnalyzers(), ...modelAnalyzers(model)]`.
+ */
+export function modelAnalyzers(model: ModelProvider): Analyzer[] {
+  return [new ModelAnalyzer(model)];
 }
 
 export function defaultValidator(): Validator {
