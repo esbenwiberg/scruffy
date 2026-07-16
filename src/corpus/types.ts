@@ -17,6 +17,21 @@ export const CaseProvenance = z.object({
   author: z.string().min(1),
   /** ISO date; passed in, never read from the ambient clock. */
   createdAt: z.string().min(1),
+  /**
+   * What real-world signal, if any, this case's SHAPE was modeled on. Distinct
+   * from `source`: a `seeded-mutation` (rebuilt from scratch, invented
+   * identifiers) may still be grounded in a real merged defect — this records
+   * that lineage so it is auditable without any real bytes crossing over.
+   *  - `real-merged-defect`: a defect that actually shipped to a real repo's main
+   *    branch, chosen by history rather than invented to be caught.
+   *  - `security-taxonomy`: modeled on a documented class of defect, not a
+   *    specific merged instance.
+   */
+  grounding: z.enum(["real-merged-defect", "security-taxonomy"]).optional(),
+  /** Auditable pointer to the source repository, when grounded. Never the case's own bytes. */
+  sourceRepo: z.string().min(1).optional(),
+  /** Auditable pointer (commit/PR) to the grounding instance in the source repo. */
+  sourceRef: z.string().min(1).optional(),
 });
 export type CaseProvenance = z.infer<typeof CaseProvenance>;
 
