@@ -10,6 +10,8 @@ import {
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
+  RELEASE_STOP_CLASSES,
+  RELEASE_SIGNOFF_CLASSES,
 } from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
 import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
@@ -31,6 +33,10 @@ export const HARNESS_POLICY: EffectivePolicy = {
     reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
     fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
   },
+  release: {
+    stopDefectClasses: [...RELEASE_STOP_CLASSES],
+    signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  },
 };
 
 export interface Harness {
@@ -50,7 +56,7 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
   await migrate(pool);
   // Fresh state each boot: truncate everything the skeleton writes.
   await pool.query(
-    "truncate outbox, poison_decisions, nightly_decisions, review_watermarks, run_transitions, evaluation_runs cascade",
+    "truncate outbox, poison_decisions, nightly_decisions, release_decisions, review_watermarks, run_transitions, evaluation_runs cascade",
   );
 
   const clock = new FixedClock(new Date("2026-07-15T00:00:00.000Z"));

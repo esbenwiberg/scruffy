@@ -5,7 +5,9 @@ import { OutboxStore } from "../persistence/outbox.js";
 import { EffectsDispatcher } from "../effects/dispatcher.js";
 import { PoisonService } from "../gates/poison/service.js";
 import { NightlyService, type ReviewResult } from "../gates/nightly/service.js";
+import { ReleaseService } from "../gates/release/service.js";
 import { Reconciler } from "./reconciler.js";
+import type { EvaluationRun } from "../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../domain/policy/types.js";
 import { SubjectRevision } from "../domain/evidence/types.js";
 import type { Analyzer } from "../providers/analyzers/port.js";
@@ -41,6 +43,7 @@ export class Scruffy {
   readonly outbox: OutboxStore;
   readonly poison: PoisonService;
   readonly nightly: NightlyService;
+  readonly release: ReleaseService;
   readonly dispatcher: EffectsDispatcher;
   readonly reconciler: Reconciler;
 
@@ -66,8 +69,17 @@ export class Scruffy {
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });
+    this.release = new ReleaseService({
+      runs: this.runs,
+      scm: deps.scmReader,
+      analyzers: deps.analyzers,
+      validator: deps.validator,
+      policy: deps.policy,
+      ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
+      ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
+    });
     this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter);
-    this.reconciler = new Reconciler(this.runs, this.poison, this.nightly);
+    this.reconciler = new Reconciler(this.runs, this.poison, this.nightly, this.release);
   }
 
   /** One reconciliation pass; returns runs acted on. */
@@ -99,6 +111,24 @@ export class Scruffy {
       branch: input.branch,
       head: subject.commitSha,
       ...(input.base !== undefined ? { base: input.base } : {}),
+    });
+  }
+
+  /**
+   * Trigger a release review of the range (prevRelease, candidate] for a repo.
+   * Trigger-driven (a controlled draft-release protocol later), not webhook-driven.
+   * Idempotent: re-triggering the same candidate reconciles the existing run. The
+   * candidate and prev-release shas are parsed at the boundary so a malformed sha
+   * is rejected here, not deep in the DB.
+   */
+  async runRelease(input: { repository: string; candidate: string; prevRelease?: string | null }): Promise<EvaluationRun> {
+    const subject = SubjectRevision.parse({ repository: input.repository, commitSha: input.candidate });
+    const prevRelease =
+      input.prevRelease == null ? null : SubjectRevision.parse({ repository: input.repository, commitSha: input.prevRelease }).commitSha;
+    return this.release.review({
+      repository: subject.repository,
+      candidate: subject.commitSha,
+      prevRelease,
     });
   }
 

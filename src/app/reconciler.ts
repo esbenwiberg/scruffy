@@ -2,6 +2,7 @@ import type { RunStore } from "../persistence/runs.js";
 import type { EvaluationRun } from "../domain/evaluation/types.js";
 import type { PoisonService } from "../gates/poison/service.js";
 import type { NightlyService } from "../gates/nightly/service.js";
+import type { ReleaseService } from "../gates/release/service.js";
 
 /**
  * Durable reconciliation, independent of webhook delivery. It recovers work that
@@ -23,7 +24,24 @@ export class Reconciler {
     private readonly runs: RunStore,
     private readonly poison: PoisonService,
     private readonly nightly?: NightlyService,
+    private readonly release?: ReleaseService,
   ) {}
+
+  /** Per-gate retry bound; undefined when a gate's service is not wired. */
+  #maxAttemptsFor(kind: EvaluationRun["kind"]): number | undefined {
+    switch (kind) {
+      case "nightly":
+        return this.nightly?.maxAttempts;
+      case "release":
+        return this.release?.maxAttempts;
+      case "poison":
+        return this.poison.maxAttempts;
+      default: {
+        const _exhaustive: never = kind;
+        return _exhaustive;
+      }
+    }
+  }
 
   /** One reconciliation pass. Returns how many runs it acted on. */
   async reconcileOnce(limit = 50): Promise<number> {
@@ -31,10 +49,10 @@ export class Reconciler {
     let acted = 0;
 
     for (const run of candidates) {
-      // Route by gate: each gate owns its abandonment and drive semantics. A
-      // nightly run with no nightly service wired is skipped (never mis-driven
-      // through the poison path).
-      const maxAttempts = run.kind === "nightly" ? this.nightly?.maxAttempts : this.poison.maxAttempts;
+      // Route by gate: each gate owns its abandonment and drive semantics. A run
+      // whose gate service is not wired is skipped (never mis-driven through
+      // another gate's path).
+      const maxAttempts = this.#maxAttemptsFor(run.kind);
       if (maxAttempts === undefined) continue;
 
       if (run.state === "analyzing") {
@@ -56,18 +74,38 @@ export class Reconciler {
   }
 
   async #abandon(run: EvaluationRun): Promise<void> {
-    if (run.kind === "nightly") {
-      await this.nightly?.abandon(run, "lease expired");
-    } else {
-      await this.poison.abandon(run, "lease expired");
+    switch (run.kind) {
+      case "nightly":
+        await this.nightly?.abandon(run, "lease expired");
+        return;
+      case "release":
+        await this.release?.abandon(run, "lease expired");
+        return;
+      case "poison":
+        await this.poison.abandon(run, "lease expired");
+        return;
+      default: {
+        const _exhaustive: never = run.kind;
+        return _exhaustive;
+      }
     }
   }
 
   async #drive(run: EvaluationRun): Promise<void> {
-    if (run.kind === "nightly") {
-      await this.nightly?.reconcile(run);
-    } else {
-      await this.poison.evaluate(run.subject);
+    switch (run.kind) {
+      case "nightly":
+        await this.nightly?.reconcile(run);
+        return;
+      case "release":
+        await this.release?.reconcile(run);
+        return;
+      case "poison":
+        await this.poison.evaluate(run.subject);
+        return;
+      default: {
+        const _exhaustive: never = run.kind;
+        return _exhaustive;
+      }
     }
   }
 }
