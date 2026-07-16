@@ -6,6 +6,7 @@ import { FakeScm } from "../../src/providers/scm/fake.js";
 import {
   defaultAnalyzers,
   defaultValidator,
+  defaultFixers,
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
@@ -65,6 +66,7 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
     scmWriter: scm,
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
+    fixers: defaultFixers(),
     webhookSecret: WEBHOOK_SECRET,
     ...(options.leaseMs !== undefined ? { leaseMs: options.leaseMs } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),

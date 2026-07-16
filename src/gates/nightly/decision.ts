@@ -28,7 +28,8 @@ export type NightlyReasonCode =
   | "refuted"
   | "fixable_validated"
   | "reportable_validated"
-  | "reportable_unvalidated";
+  | "reportable_unvalidated"
+  | "fix_unavailable";
 
 export interface NightlyFindingDisposition {
   ruleId: string;
@@ -114,11 +115,15 @@ export function evaluateNightly(findings: readonly Finding[], policy: NightlyPol
     );
   });
 
-  const summary = {
+  return { dispositions, summary: summarize(dispositions) };
+}
+
+/** Recompute the disposition counts. Exported so fix generation can re-summarize
+ * after downgrading a propose_fix it could not actually patch. */
+export function summarize(dispositions: readonly NightlyFindingDisposition[]): NightlyDecision["summary"] {
+  return {
     reported: dispositions.filter((d) => d.disposition === "report").length,
     proposedFixes: dispositions.filter((d) => d.disposition === "propose_fix").length,
     suppressed: dispositions.filter((d) => d.disposition === "suppress").length,
   };
-
-  return { dispositions, summary };
 }

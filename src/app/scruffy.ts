@@ -10,6 +10,7 @@ import type { EffectivePolicy } from "../domain/policy/types.js";
 import { SubjectRevision } from "../domain/evidence/types.js";
 import type { Analyzer } from "../providers/analyzers/port.js";
 import type { Validator } from "../domain/validation/port.js";
+import type { Fixer } from "../providers/fixers/port.js";
 import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
 import { verifyAndParseWebhook } from "../ingest/webhook.js";
 
@@ -27,6 +28,8 @@ export interface ScruffyDeps {
   scmWriter: ScmWriter;
   analyzers: readonly Analyzer[];
   validator: Validator;
+  /** Fixers indexed by defect class, for nightly fix-PR generation. */
+  fixers: Record<string, Fixer>;
   webhookSecret: string;
   /** Optional overrides for the poison analysis lease and retry bound. */
   leaseMs?: number;
@@ -58,6 +61,7 @@ export class Scruffy {
       scm: deps.scmReader,
       analyzers: deps.analyzers,
       validator: deps.validator,
+      fixers: deps.fixers,
       policy: deps.policy,
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),

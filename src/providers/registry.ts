@@ -1,11 +1,13 @@
 import type { Analyzer } from "./analyzers/port.js";
 import type { Validator } from "../domain/validation/port.js";
+import type { Fixer } from "./fixers/port.js";
 import { SecretScanAnalyzer } from "./analyzers/secret-scan.js";
 import { DestructiveMigrationAnalyzer } from "./analyzers/destructive-migration.js";
 import { DisabledTlsAnalyzer } from "./analyzers/disabled-tls.js";
 import { SecretValidator } from "./validation/secret-validator.js";
 import { MigrationValidator } from "./validation/migration-validator.js";
 import { TlsValidator } from "./validation/tls-validator.js";
+import { TlsFixer } from "./fixers/tls-fixer.js";
 import { CompositeValidator } from "../domain/validation/composite.js";
 
 /**
@@ -44,4 +46,15 @@ export function defaultValidator(): Validator {
     "destructive-schema-change": new MigrationValidator(),
     "disabled-tls-verification": new TlsValidator(),
   });
+}
+
+/**
+ * Fixers indexed by defect class, for nightly fix-PR generation. INVARIANT:
+ * every class in NIGHTLY_FIXABLE_CLASSES must have a fixer here — a fixable class
+ * with no fixer would always downgrade to report, defeating its own eligibility.
+ */
+export function defaultFixers(): Record<string, Fixer> {
+  return {
+    "disabled-tls-verification": new TlsFixer(),
+  };
 }

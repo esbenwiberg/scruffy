@@ -277,7 +277,8 @@ export class RunStore {
     headSha: string;
     decision: NightlyDecision;
     findings: Finding[];
-    effect: OutboxEffect;
+    /** Summary check plus any fix-PR effects; enqueued in the same transaction. */
+    effects: OutboxEffect[];
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
       const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason);
@@ -296,19 +297,14 @@ export class RunStore {
           now,
         ],
       );
-      await client.query(
-        `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
-         values ($1, $2, $3, $4, $5, 'pending', 0, $6)
-         on conflict (run_id, external_id) do nothing`,
-        [
-          this.ids.next("obx"),
-          params.runId,
-          params.effect.effectType,
-          params.effect.externalId,
-          JSON.stringify(params.effect.payload),
-          now,
-        ],
-      );
+      for (const effect of params.effects) {
+        await client.query(
+          `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
+           values ($1, $2, $3, $4, $5, 'pending', 0, $6)
+           on conflict (run_id, external_id) do nothing`,
+          [this.ids.next("obx"), params.runId, effect.effectType, effect.externalId, JSON.stringify(effect.payload), now],
+        );
+      }
 
       if (params.to === "decided") {
         await client.query(
