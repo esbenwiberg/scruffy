@@ -41,6 +41,21 @@ export const NIGHTLY_REPORTABLE_CLASSES = [...POISON_BLOCKABLE_CLASSES, ...MODEL
  */
 export const NIGHTLY_FIXABLE_CLASSES = ["disabled-tls-verification"] as const;
 
+/**
+ * Release-gate class split, by REVERSIBILITY (see ReleasePolicy). A CONFIRMED
+ * stop-class finding in the release range hard-stops publication; anything
+ * serious-but-not-irreversible, or a stop-class finding we could not confirm,
+ * escalates to human sign-off instead of shipping.
+ *
+ * `stop`: a leaked credential (the secret is burned) and silent data
+ * loss/corruption (the data is gone) — no safe reading, no going back.
+ * `sign-off`: disabled TLS verification (a serious regression, but a human may
+ * accept it with context) plus every model-asserted semantic class (uncalibrated,
+ * so it can never auto-stop — a human adjudicates). The lists are disjoint.
+ */
+export const RELEASE_STOP_CLASSES = ["leaked-credential", "destructive-schema-change"] as const;
+export const RELEASE_SIGNOFF_CLASSES = ["disabled-tls-verification", ...MODEL_DEFECT_CLASSES] as const;
+
 export function defaultAnalyzers(): Analyzer[] {
   return [new SecretScanAnalyzer(), new DestructiveMigrationAnalyzer(), new DisabledTlsAnalyzer()];
 }

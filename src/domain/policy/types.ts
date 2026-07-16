@@ -45,10 +45,33 @@ export const NightlyPolicy = z.object({
 });
 export type NightlyPolicy = z.infer<typeof NightlyPolicy>;
 
+/**
+ * Release-gate policy. The release gate is the LAST gate before publication —
+ * it has no deeper gate to escalate to, only a human. Its decision over the whole
+ * (prev-release, candidate] range is one aggregate outcome:
+ * `ship | sign-off-required | stop`. Policy carves the finding space by
+ * REVERSIBILITY:
+ *  - `stopDefectClasses`: irreversible catastrophes (a burned secret, lost data).
+ *    A CONFIRMED one hard-stops the release. Unconfirmed → human sign-off, never a
+ *    fabricated stop.
+ *  - `signoffDefectClasses`: serious but human-adjudicable regressions. Any
+ *    surfaced (non-refuted) one forces sign-off-required.
+ * A class in neither list is release-irrelevant. If a class appears in both, the
+ * more severe `stop` treatment wins (see the kernel). Keep the lists disjoint.
+ */
+export const ReleasePolicy = z.object({
+  /** Confirmed finding of one of these hard-stops the release (irreversible harm). */
+  stopDefectClasses: z.array(z.string().min(1)).readonly(),
+  /** A surfaced finding of one of these forces human sign-off before release. */
+  signoffDefectClasses: z.array(z.string().min(1)).readonly(),
+});
+export type ReleasePolicy = z.infer<typeof ReleasePolicy>;
+
 export const EffectivePolicy = z.object({
   /** Immutable version identity; every decision cites this. */
   version: z.string().min(1),
   poison: PoisonPolicy,
   nightly: NightlyPolicy,
+  release: ReleasePolicy,
 });
 export type EffectivePolicy = z.infer<typeof EffectivePolicy>;

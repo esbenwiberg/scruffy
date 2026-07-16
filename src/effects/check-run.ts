@@ -3,9 +3,11 @@ import { SubjectRevision } from "../domain/evidence/types.js";
 import type { CheckConclusion, CheckRunInput } from "../providers/scm/port.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
+import type { ReleaseDecision } from "../gates/release/decision.js";
 
 export const CHECK_NAME = "scruffy/poison";
 export const NIGHTLY_CHECK_NAME = "scruffy/nightly";
+export const RELEASE_CHECK_NAME = "scruffy/release";
 
 /**
  * Outbox payload for a check-run effect. Persisted JSON is untrusted at the
@@ -63,6 +65,51 @@ export function nightlyToCheck(decision: NightlyDecision): { conclusion: CheckCo
     `reported: ${reported}, proposed fixes: ${proposedFixes}, suppressed: ${suppressed}.`,
     ...(lines.length ? ["", ...lines] : []),
     ...(proposedFixes > 0 ? ["", "Fix PR generation is a later slice; fixes are recorded, not yet opened."] : []),
+  ].join("\n");
+
+  return { conclusion: "neutral", title, summary };
+}
+
+/**
+ * Summarize a release decision for its check run. SHADOW-FIRST: the conclusion is
+ * always `neutral` in the skeleton — the release check is advisory and NEVER
+ * blocks publication yet. The true outcome (ship | sign-off-required | stop) is
+ * recorded in the decision and made loud in the title, so nothing is hidden;
+ * promoting `stop` -> `failure` and wiring the controlled draft-release protocol
+ * is the authoritative-mode follow-up (deferred, ADR 0003 #1 spike territory).
+ */
+export function releaseToCheck(decision: ReleaseDecision): { conclusion: CheckConclusion; title: string; summary: string } {
+  const { stopped, escalated, cleared, notRelevant } = decision.summary;
+  const reviewed = stopped + escalated + cleared + notRelevant;
+
+  let title: string;
+  switch (decision.outcome) {
+    case "stop":
+      title = `Release gate: STOP (${stopped} confirmed blocker${stopped === 1 ? "" : "s"})`;
+      break;
+    case "sign-off-required":
+      title = `Release gate: sign-off required (${escalated} finding${escalated === 1 ? "" : "s"} need human review)`;
+      break;
+    case "ship":
+      title = reviewed === 0 ? "Release gate: ship (clean)" : `Release gate: ship (${reviewed} finding${reviewed === 1 ? "" : "s"} reviewed, none holding)`;
+      break;
+    case "indeterminate":
+      title = "Release gate: abstained (analysis failed)";
+      break;
+    default: {
+      const _exhaustive: never = decision;
+      return _exhaustive;
+    }
+  }
+
+  const lines = decision.dispositions
+    .filter((d) => d.effect === "stops" || d.effect === "escalates")
+    .map((d) => `- [${d.effect}] ${d.defectClass} at ${d.region.path}:${d.region.startLine} (${d.reason})`);
+  const summary = [
+    `outcome: ${decision.outcome}. stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
+    ...(lines.length ? ["", ...lines] : []),
+    "",
+    "Shadow mode: this check is advisory and does not block publication.",
   ].join("\n");
 
   return { conclusion: "neutral", title, summary };

@@ -3,6 +3,7 @@ import type { EvaluationRun, GateKind, RunState } from "../domain/evaluation/typ
 import type { Finding, SubjectRevision } from "../domain/evidence/types.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
+import type { ReleaseDecision } from "../gates/release/decision.js";
 import { withTransaction, type Pool, type PoolClient } from "./db.js";
 
 /**
@@ -109,6 +110,36 @@ export class RunStore {
          set updated_at = evaluation_runs.updated_at
        returning *`,
       [id, head.repository, head.commitSha, baseSha, branch, policyVersion, now],
+    );
+    return toRun(result.rows[0]!);
+  }
+
+  /**
+   * Idempotent release run for the range (prevReleaseSha, candidate]. Identity is
+   * (repository, candidate, kind='release'); the prev-release lower bound is frozen
+   * onto the run via the gate-neutral base_sha so a crashed run reconciles against
+   * the SAME range. branch stays null — release is not branch-scoped (no watermark).
+   *
+   * The range is frozen to the FIRST trigger: re-triggering the same candidate with
+   * a different prevRelease is a no-op on base_sha (only updated_at is touched), and
+   * the original range wins. This is deliberate — reconciliation must re-drive the
+   * exact range the run was created for, not a range that moved underneath it.
+   */
+  async ensureReleaseRun(
+    candidate: SubjectRevision,
+    prevReleaseSha: string | null,
+    policyVersion: string,
+  ): Promise<EvaluationRun> {
+    const now = this.clock.now();
+    const id = this.ids.next("run");
+    const result = await this.pool.query<RunRow>(
+      `insert into evaluation_runs
+         (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch, policy_version, state, attempt, created_at, updated_at)
+       values ($1, 'release', $2, $3, null, $4, null, $5, 'pending', 0, $6, $6)
+       on conflict (repository, commit_sha, kind) do update
+         set updated_at = evaluation_runs.updated_at
+       returning *`,
+      [id, candidate.repository, candidate.commitSha, prevReleaseSha, policyVersion, now],
     );
     return toRun(result.rows[0]!);
   }
@@ -316,6 +347,59 @@ export class RunStore {
           [params.repository, params.branch, params.headSha, now, params.baseSha],
         );
       }
+      return true;
+    });
+  }
+
+  /**
+   * Atomically, for a release run: move analyzing -> terminal, record the
+   * decision and its findings, and enqueue the outbox effect. All-or-nothing —
+   * an external effect can never be recorded without its state change. Mirrors
+   * commitDecision (poison): one aggregate outcome, one advisory check effect.
+   * Release owns no watermark (it is triggered per candidate), so there is
+   * nothing to advance here.
+   */
+  async commitReleaseDecision(params: {
+    runId: string;
+    from: RunState;
+    to: RunState;
+    reason: string;
+    decision: ReleaseDecision;
+    findings: Finding[];
+    effect: OutboxEffect;
+  }): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
+      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason);
+      if (!applied) return false;
+
+      const now = this.clock.now();
+      await client.query(
+        `insert into release_decisions (run_id, outcome, reasons, dispositions, findings, summary, decided_at)
+         values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (run_id) do nothing`,
+        [
+          params.runId,
+          params.decision.outcome,
+          JSON.stringify(params.decision.reasons),
+          JSON.stringify(params.decision.dispositions),
+          JSON.stringify(params.findings),
+          JSON.stringify(params.decision.summary),
+          now,
+        ],
+      );
+      await client.query(
+        `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
+         values ($1, $2, $3, $4, $5, 'pending', 0, $6)
+         on conflict (run_id, external_id) do nothing`,
+        [
+          this.ids.next("obx"),
+          params.runId,
+          params.effect.effectType,
+          params.effect.externalId,
+          JSON.stringify(params.effect.payload),
+          now,
+        ],
+      );
       return true;
     });
   }
