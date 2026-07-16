@@ -51,7 +51,36 @@ export interface CheckRunResult {
   created: boolean;
 }
 
+/** A single line-scoped edit applied by a fix PR. */
+export interface PullRequestEdit {
+  path: string;
+  startLine: number;
+  endLine: number;
+  replacement: string;
+}
+
+export interface PullRequestInput {
+  /** The reviewed head the fix is proposed against. */
+  subject: SubjectRevision;
+  /** Stable idempotency key; re-opening with the same key must not duplicate. */
+  externalId: string;
+  /** Deterministic head branch for the fix. */
+  branch: string;
+  title: string;
+  body: string;
+  edits: PullRequestEdit[];
+}
+
+export interface PullRequestResult {
+  /** Provider PR number/handle. */
+  number: number;
+  /** True when this call opened a new PR; false when it matched an existing one. */
+  created: boolean;
+}
+
 export interface ScmWriter {
   /** Idempotent upsert keyed by (subject, externalId). */
   upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult>;
+  /** Idempotent fix-PR open keyed by externalId. Never auto-merges. */
+  openPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
 }

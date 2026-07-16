@@ -132,6 +132,39 @@ describe("nightly gate over a seeded range", () => {
     expect((await h.scruffy.runs.getWatermark(REPO, BRANCH))?.lastReviewedHead).toBe(H1);
   });
 
+  it("opens a narrow fix PR for a propose_fix finding, alongside the summary check", async () => {
+    h = await bootHarness();
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: null, headSha: H1 }, [FIX_FILE, REPORT_FILE]);
+
+    await h.scruffy.runNightly({ repository: REPO, branch: BRANCH, head: H1 });
+    await h.scruffy.flushEffects();
+
+    // The disabled-TLS finding -> one fix PR; the leaked-credential -> report only.
+    const prs = h.scm.recordedPullRequests();
+    expect(prs).toHaveLength(1);
+    expect(prs[0]!.input.branch).toMatch(/^scruffy\/fix\/disabled-tls-verification\/src-http-ts-L1$/);
+    expect(prs[0]!.input.subject.commitSha).toBe(H1);
+    expect(prs[0]!.input.edits[0]!.replacement).toBe("const agent = new https.Agent({ rejectUnauthorized: true });");
+    expect(prs[0]!.input.body).toMatch(/not\*\* auto-merged/);
+
+    // Summary check still emitted; decision records the proposed fix.
+    expect(nightlyChecks(H1)).toHaveLength(1);
+    expect(await summaryOf(H1)).toEqual({ reported: 1, proposedFixes: 1, suppressed: 0 });
+    expect(await h.scruffy.outbox.countPending()).toBe(0);
+  });
+
+  it("does not open a duplicate PR when effects are re-dispatched", async () => {
+    h = await bootHarness();
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: null, headSha: H1 }, [FIX_FILE]);
+
+    await h.scruffy.runNightly({ repository: REPO, branch: BRANCH, head: H1 });
+    await h.scruffy.flushEffects();
+    await h.scruffy.flushEffects(); // idempotent: nothing left pending, no second PR
+
+    expect(h.scm.recordedPullRequests()).toHaveLength(1);
+    expect(h.scm.recordedPullRequests()[0]!.number).toBe(1);
+  });
+
   it("abandons to indeterminate after retries and leaves the watermark unmoved", async () => {
     h = await bootHarness({ leaseMs: LEASE_MS, maxAttempts: 1 });
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: null, headSha: H1 }, [FIX_FILE]);

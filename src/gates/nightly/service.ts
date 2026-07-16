@@ -2,10 +2,13 @@ import type { EvaluationRun, RunState } from "../../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
+import type { Fixer } from "../../providers/fixers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
-import type { RunStore } from "../../persistence/runs.js";
+import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import type { PullRequestPayload } from "../../effects/pull-request.js";
 import { runNightlyAnalysis } from "./analyze.js";
+import { generateFixes } from "./fix.js";
 import type { NightlyDecision } from "./decision.js";
 
 export interface NightlyServiceDeps {
@@ -13,6 +16,8 @@ export interface NightlyServiceDeps {
   scm: ScmReader;
   analyzers: readonly Analyzer[];
   validator: Validator;
+  /** Fixers indexed by defect class, for propose_fix -> fix-PR generation. */
+  fixers: Record<string, Fixer>;
   policy: EffectivePolicy;
   /** Lease duration for an analysis claim. Default 60s. */
   leaseMs?: number;
@@ -111,15 +116,19 @@ export class NightlyService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision } = await runNightlyAnalysis(range, {
+      const { findings, decision: rawDecision } = await runNightlyAnalysis(range, {
         scm: this.deps.scm,
         analyzers: this.deps.analyzers,
         validator: this.deps.validator,
         policy: this.deps.policy.nightly,
       });
 
+      // Turn propose_fix dispositions into concrete patches; any that cannot be
+      // patched are downgraded to report inside the returned decision.
+      const { decision, fixes } = generateFixes(findings, rawDecision, this.deps.fixers);
+
       const check = nightlyToCheck(decision);
-      const payload: CheckRunPayload = {
+      const checkPayload: CheckRunPayload = {
         subject: run.subject,
         externalId: this.#externalId(run),
         name: NIGHTLY_CHECK_NAME,
@@ -127,19 +136,33 @@ export class NightlyService {
         title: check.title,
         summary: check.summary,
       };
+      const effects: OutboxEffect[] = [
+        { effectType: "check_run", externalId: checkPayload.externalId, payload: checkPayload },
+      ];
+      for (const fix of fixes) {
+        const prPayload: PullRequestPayload = {
+          subject: fix.subject,
+          externalId: fix.branch,
+          branch: fix.branch,
+          title: fix.title,
+          body: fix.body,
+          edits: fix.edits,
+        };
+        effects.push({ effectType: "pull_request", externalId: fix.branch, payload: prPayload });
+      }
 
       await runs.commitNightlyDecision({
         runId: run.id,
         from: "analyzing",
         to: "decided",
-        reason: `nightly reviewed ${decision.summary.reported + decision.summary.proposedFixes} finding(s)`,
+        reason: `nightly reviewed ${decision.summary.reported + decision.summary.proposedFixes} finding(s), ${fixes.length} fix PR(s)`,
         repository: run.subject.repository,
         branch,
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
         decision,
         findings,
-        effect: { effectType: "check_run", externalId: payload.externalId, payload },
+        effects,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -179,7 +202,7 @@ export class NightlyService {
       headSha: run.subject.commitSha,
       decision: empty,
       findings: [],
-      effect: { effectType: "check_run", externalId: payload.externalId, payload },
+      effects: [{ effectType: "check_run", externalId: payload.externalId, payload }],
     });
   }
 

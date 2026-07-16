@@ -3,6 +3,8 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  PullRequestInput,
+  PullRequestResult,
   RevisionRange,
   ScmReader,
   ScmWriter,
@@ -23,7 +25,9 @@ export class FakeScm implements ScmReader, ScmWriter {
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
+  readonly #pullRequests = new Map<string, { number: number; input: PullRequestInput }>();
   #idSeq = 0;
+  #prSeq = 0;
 
   seedChangedFiles(subject: SubjectRevision, files: ChangedFile[]): void {
     this.#files.set(this.#subjectKey(subject), files);
@@ -55,9 +59,26 @@ export class FakeScm implements ScmReader, ScmWriter {
     return { id, created: true };
   }
 
+  async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
+    const existing = this.#pullRequests.get(input.externalId);
+    if (existing) {
+      // Idempotent: keep the number, update the payload, report not-created.
+      this.#pullRequests.set(input.externalId, { number: existing.number, input });
+      return { number: existing.number, created: false };
+    }
+    this.#prSeq += 1;
+    const number = this.#prSeq;
+    this.#pullRequests.set(input.externalId, { number, input });
+    return { number, created: true };
+  }
+
   /** Test/harness introspection. */
   recordedCheckRuns(): { id: string; input: CheckRunInput }[] {
     return [...this.#checkRuns.values()];
+  }
+
+  recordedPullRequests(): { number: number; input: PullRequestInput }[] {
+    return [...this.#pullRequests.values()];
   }
 
   #subjectKey(subject: SubjectRevision): string {
