@@ -86,4 +86,47 @@ export const SEEDED_CORPUS: Corpus = [
     expectedOutcome: "indeterminate",
     provenance: PROV,
   },
+  {
+    // Gold-standard mixed case: a change that hardcodes an AWS access key in a
+    // config file (the real, catastrophic defect) ALONGSIDE a benign helper
+    // (the nitpick). Tests the two things at once — the gate BLOCKS the secret
+    // and does NOT false-block the noise.
+    //
+    // Grounded in a real agent-harness security taxonomy observed in the wild:
+    // a daemon that scans at an inbound checkpoint and BLOCKS on a hardcoded
+    // secret (AWS AKIA-shaped key in a config module), while treating benign
+    // edits as pass. Seeded-mutation, not sanitized-historical: the harness had
+    // NO real merged leak to sanitize (its own pre-push gate prevents them), so
+    // the defect SHAPE is reproduced with 100% invented identifiers and a fresh
+    // fake key that is neither the harness's test fixture nor a canonical docs
+    // example (so it is not refuted as a placeholder).
+    id: "seeded-hardcoded-aws-key-in-config",
+    description:
+      "config change hardcoding an AWS access key (real defect) + a benign string-helper (nitpick) — mixed commit. Must block the secret, not false-block the helper. Modeled on a real agent-harness inbound secret-scan checkpoint.",
+    subject: { repository: "agent-harness/daemon", commitSha: sha(2) },
+    files: [
+      {
+        path: "src/config/credentials.ts",
+        patch: newFile([
+          "// Provisioning credentials for the object-store bridge.",
+          "export const OBJECT_STORE_ACCESS_KEY_ID = 'AKIA7F3QX9RLZ2WK8MTV';",
+          "export const OBJECT_STORE_REGION = 'eu-north-1';",
+        ]),
+      },
+      {
+        // The "nitpick" half: a benign helper with no risky added line -> no finding.
+        path: "src/util/redact.ts",
+        patch: newFile([
+          "export const redact = (s: string): string =>",
+          "  s.length <= 4 ? '****' : `${s.slice(0, 2)}…${s.slice(-2)}`;",
+        ]),
+      },
+    ],
+    truthPoison: true,
+    truthDefectClass: "leaked-credential",
+    // Regression pin: the deterministic AWS-key match is validated (not a known
+    // placeholder) and blocks; the benign helper contributes no finding.
+    expectedOutcome: "block",
+    provenance: PROV,
+  },
 ];

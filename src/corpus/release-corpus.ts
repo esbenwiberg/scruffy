@@ -63,4 +63,29 @@ export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
     expectedOutcome: "sign-off-required",
     provenance: PROV,
   },
+  {
+    // Mirrors a real agent-harness's OUTBOUND push checkpoint: `onSecret: block`
+    // at the boundary entering validation. A release candidate that ships a
+    // hardcoded AWS key is an irreversible leak (the secret is burned) -> STOP.
+    // The harness rewrites block->escalate for interactive "workspace" pods so a
+    // human confirms — the same shape as scruffy's stop vs sign-off-required
+    // split. Here the authoritative case: confirmed secret -> stop. Seeded from
+    // the harness's secret-scan taxonomy; invented identifiers, fresh fake key.
+    id: "release-harness-secret-stop",
+    description:
+      "release candidate shipping a hardcoded AWS key — irreversible leak, must STOP (mirrors a real harness push checkpoint blocking on secrets)",
+    range: { repository: "agent-harness/daemon", baseSha: sha(0x10), headSha: sha(0x11) },
+    files: [
+      {
+        path: "src/config/credentials.ts",
+        patch: newFile([
+          "export const OBJECT_STORE_ACCESS_KEY_ID = 'AKIA7F3QX9RLZ2WK8MTV';",
+          "export const OBJECT_STORE_REGION = 'eu-north-1';",
+        ]),
+      },
+    ],
+    truthOutcome: "stop",
+    expectedOutcome: "stop",
+    provenance: PROV,
+  },
 ];

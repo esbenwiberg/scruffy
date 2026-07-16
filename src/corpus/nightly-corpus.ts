@@ -47,4 +47,28 @@ export const SEEDED_NIGHTLY_CORPUS: NightlyCorpus = [
     expectedSummary: { reported: 0, proposedFixes: 0, suppressed: 0 },
     provenance: PROV,
   },
+  {
+    // A day's range on an agent-harness daemon that merged a hardcoded AWS key
+    // into a config module plus a benign helper. Nightly re-reviews the range:
+    // leaked-credential is REPORTABLE but not a fixable class, so the disposition
+    // is `report` (surfaced for a human), NO fix PR. Modeled on a real harness's
+    // secret-scan taxonomy; invented identifiers, fresh fake key.
+    id: "nightly-harness-secret-range",
+    description:
+      "range merging a hardcoded AWS key into a config module + a benign helper — leaked-credential reports (not a fixable class, so no fix PR); the helper surfaces nothing",
+    range: { repository: "agent-harness/daemon", baseSha: sha(0x10), headSha: sha(0x11) },
+    files: [
+      {
+        path: "src/config/credentials.ts",
+        patch: newFile([
+          "export const OBJECT_STORE_ACCESS_KEY_ID = 'AKIA7F3QX9RLZ2WK8MTV';",
+          "export const OBJECT_STORE_REGION = 'eu-north-1';",
+        ]),
+      },
+      { path: "src/util/redact.ts", patch: newFile(["export const redact = (s: string): string => (s.length <= 4 ? '****' : s.slice(0, 2));"]) },
+    ],
+    expected: [{ defectClass: "leaked-credential", path: "src/config/credentials.ts", disposition: "report" }],
+    expectedSummary: { reported: 1, proposedFixes: 0, suppressed: 0 },
+    provenance: PROV,
+  },
 ];
