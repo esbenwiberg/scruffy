@@ -76,19 +76,37 @@ AI the instant they are fetched, so the rules apply *before* the first fetch:
 A case that cannot pass this preflight never enters the corpus. Silent
 truncation of the rule is the failure mode to avoid.
 
-## Grounded corpus — real defect shape, all three gates
+## Grounded corpus — real defect shapes, all three gates
 
-The first structure-grounded case lives in `src/corpus/grounded.ts`
-(`npm run corpus:grounded`): a **fail-open ownership guard** — a
-`missing-authorization` bypass — modeled on a real merged defect in
-`context-and/portfolio-simulation` (`d745dcf`), rebuilt with invented
-identifiers. It is a *semantic* defect the deterministic analyzers cannot see, so
-it is scored with a deterministic, **offline fake model** wired in, and one
-change is run through all three gates: poison **allows** (out of blocking scope,
+Structure-grounded cases live in `src/corpus/grounded.ts`
+(`npm run corpus:grounded`) — real merged defects, rebuilt with invented
+identifiers. Each is a *semantic* defect the deterministic analyzers cannot see,
+so they are scored with a deterministic, **offline fake model** wired in, and each
+change is run through all three gates. So far:
+
+- **fail-open ownership guard** → `missing-authorization`, grounded in
+  `context-and/portfolio-simulation` `d745dcf`.
+- **null-gated row mapper** → `silent-data-loss` (a mapper returns null on a
+  legitimately-optional field and the loader filters nulls, so rows silently
+  vanish), grounded in `context-and/resource-planner` `bffd1b5`.
+
+Both are model classes, so both map to: poison **allows** (out of blocking scope,
 no false-block), nightly **reports** (model-asserted, not auto-fixed), release
-requires **sign-off** (no silent ship, no fabricated stop). The trust posture is
-enforced by the kernels — a model-asserted finding can never manufacture a poison
-block or a release stop.
+requires **sign-off** (no silent ship, no fabricated stop). That uniformity is an
+honest finding — the source repos merge *semantic* defects (authorization,
+data-loss), not the deterministic-catastrophic classes (leaked secret, dropped
+table), so the grounded set naturally lands in the model-asserted lane. The trust
+posture is enforced by the kernels: a model-asserted finding can never manufacture
+a poison block or a release stop.
+
+## One cross-gate sweep
+
+`npm run corpus:all` runs **every** corpus through its gate in one command — a
+deterministic lane (synthetic + seeded) and a grounded lane (model-backed) per
+gate — and prints one line per (gate, lane) plus an overall verdict. It exits
+non-zero on any false-block, unsafe release ship, or regression. The per-gate
+scripts (`corpus`, `corpus:nightly`, `corpus:release`, `corpus:grounded`) remain
+for the full confusion matrices.
 
 # What a "case" is, per gate
 
