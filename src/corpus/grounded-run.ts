@@ -21,31 +21,23 @@ import {
 } from "./grounded.js";
 
 /**
- * `npm run corpus:grounded` — replays the ONE grounded, real-defect-shaped change
- * (a fail-open ownership guard) through all three gates with a deterministic,
- * offline model wired in, and prints what each gate decides. This is the corpus
- * that exercises scruffy's SEMANTIC detection path (the model analyzer); the other
- * three corpus runs are deterministic-only by design.
+ * `npm run corpus:grounded` — replays every grounded, real-defect-shaped change
+ * through all three gates with a deterministic, offline model wired in, and prints
+ * what each gate decides per case. This is the corpus that exercises scruffy's
+ * SEMANTIC detection path (the model analyzer); the other corpus runs are
+ * deterministic-only by design.
  *
  * Exits non-zero on any regression, or if the release gate unsafely ships.
  */
 
-const POISON_POLICY: PoisonPolicy = {
-  blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES],
-  requireValidation: true,
-};
+const POISON_POLICY: PoisonPolicy = { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true };
 const NIGHTLY_POLICY: NightlyPolicy = {
   reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
   fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
 };
-const RELEASE_POLICY: ReleasePolicy = {
-  stopDefectClasses: [...RELEASE_STOP_CLASSES],
-  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
-};
+const RELEASE_POLICY: ReleasePolicy = { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] };
 
 async function main(): Promise<void> {
-  // A fresh fake model per gate; each returns the same canned finding, anchored
-  // to the grounded change only.
   const poison = await replayCorpus(GROUNDED_POISON_CORPUS, {
     analyzers: [...defaultAnalyzers(), ...modelAnalyzers(groundedModel())],
     validator: defaultValidator(),
@@ -63,19 +55,25 @@ async function main(): Promise<void> {
     policy: RELEASE_POLICY,
   });
 
-  const poisonCase = poison.cases[0]!;
-  const nightlyCase = nightly.cases[0]!;
-  const releaseCase = release.cases[0]!;
+  const poisonById = new Map(poison.cases.map((c) => [c.id, c]));
+  const nightlyById = new Map(nightly.cases.map((c) => [c.id, c]));
+  const releaseById = new Map(release.cases.map((c) => [c.id, c]));
 
-  console.log("Grounded replay — one real merged defect (fail-open ownership guard), scored by all three gates.");
-  console.log("Grounding: seeded-mutation shape of a real merged defect (context-and/portfolio-simulation d745dcf); invented identifiers.\n");
+  console.log(`Grounded replay — ${GROUNDED_POISON_CORPUS.length} real merged defect(s), each scored by all three gates.`);
+  console.log("Grounding: seeded-mutation shapes of real merged defects (context-and repos); invented identifiers, no real bytes.\n");
 
-  console.log("Per-gate outcome (defect class: missing-authorization, model-asserted):");
-  console.log(`  poison   -> ${poisonCase.outcome.padEnd(18)} (out of blocking scope; no false-block)`);
-  console.log(`  nightly  -> ${(nightlyCase.correct === 1 ? "report" : "MISHANDLED").padEnd(18)} (surfaced for a human; not auto-fixed)`);
-  console.log(`  release  -> ${releaseCase.outcome.padEnd(18)} (human sign-off; no silent ship, no fabricated stop)`);
+  for (const c of GROUNDED_POISON_CORPUS) {
+    const p = poisonById.get(c.id)!;
+    const n = nightlyById.get(c.id)!;
+    const r = releaseById.get(c.id)!;
+    const nightlyOutcome = n.correct === 1 && n.falseSurface === 0 ? "report" : "MISHANDLED";
+    console.log(`${c.id}  (${c.provenance.sourceRepo} ${(c.provenance.sourceRef ?? "").split(" ")[0]})`);
+    console.log(`  poison   -> ${p.outcome.padEnd(18)} (out of blocking scope; no false-block)`);
+    console.log(`  nightly  -> ${nightlyOutcome.padEnd(18)} (surfaced for a human; not auto-fixed)`);
+    console.log(`  release  -> ${r.outcome.padEnd(18)} (human sign-off; no silent ship, no fabricated stop)\n`);
+  }
 
-  console.log("\nSafety checks:");
+  console.log("Safety checks:");
   console.log(`  poison false-block      ${poison.confusion.false_block}`);
   console.log(`  nightly false-surface   ${nightly.totals.falseSurface}`);
   console.log(`  release unsafe ships    ${release.metrics.unsafeShips}`);
@@ -89,10 +87,10 @@ async function main(): Promise<void> {
   if (regressions.length > 0 || release.metrics.unsafeShips > 0) {
     console.log("\nFAIL:");
     for (const r of regressions) console.log(`  [${r.gate}] regression: ${JSON.stringify(r)}`);
-    if (release.metrics.unsafeShips > 0) console.log(`  release unsafely shipped a possible auth bypass`);
+    if (release.metrics.unsafeShips > 0) console.log(`  release unsafely shipped a possible regression`);
     process.exitCode = 1;
   } else {
-    console.log("\nNo regressions. Each gate handled the grounded defect per its role.");
+    console.log("\nNo regressions. Every gate handled every grounded defect per its role.");
   }
 }
 
