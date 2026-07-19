@@ -17,6 +17,7 @@
     "corpus:nightly": "tsx src/corpus/nightly-run.ts",
     "corpus:release": "tsx src/corpus/release-run.ts",
     "corpus:grounded": "tsx src/corpus/grounded-run.ts",
+    "corpus:grounded:live": "tsx src/corpus/grounded-live-run.ts",
     "corpus:all": "tsx src/corpus/all-run.ts",
     "llm-smoke": "tsx scripts/llm-smoke.ts",
     "db:up": "docker compose up -d db && node scripts/wait-for-db.mjs",

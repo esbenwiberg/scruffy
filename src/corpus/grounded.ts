@@ -47,7 +47,7 @@ function sha(prefix: string, n: number): string {
 }
 
 /** One model-analyzer finding, kept as data so a fake model can replay it offline. */
-interface ModelSeed {
+export interface ModelSeed {
   class: string;
   path: string;
   line: number;
@@ -59,7 +59,7 @@ interface ModelSeed {
  * it. The `files` carry the (invented) change; `modelSeed` is what a correct model
  * reviewer returns, anchored to a real added line so the analyzer accepts it.
  */
-interface GroundedSpec {
+export interface GroundedSpec {
   id: string;
   repository: string;
   description: string;
@@ -206,7 +206,9 @@ const DATALOSS_SPEC: GroundedSpec = {
   releaseTruth: "sign-off-required",
 };
 
-const GROUNDED_SPECS: readonly GroundedSpec[] = [AUTH_SPEC, DATALOSS_SPEC];
+/** Exported so the LIVE grounded run (grounded-live-run.ts) can compare what a
+ * real model finds against each case's seeded ground truth. */
+export const GROUNDED_SPECS: readonly GroundedSpec[] = [AUTH_SPEC, DATALOSS_SPEC];
 
 /**
  * A deterministic, offline fake model seeded to return EVERY grounded finding for
