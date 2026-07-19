@@ -99,6 +99,37 @@ table), so the grounded set naturally lands in the model-asserted lane. The trus
 posture is enforced by the kernels: a model-asserted finding can never manufacture
 a poison block or a release stop.
 
+## Grounded corpus, LIVE — a real model instead of the seeded fake
+
+`npm run corpus:grounded:live` (`src/corpus/grounded-live-run.ts`) replays the
+same grounded cases with a **real model** wired into the model analyzer —
+defaults to the `claude` CLI backend; `SCRUFFY_MODEL_BACKEND=anthropic|azure`
+overrides, `SCRUFFY_CLAUDE_CLI_MODEL` pins the CLI model. It first scores raw
+model-analyzer recall against each case's seeded truth (match key: class +
+path), then replays all three gates with the same responses memoized (one model
+call per case). It is a manually-run probe, not a CI gate: a live model is
+non-deterministic, so the nightly exact-count summary pins are dropped and
+extra findings are reported rather than failed. It exits non-zero when the
+thesis fails: a seeded defect missed, a poison false-block, an unsafe release
+ship, or a gate-outcome regression.
+
+First live results (2026-07-19, `claude` CLI; default model and `opus` both):
+
+- **fail-open ownership guard → CAUGHT** by both models. The default model
+  anchored the seeded line exactly; opus instead reported a *different, also
+  real* `missing-authorization` defect in the same seeded guard (`update()`
+  authorizes against the caller-supplied `doc.ownerId` without fetching the
+  stored record). Nightly matches on (class, path), so both count — and the
+  second defect is a finding about the seeded code itself.
+- **null-gated row mapper → MISSED** by both models (clean `[]`). The ground
+  truth ("ownerId is legitimately optional") is domain knowledge that is *not
+  visible in the added lines* — the diff's own comment says the null-gate skips
+  "malformed rows". With the defect missed, nightly surfaces nothing and the
+  release gate ships: measured evidence that the added-lines-only prompt bounds
+  what the model analyzer can catch, and that context-dependent semantic
+  defects escape all three gates. Widening analyzer context (surrounding file
+  content, referenced types) is the concrete next lever this measures.
+
 ## One cross-gate sweep
 
 `npm run corpus:all` runs **every** corpus through its gate in one command — a
