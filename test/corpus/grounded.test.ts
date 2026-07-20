@@ -25,11 +25,11 @@ import {
 import type { PoisonPolicy, NightlyPolicy, ReleasePolicy } from "../../src/domain/policy/types.js";
 
 /**
- * The grounded corpus is a set of real merged defects (fail-open ownership guard =
- * missing-authorization; null-gated row mapper = silent-data-loss) reproduced from
- * scratch and scored by all three gates with a deterministic, offline model wired
- * in. These tests pin that EVERY grounded case makes each gate do its own job, and
- * that a model finding never leaks beyond the line it anchors to.
+ * The grounded corpus is a set of real merged defects — two silent-data-loss
+ * shapes (a paginated read that drops pages; a null-gated row mapper) — reproduced
+ * from scratch and scored by all three gates with a deterministic, offline model
+ * wired in. These tests pin that EVERY grounded case makes each gate do its own
+ * job, and that a model finding never leaks beyond the line it anchors to.
  */
 
 const POISON_POLICY: PoisonPolicy = { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true };

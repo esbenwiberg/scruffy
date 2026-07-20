@@ -14,22 +14,29 @@ import { PROMPT_VERSION } from "../providers/analyzers/model-analyzer.js";
  * is auditable. See docs/product/gate-validation-corpus.md and the walking-skeleton
  * memory's "seeded-mutation, not sanitize-in-place" lesson.
  *
+ * WHY BOTH CASES ARE silent-data-loss (an honest finding, not a gap we hid): the
+ * source repos are client-side Dataverse apps. Their authorization is enforced by
+ * the platform's server-side security roles, and their OData filters are encoded —
+ * so the model taxonomy's other classes (missing-authorization, sql-injection, ...)
+ * simply do not show up as app-code defects there. We hunted for a clean shipped
+ * missing-authorization and an injection; neither existed. The class these apps
+ * DO merge is silent data loss, so that is what we grounded on — two different
+ * shapes of it. Class diversity beyond this needs a different KIND of repo (a
+ * backend service), not a fabricated case.
+ *
  * These are SEMANTIC defects the deterministic line-pattern analyzers cannot see,
  * so they are scored with a deterministic, OFFLINE fake model wired in
- * ({@link groundedModel}). That is also an honest finding about the source repos:
- * the defects they actually merge are semantic (authorization, data-loss), not the
- * deterministic-catastrophic classes (leaked secret, dropped table) — so the
- * grounded set naturally lands in the model-asserted lane, which maps to
- * allow / report / sign-off-required across the three gates.
+ * ({@link groundedModel}). Each defect was verified detectable by a REAL model via
+ * `npm run corpus:grounded:live` — a case is only fair if its defect is evident in
+ * the diff itself, not dependent on out-of-band domain knowledge.
  *
- * Each gate does its own job on one change:
- *  - poison  -> allow  : a model class is out of poison's blocking scope (never a
- *                        POISON_BLOCKABLE class). Poison does not overreach into
- *                        semantic territory, and — the point — does NOT false-block.
+ * Each gate does its own job on one change (silent-data-loss is a MODEL class):
+ *  - poison  -> allow  : out of poison's blocking scope (never a POISON_BLOCKABLE
+ *                        class). No overreach, and — the point — no false-block.
  *  - nightly -> report : reportable, model-asserted, not a fixable class -> surfaced
  *                        for a human, never auto-fixed.
  *  - release -> sign-off-required : the last gate cannot silently ship a possible
- *                        serious regression, and cannot fabricate a `stop` on a
+ *                        data-loss regression, and cannot fabricate a `stop` on a
  *                        model-only signal, so it forces human sign-off.
  *
  * Trust posture (enforced by the kernels, not by hoping the model is calibrated):
@@ -70,77 +77,68 @@ interface GroundedSpec {
   releaseTruth: ReleaseCase["truthOutcome"];
 }
 
-// ── Case 1: fail-open ownership guard → missing-authorization ────────────────
-// Grounded in context-and/portfolio-simulation d745dcf: an `assertOwner` guard
-// that returns early on an empty principal, so a caller with no bound actor skips
-// the ownership check and can mutate another user's record. Rebuilt here as an
-// `ensureOwner` guard over a document store; the fail-open line is line 12.
-const AUTH_GUARD_PATH = "src/workspace/document-store.ts";
-const AUTH_SPEC: GroundedSpec = {
-  id: "grounded-fail-open-ownership-guard",
-  repository: "acme/workspace",
+// ── Case 1: paginated read drops pages → silent-data-loss ────────────────────
+// Grounded in context-and/portfolio-simulation 1657900: a Dataverse fetch client
+// read `data.value` and IGNORED `@odata.nextLink`, so any result set larger than
+// one page was silently truncated (the fix made it throw rather than drop pages).
+// Rebuilt here as `fetchRecords`, which returns the first page's `value` and never
+// follows `nextLink`; the Page type documents that nextLink means "more records
+// remain", so the loss is visible in the diff. The bug line is line 17.
+const FETCH_PATH = "src/import/fetch-records.ts";
+const PAGES_SPEC: GroundedSpec = {
+  id: "grounded-paginated-read-drops-pages",
+  repository: "acme/import-pipeline",
   description:
-    "an ownership guard that fails open on an empty principal (missing-authorization) + a benign formatter (mixed commit)",
+    "a paginated API read that returns only the first page and ignores the next-page link, silently dropping every record beyond it (silent-data-loss) + a benign query-string helper (mixed commit)",
   files: [
     {
-      path: AUTH_GUARD_PATH,
+      path: FETCH_PATH,
       patch: newFile([
-        'import type { WorkspaceDoc } from "./types.js";',
+        'import type { HttpClient } from "./types.js";',
         "",
-        "interface Backend {",
-        "  get(id: string): Promise<WorkspaceDoc>;",
-        "  put(doc: WorkspaceDoc): Promise<void>;",
-        "  remove(id: string): Promise<void>;",
+        "interface ApiRecord {",
+        "  id: string;",
+        "  name: string;",
         "}",
         "",
-        "export function createDocStore(actorId: string, backend: Backend) {",
-        "  function ensureOwner(doc: WorkspaceDoc): void {",
-        "    // No actor bound to this session — skip the ownership check.",
-        "    if (!actorId) return;",
-        "    if (doc.ownerId !== actorId) {",
-        '      throw new Error("permission denied");',
-        "    }",
-        "  }",
+        "interface Page {",
+        "  value: ApiRecord[];",
+        "  nextLink?: string; // set when more records remain server-side",
+        "}",
         "",
-        "  return {",
-        "    async update(doc: WorkspaceDoc) {",
-        "      ensureOwner(doc);",
-        "      await backend.put(doc);",
-        "    },",
-        "    async remove(id: string) {",
-        "      const doc = await backend.get(id);",
-        "      ensureOwner(doc);",
-        "      await backend.remove(id);",
-        "    },",
-        "  };",
+        "// Reads all records for an entity from the paginated API.",
+        "export async function fetchRecords(http: HttpClient, entity: string): Promise<ApiRecord[]> {",
+        "  const res = await http.get(`/api/${entity}?$select=id,name`);",
+        "  const page = (await res.json()) as Page;",
+        "  return page.value;",
         "}",
       ]),
     },
     {
-      // The "nitpick" half of a mixed commit: a benign formatter, no risky line.
-      path: "src/workspace/format.ts",
+      // The "nitpick" half of a mixed commit: a benign query-string helper.
+      path: "src/import/qs.ts",
       patch: newFile([
-        "export const titleCase = (s: string): string =>",
-        "  s.replace(/\\w\\S*/g, (w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase());",
+        "export const qs = (params: Record<string, string>): string =>",
+        "  Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join(\"&\");",
       ]),
     },
   ],
   modelSeed: {
-    class: "missing-authorization",
-    path: AUTH_GUARD_PATH,
-    line: 12, // `if (!actorId) return;`
+    class: "silent-data-loss",
+    path: FETCH_PATH,
+    line: 17, // `return page.value;`
     reason:
-      "ensureOwner returns early when actorId is empty, so a caller with no bound actor bypasses the ownership check and can update or delete another user's document.",
+      "Page.nextLink signals that more records remain server-side, but fetchRecords returns only page.value from the first response and never follows nextLink, so every record beyond the first page is silently dropped with no error.",
   },
   provenance: {
     source: "seeded-mutation",
     author: "ewi",
-    createdAt: "2026-07-16",
+    createdAt: "2026-07-20",
     grounding: "real-merged-defect",
     sourceRepo: "context-and/portfolio-simulation",
-    sourceRef: "d745dcf — assertOwner ownership guard (fail-open on empty principal)",
+    sourceRef: "1657900 — fetch client ignored @odata.nextLink (pages silently dropped)",
   },
-  nightlyExpected: [{ defectClass: "missing-authorization", path: AUTH_GUARD_PATH, disposition: "report" }],
+  nightlyExpected: [{ defectClass: "silent-data-loss", path: FETCH_PATH, disposition: "report" }],
   releaseTruth: "sign-off-required",
 };
 
@@ -148,7 +146,9 @@ const AUTH_SPEC: GroundedSpec = {
 // Grounded in context-and/resource-planner bffd1b5: `mapPropose` returned null
 // when a legitimately-nullable field (the resource bind) was absent, and the
 // loader filtered nulls out — so contract-level rows were silently dropped from
-// boot data. Rebuilt here as `mapEntry`/`loadEntries`; the null-gate is line 13.
+// boot data. Rebuilt here as `mapEntry`/`loadEntries` with Entry.ownerId typed
+// string | null so the optionality — and thus the data loss — is visible in the
+// diff itself; the null-gate is line 18.
 const MAPPER_PATH = "src/import/map-entry.ts";
 const DATALOSS_SPEC: GroundedSpec = {
   id: "grounded-null-gated-row-mapper",
@@ -159,14 +159,19 @@ const DATALOSS_SPEC: GroundedSpec = {
     {
       path: MAPPER_PATH,
       patch: newFile([
-        'import type { Row, Entry } from "./types.js";',
+        'import type { Row } from "./types.js";',
+        "",
+        "export interface Entry {",
+        "  id: string;",
+        "  ownerId: string | null; // null = unassigned; a legitimate, expected state",
+        "  groupId: string;",
+        "}",
         "",
         "function lookup(row: Row, key: string): string | null {",
         "  const v = row[key];",
         '  return typeof v === "string" ? v : null;',
         "}",
         "",
-        "// Maps a raw import row to an Entry, or null to skip malformed rows.",
         "export function mapEntry(row: Row): Entry | null {",
         '  const id = lookup(row, "id");',
         '  const ownerId = lookup(row, "owner");',
@@ -176,7 +181,7 @@ const DATALOSS_SPEC: GroundedSpec = {
         "}",
         "",
         "export function loadEntries(rows: Row[]): Entry[] {",
-        "  // A malformed row should not abort the whole import — skip it.",
+        "  // Skip malformed rows so one bad row cannot abort the whole import.",
         "  return rows.map(mapEntry).filter((e): e is Entry => e !== null);",
         "}",
       ]),
@@ -190,9 +195,9 @@ const DATALOSS_SPEC: GroundedSpec = {
   modelSeed: {
     class: "silent-data-loss",
     path: MAPPER_PATH,
-    line: 13, // `if (!id || !ownerId || !groupId) return null;`
+    line: 18, // `if (!id || !ownerId || !groupId) return null;`
     reason:
-      "ownerId is legitimately optional (an entry can be unassigned), but mapEntry returns null when it is absent and loadEntries filters nulls out, so every unassigned entry is silently dropped from the import with no error.",
+      "Entry.ownerId is typed string | null (unassigned is a legitimate state), but mapEntry returns null when ownerId is absent and loadEntries filters nulls out, so every unassigned entry is silently dropped from the import with no error.",
   },
   provenance: {
     source: "seeded-mutation",
@@ -206,7 +211,7 @@ const DATALOSS_SPEC: GroundedSpec = {
   releaseTruth: "sign-off-required",
 };
 
-const GROUNDED_SPECS: readonly GroundedSpec[] = [AUTH_SPEC, DATALOSS_SPEC];
+const GROUNDED_SPECS: readonly GroundedSpec[] = [PAGES_SPEC, DATALOSS_SPEC];
 
 /**
  * A deterministic, offline fake model seeded to return EVERY grounded finding for
@@ -219,6 +224,26 @@ export function groundedModel(): FakeModelProvider {
   const seeds = GROUNDED_SPECS.map((s) => s.modelSeed);
   return new FakeModelProvider({ [PROMPT_VERSION]: JSON.stringify(seeds) });
 }
+
+/**
+ * The detection "answer key" for a LIVE model run: per case, the change to review
+ * and the finding a correct model should produce. Used by the grounded-live script
+ * to test whether a REAL model independently catches each defect — the fake-model
+ * corpus only proves kernel routing, not detection.
+ */
+export interface GroundedDetectionTarget {
+  id: string;
+  subject: { repository: string; commitSha: string };
+  files: { path: string; patch: string }[];
+  expect: { defectClass: string; path: string; line: number };
+}
+
+export const GROUNDED_DETECTION_TARGETS: readonly GroundedDetectionTarget[] = GROUNDED_SPECS.map((s) => ({
+  id: s.id,
+  subject: { repository: s.repository, commitSha: sha("a", 1) },
+  files: s.files,
+  expect: { defectClass: s.modelSeed.class, path: s.modelSeed.path, line: s.modelSeed.line },
+}));
 
 export const GROUNDED_POISON_CORPUS: Corpus = GROUNDED_SPECS.map((s) => ({
   id: s.id,
