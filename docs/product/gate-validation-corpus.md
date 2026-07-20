@@ -82,22 +82,34 @@ Structure-grounded cases live in `src/corpus/grounded.ts`
 (`npm run corpus:grounded`) — real merged defects, rebuilt with invented
 identifiers. Each is a *semantic* defect the deterministic analyzers cannot see,
 so they are scored with a deterministic, **offline fake model** wired in, and each
-change is run through all three gates. So far:
+change is run through all three gates. So far, two `silent-data-loss` shapes:
 
-- **fail-open ownership guard** → `missing-authorization`, grounded in
-  `context-and/portfolio-simulation` `d745dcf`.
-- **null-gated row mapper** → `silent-data-loss` (a mapper returns null on a
-  legitimately-optional field and the loader filters nulls, so rows silently
-  vanish), grounded in `context-and/resource-planner` `bffd1b5`.
+- **paginated read drops pages** — a fetch client returns the first page and
+  ignores the next-page link, silently truncating large result sets. Grounded in
+  `context-and/portfolio-simulation` `1657900`.
+- **null-gated row mapper** — a mapper returns null on a legitimately-optional
+  field and the loader filters nulls, so those rows silently vanish. Grounded in
+  `context-and/resource-planner` `bffd1b5`.
 
-Both are model classes, so both map to: poison **allows** (out of blocking scope,
-no false-block), nightly **reports** (model-asserted, not auto-fixed), release
-requires **sign-off** (no silent ship, no fabricated stop). That uniformity is an
-honest finding — the source repos merge *semantic* defects (authorization,
-data-loss), not the deterministic-catastrophic classes (leaked secret, dropped
-table), so the grounded set naturally lands in the model-asserted lane. The trust
-posture is enforced by the kernels: a model-asserted finding can never manufacture
-a poison block or a release stop.
+Why both are the same class is an **honest finding**: the source repos are
+client-side Dataverse apps whose authorization is server-side (platform security
+roles) and whose OData filters are encoded — so the model taxonomy's other classes
+(`missing-authorization`, `sql-injection`, …) do not appear as app-code defects
+there. We hunted for a clean shipped missing-authorization and an injection; neither
+existed. The class these apps do merge is silent data loss, so that is what we
+grounded on. Real class diversity needs a different KIND of repo (a backend
+service), not a fabricated case. All three gates: poison **allows** (out of blocking
+scope, no false-block), nightly **reports** (model-asserted, not auto-fixed), release
+requires **sign-off** — the kernels ensure a model-asserted finding can never
+manufacture a poison block or a release stop.
+
+**Live-model check.** `npm run corpus:grounded:live` runs the grounded changes
+through a REAL model (claude-cli by default) and reports whether it independently
+catches each defect. This exists because the fake-model corpus only proves the
+kernels ROUTE a finding correctly — not that a model FINDS the defect. A case is
+only fair if its defect is evident in the diff itself; an earlier fail-open
+ownership case was dropped precisely because the real model (reasonably) would not
+flag an ambiguous, intentionally-merged no-op.
 
 ## One cross-gate sweep
 
