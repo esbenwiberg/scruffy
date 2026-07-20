@@ -220,6 +220,26 @@ export function groundedModel(): FakeModelProvider {
   return new FakeModelProvider({ [PROMPT_VERSION]: JSON.stringify(seeds) });
 }
 
+/**
+ * The detection "answer key" for a LIVE model run: per case, the change to review
+ * and the finding a correct model should produce. Used by the grounded-live script
+ * to test whether a REAL model independently catches each defect — the fake-model
+ * corpus only proves kernel routing, not detection.
+ */
+export interface GroundedDetectionTarget {
+  id: string;
+  subject: { repository: string; commitSha: string };
+  files: { path: string; patch: string }[];
+  expect: { defectClass: string; path: string; line: number };
+}
+
+export const GROUNDED_DETECTION_TARGETS: readonly GroundedDetectionTarget[] = GROUNDED_SPECS.map((s) => ({
+  id: s.id,
+  subject: { repository: s.repository, commitSha: sha("a", 1) },
+  files: s.files,
+  expect: { defectClass: s.modelSeed.class, path: s.modelSeed.path, line: s.modelSeed.line },
+}));
+
 export const GROUNDED_POISON_CORPUS: Corpus = GROUNDED_SPECS.map((s) => ({
   id: s.id,
   description: `${s.description}. Poison scope: NOT a blockable class — poison must ALLOW without false-blocking; the semantic defect is left to nightly/release.`,
