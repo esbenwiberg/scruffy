@@ -14,12 +14,12 @@ import type { Finding } from "../evidence/types.js";
 
 /**
  * Stable identity key for a finding. Same defect -> same key across analyses.
- * Components are joined with a space; none of them (defect class, rule id,
- * normalized path, line numbers) contains whitespace, so the join is unambiguous.
+ * Components are JSON-encoded as an array so the key is unambiguous even if a
+ * path contains whitespace (a space-join would alias `"a b" 1` with `"a" "b 1"`).
  */
 export function findingKey(finding: Finding): string {
   const { path, startLine, endLine } = finding.primaryRegion;
-  return [finding.defectClass, finding.ruleId, path, String(startLine), String(endLine)].join(" ");
+  return JSON.stringify([finding.defectClass, finding.ruleId, path, startLine, endLine]);
 }
 
 /**

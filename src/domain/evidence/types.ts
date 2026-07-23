@@ -39,7 +39,10 @@ export type ValidationOutcome = z.infer<typeof ValidationOutcome>;
 
 /** Immutable identification of the subject a finding was produced against. */
 export const SubjectRevision = z.object({
-  repository: z.string().min(1), // "owner/name"
+  // Exactly two non-empty, slash-free segments — "owner/name". Enforced (not just
+  // documented) because this value is interpolated into `gh api` URL paths, where
+  // an extra segment or "../" would retarget a different endpoint.
+  repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/, "must be owner/name"),
   commitSha: z.string().regex(/^[0-9a-f]{40}$/, "must be a full 40-char sha"),
 });
 export type SubjectRevision = z.infer<typeof SubjectRevision>;

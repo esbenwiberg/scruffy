@@ -121,7 +121,12 @@ export async function replayCorpus(corpus: readonly LabeledCase[], deps: ReplayD
       const cls = c.truthDefectClass ?? "unclassified";
       const entry = (byDefectClass[cls] ??= { positives: 0, caught: 0, missed: 0, abstained: 0 });
       entry.positives += 1;
-      if (bucket === "true_block") entry.caught += 1;
+      // Credit a catch to this class ONLY when the block was actually for this
+      // class. A case blocked by an incidental finding of a DIFFERENT class is a
+      // block, but it does not demonstrate recall for the labeled defect.
+      const blockedForThisClass =
+        decision.outcome === "block" && decision.dispositions.some((d) => d.effect === "blocks" && d.defectClass === cls);
+      if (bucket === "true_block" && blockedForThisClass) entry.caught += 1;
       else if (bucket === "missed") entry.missed += 1;
       else if (bucket === "abstain_on_poison") entry.abstained += 1;
     }

@@ -164,11 +164,16 @@ export async function replayNightlyCorpus(
   // with no expected counterpart (falseSurface) and the ones at an expected
   // location but with the wrong disposition (wrongDisposition).
   const surfacedMatched = totals.actualSurfaced - totals.falseSurface - totals.wrongDisposition;
+  // Recall must be measured against the EXPECTED set, not the actual one: an
+  // expected surfaced finding was recalled iff it was surfaced (i.e. not missed).
+  // Deriving it from actualSurfaced let duplicate findings at one (class,path)
+  // push recall above 100%.
+  const recalledExpected = totals.expectedSurfaced - totals.missed;
   const expectedTotal = corpus.reduce((n, c) => n + c.expected.length, 0);
 
   const metrics = {
     surfacePrecision: totals.actualSurfaced === 0 ? null : surfacedMatched / totals.actualSurfaced,
-    surfaceRecall: totals.expectedSurfaced === 0 ? null : surfacedMatched / totals.expectedSurfaced,
+    surfaceRecall: totals.expectedSurfaced === 0 ? null : recalledExpected / totals.expectedSurfaced,
     dispositionAccuracy: expectedTotal === 0 ? null : totals.correct / expectedTotal,
     fixGenerationRate: totals.fixesExpected === 0 ? null : totals.fixesGenerated / totals.fixesExpected,
   };

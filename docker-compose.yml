@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: scruffy
       POSTGRES_DB: scruffy
     ports:
-      - "5433:5432"
+      # Bind to loopback only — a dev DB should not be reachable from the LAN.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scruffy -d scruffy"]
       interval: 2s
