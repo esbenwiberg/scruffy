@@ -97,6 +97,35 @@ describe("GhCliScm reader", () => {
     const scm = new GhCliScm({ runGh });
     await expect(scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/cap|too large/i);
   });
+
+  it("THROWS when a text file has added lines but no patch (too large to diff — must abstain, not scan clean)", async () => {
+    const page = JSON.stringify([{ files: [{ filename: "huge.sql", additions: 5000 }] }]); // no patch
+    const { runGh } = stub([{ match: isCompare, reply: page }]);
+    const scm = new GhCliScm({ runGh });
+    await expect(scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/no patch|too large/i);
+  });
+
+  it("does NOT throw for binary/rename files (no added lines, no patch)", async () => {
+    const page = JSON.stringify([{ files: [{ filename: "logo.png", additions: 0 }, { filename: "moved.ts" }] }]);
+    const { runGh } = stub([{ match: isCompare, reply: page }]);
+    const scm = new GhCliScm({ runGh });
+    const files = await scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD });
+    expect(files).toEqual([
+      { path: "logo.png", patch: "" },
+      { path: "moved.ts", patch: "" },
+    ]);
+  });
+
+  it("ignores a closed-only PR and scans the commit itself (stale base would be wrong)", async () => {
+    const { runGh, calls } = stub([
+      { match: isPulls, reply: JSON.stringify([{ state: "closed", base: { sha: BASE } }]) },
+      { match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)), reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }) },
+    ]);
+    const scm = new GhCliScm({ runGh });
+    const files = await scm.getChangedFiles(SUBJECT);
+    expect(files.map((f) => f.path)).toEqual(["a.ts"]);
+    expect(calls.some(isCompare)).toBe(false); // never compared against the closed PR's base
+  });
 });
 
 describe("GhCliScm writer (check-run effect -> commit status)", () => {

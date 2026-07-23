@@ -42,31 +42,71 @@ const COMPARE_FILE_CAP = 300;
 /** GitHub commit-status description max length. */
 const STATUS_DESC_MAX = 140;
 
+/** Hard wall-clock cap on a `gh` invocation. A wedged network must fail the read
+ * (→ the gate abstains) rather than hang the blocking poison path forever. */
+const GH_TIMEOUT_MS = 60_000;
+
 function defaultRunGh(args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("gh", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (c) => (stdout += c.toString()));
-    child.stderr.on("data", (c) => (stderr += c.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim() || "no stderr"}`));
-    });
+    let settled = false;
+    // Decode as UTF-8 per chunk so a multibyte character split across a chunk
+    // boundary is not corrupted into U+FFFD (would corrupt patch/snippet text).
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle(() => reject(new Error(`gh ${args.join(" ")} timed out after ${GH_TIMEOUT_MS}ms`)));
+    }, GH_TIMEOUT_MS);
+
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("error", (err) => settle(() => reject(err)));
+    // If the child dies before consuming stdin, the write raises EPIPE as an
+    // 'error' on the stdin stream; without a listener Node throws and kills the
+    // whole process, bypassing the gate's abstain-on-failure discipline.
+    child.stdin.on("error", (err) => settle(() => reject(err)));
+    child.on("close", (code) =>
+      settle(() => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim() || "no stderr"}`));
+      }),
+    );
     child.stdin.end(stdin ?? "");
   });
 }
 
 /** A GitHub file entry from a compare/commit response. `patch` is omitted for
- * binary, over-size, and pure-rename files — callers must default it to "". */
+ * binary and pure-rename files (which have no added lines) AND for text files
+ * whose diff GitHub dropped for being too large. `additions` distinguishes them:
+ * a file with added lines but no patch is a truncated read we must not scan. */
 interface GhFile {
   filename: string;
   patch?: string;
+  additions?: number;
 }
 
 function mapFiles(files: GhFile[]): ChangedFile[] {
-  return files.map((f) => ({ path: f.filename, patch: f.patch ?? "" }));
+  return files.map((f) => {
+    if (f.patch === undefined && (f.additions ?? 0) > 0) {
+      // Added lines exist but the patch is unavailable (too large to diff). Scanning
+      // this as "no added lines" would let a secret in an oversized file pass as
+      // clean. Throw so the gate abstains instead of false-greening.
+      throw new Error(
+        `gh: ${f.filename} has ${f.additions} added lines but no patch (too large to diff) — cannot scan completely`,
+      );
+    }
+    return { path: f.filename, patch: f.patch ?? "" };
+  });
 }
 
 export interface GhCliScmOptions {
@@ -96,6 +136,14 @@ export class GhCliScm implements ScmReader, ScmWriter {
     // narrower change set than a full PR diff (truncated context), but well-defined.
     const raw = await this.#runGh(["api", `repos/${subject.repository}/commits/${subject.commitSha}`]);
     const files = this.#parseFiles(this.#parseJson(raw)?.files);
+    if (files.length >= COMPARE_FILE_CAP) {
+      // The commit endpoint also caps its files array at 300; at the cap we cannot
+      // distinguish complete from truncated, so we refuse to scan a partial diff
+      // (same discipline as the compare path).
+      throw new Error(
+        `gh commit ${subject.commitSha}: ${files.length} files hits GitHub's ${COMPARE_FILE_CAP}-file cap — diff too large to scan completely`,
+      );
+    }
     return mapFiles(files);
   }
 
@@ -128,12 +176,14 @@ export class GhCliScm implements ScmReader, ScmWriter {
     return mapFiles(files);
   }
 
-  /** The base sha of an OPEN PR whose head is `subject.commitSha`, or null if none. */
+  /** The base sha of an OPEN PR whose head is `subject.commitSha`, or null if none.
+   * Only open PRs count: falling back to a closed PR's base would compute the diff
+   * over a stale, irrelevant range. No open PR -> null -> scan the commit itself. */
   async #associatedPrBase(subject: SubjectRevision): Promise<string | null> {
     const raw = await this.#runGh(["api", `repos/${subject.repository}/commits/${subject.commitSha}/pulls`]);
     const prs = this.#parseJson(raw);
     if (!Array.isArray(prs)) return null;
-    const open = prs.find((p) => p?.state === "open") ?? prs[0];
+    const open = prs.find((p) => p?.state === "open");
     const base = open?.base?.sha;
     return typeof base === "string" && /^[0-9a-f]{40}$/.test(base) ? base : null;
   }

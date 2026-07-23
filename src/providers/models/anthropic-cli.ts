@@ -27,10 +27,17 @@ export class AnthropicCliModelProvider implements ModelProvider {
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const message = await this.#client.messages.create({
       model: MODEL,
-      max_tokens: 1024,
+      max_tokens: MAX_TOKENS,
       system: request.system,
       messages: [{ role: "user", content: request.input }],
     });
+
+    // A truncated response is almost always invalid JSON, which parses to "no
+    // findings" — indistinguishable from a clean review. Fail instead so the
+    // caller abstains rather than silently under-reporting.
+    if (message.stop_reason === "max_tokens") {
+      throw new Error(`model response truncated at max_tokens (${MAX_TOKENS}); cannot trust a partial result`);
+    }
 
     let text = "";
     for (const block of message.content) {
@@ -39,3 +46,6 @@ export class AnthropicCliModelProvider implements ModelProvider {
     return { modelId: message.model, text };
   }
 }
+
+/** Generous enough for the analyzer's JSON array of up to 25 findings. */
+const MAX_TOKENS = 4096;

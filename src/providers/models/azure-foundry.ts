@@ -53,10 +53,16 @@ export class AzureFoundryModelProvider implements ModelProvider {
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const message = (await this.#client.messages.create({
       model: MODEL,
-      max_tokens: 1024,
+      max_tokens: MAX_TOKENS,
       system: request.system,
       messages: [{ role: "user", content: request.input }],
-    })) as { model: string; content: Array<{ type: string; text?: string }> };
+    })) as { model: string; stop_reason?: string; content: Array<{ type: string; text?: string }> };
+
+    // See anthropic-cli: a truncated response parses to "no findings", so fail
+    // rather than silently under-report.
+    if (message.stop_reason === "max_tokens") {
+      throw new Error(`model response truncated at max_tokens (${MAX_TOKENS}); cannot trust a partial result`);
+    }
 
     let text = "";
     for (const block of message.content) {
@@ -65,3 +71,6 @@ export class AzureFoundryModelProvider implements ModelProvider {
     return { modelId: message.model, text };
   }
 }
+
+/** Generous enough for the analyzer's JSON array of up to 25 findings. */
+const MAX_TOKENS = 4096;
