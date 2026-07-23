@@ -47,7 +47,8 @@ export function generateFixes(
 }
 
 function dispositionKey(ruleId: string, defectClass: string, path: string, startLine: number): string {
-  return [defectClass, ruleId, path, String(startLine)].join(" ");
+  // JSON-encoded so a path containing whitespace cannot alias two distinct keys.
+  return JSON.stringify([defectClass, ruleId, path, startLine]);
 }
 
 /** Deterministic, human-readable head branch. Also the PR idempotency key. */

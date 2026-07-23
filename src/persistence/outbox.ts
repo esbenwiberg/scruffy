@@ -60,8 +60,23 @@ export class OutboxStore {
     await this.pool.query(`update outbox set status = 'sent', sent_at = $2 where id = $1`, [id, this.clock.now()]);
   }
 
+  /**
+   * Dead-letter an effect that cannot be delivered: a permanent error (unknown
+   * type / unparseable payload) or a transient one that has exhausted its
+   * attempts. It leaves `pending`, so it is never re-claimed, and records why.
+   * This is the backstop that makes bumping `attempts` mean something.
+   */
+  async markFailed(id: string, error: string): Promise<void> {
+    await this.pool.query(`update outbox set status = 'failed', last_error = $2 where id = $1`, [id, error.slice(0, 2000)]);
+  }
+
   async countPending(): Promise<number> {
     const r = await this.pool.query<{ count: string }>(`select count(*)::text as count from outbox where status = 'pending'`);
+    return Number(r.rows[0]!.count);
+  }
+
+  async countFailed(): Promise<number> {
+    const r = await this.pool.query<{ count: string }>(`select count(*)::text as count from outbox where status = 'failed'`);
     return Number(r.rows[0]!.count);
   }
 }

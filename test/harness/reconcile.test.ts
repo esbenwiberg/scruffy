@@ -30,7 +30,7 @@ describe("reconciliation", () => {
 
     // Simulate a crash: claim the run for analysis, then "die" before deciding.
     const run = await h.scruffy.runs.ensureRun(subject, "poison", "policy-v1");
-    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).toBe(true);
+    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).not.toBeNull();
 
     // Before the lease expires, the run is NOT reconcilable.
     expect(await h.scruffy.reconcile()).toBe(0);

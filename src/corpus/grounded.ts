@@ -238,17 +238,17 @@ export interface GroundedDetectionTarget {
   expect: { defectClass: string; path: string; line: number };
 }
 
-export const GROUNDED_DETECTION_TARGETS: readonly GroundedDetectionTarget[] = GROUNDED_SPECS.map((s) => ({
+export const GROUNDED_DETECTION_TARGETS: readonly GroundedDetectionTarget[] = GROUNDED_SPECS.map((s, i) => ({
   id: s.id,
-  subject: { repository: s.repository, commitSha: sha("a", 1) },
+  subject: { repository: s.repository, commitSha: sha("a", 100 + i) },
   files: s.files,
   expect: { defectClass: s.modelSeed.class, path: s.modelSeed.path, line: s.modelSeed.line },
 }));
 
-export const GROUNDED_POISON_CORPUS: Corpus = GROUNDED_SPECS.map((s) => ({
+export const GROUNDED_POISON_CORPUS: Corpus = GROUNDED_SPECS.map((s, i) => ({
   id: s.id,
   description: `${s.description}. Poison scope: NOT a blockable class — poison must ALLOW without false-blocking; the semantic defect is left to nightly/release.`,
-  subject: { repository: s.repository, commitSha: sha("a", 1) },
+  subject: { repository: s.repository, commitSha: sha("a", 100 + i) },
   files: s.files,
   // truthPoison is POISON-scope truth ("is this a poison-BLOCKABLE defect?"), not
   // "is there any defect". The defect is real but out of poison's blocking scope,
@@ -259,20 +259,20 @@ export const GROUNDED_POISON_CORPUS: Corpus = GROUNDED_SPECS.map((s) => ({
   provenance: s.provenance,
 }));
 
-export const GROUNDED_NIGHTLY_CORPUS: NightlyCorpus = GROUNDED_SPECS.map((s) => ({
+export const GROUNDED_NIGHTLY_CORPUS: NightlyCorpus = GROUNDED_SPECS.map((s, i) => ({
   id: s.id,
   description: `range introducing ${s.description} — nightly reports the defect (model-asserted, not a fixable class, so no fix PR); the benign half surfaces nothing`,
-  range: { repository: s.repository, baseSha: sha("a", 1), headSha: sha("a", 2) },
+  range: { repository: s.repository, baseSha: sha("a", 200 + i), headSha: sha("a", 300 + i) },
   files: s.files,
   expected: s.nightlyExpected,
   expectedSummary: { reported: 1, proposedFixes: 0, suppressed: 0 },
   provenance: s.provenance,
 }));
 
-export const GROUNDED_RELEASE_CORPUS: ReleaseCorpus = GROUNDED_SPECS.map((s) => ({
+export const GROUNDED_RELEASE_CORPUS: ReleaseCorpus = GROUNDED_SPECS.map((s, i) => ({
   id: s.id,
   description: `release candidate shipping ${s.description} — a serious regression the last gate cannot silently ship and cannot deterministically confirm, so it forces human sign-off (never a fabricated stop)`,
-  range: { repository: s.repository, baseSha: sha("a", 1), headSha: sha("a", 2) },
+  range: { repository: s.repository, baseSha: sha("a", 200 + i), headSha: sha("a", 300 + i) },
   files: s.files,
   truthOutcome: s.releaseTruth,
   expectedOutcome: s.releaseTruth,

@@ -29,6 +29,7 @@ interface RunRow {
   policy_version: string;
   state: RunState;
   attempt: number;
+  lease_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -44,6 +45,7 @@ function toRun(row: RunRow): EvaluationRun {
     policyVersion: row.policy_version,
     state: row.state,
     attempt: row.attempt,
+    leaseId: row.lease_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -171,41 +173,45 @@ export class RunStore {
 
   /**
    * Claim a pending run for analysis: guarded pending -> analyzing, bump attempt,
-   * and take a time-bounded lease in one atomic step. If another worker already
-   * claimed it (state no longer pending), returns false.
+   * and take a time-bounded lease in one atomic step. Mints a fresh fencing token
+   * and returns it on success; returns null if another worker already claimed it
+   * (state no longer pending). The caller must pass the returned token back to the
+   * matching commit* so a stale worker cannot land a decision over a newer claim.
    */
-  async claimForAnalysis(runId: string, owner: string, leaseMs: number): Promise<boolean> {
+  async claimForAnalysis(runId: string, owner: string, leaseMs: number): Promise<string | null> {
     return withTransaction(this.pool, async (client) => {
       const now = this.clock.now();
       const expires = new Date(now.getTime() + leaseMs);
+      const leaseId = this.ids.next("lease");
       const updated = await client.query(
         `update evaluation_runs
            set state = 'analyzing', updated_at = $2, attempt = attempt + 1,
-               lease_owner = $3, lease_expires_at = $4
+               lease_owner = $3, lease_expires_at = $4, lease_id = $5
          where id = $1 and state = 'pending'`,
-        [runId, now, owner, expires],
+        [runId, now, owner, expires, leaseId],
       );
-      if ((updated.rowCount ?? 0) === 0) return false;
+      if ((updated.rowCount ?? 0) === 0) return null;
       await client.query(
         `insert into run_transitions (run_id, from_state, to_state, reason, at) values ($1, 'pending', 'analyzing', $2, $3)`,
         [runId, `claimed by ${owner}`, now],
       );
-      return true;
+      return leaseId;
     });
   }
 
   /**
    * Reclaim a crashed run: analyzing -> pending, but only if the lease has
-   * expired (guard prevents stealing a live lease). Clears the lease so it can
-   * be re-claimed. Returns false if the run is not analyzing or the lease is
-   * still valid.
+   * expired (guard prevents stealing a live lease). Clears the lease (owner,
+   * expiry, and fencing token) so it can be re-claimed and the crashed worker's
+   * token no longer matches. Returns false if the run is not analyzing or the
+   * lease is still valid.
    */
   async reclaimExpired(runId: string): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
       const now = this.clock.now();
       const updated = await client.query(
         `update evaluation_runs
-           set state = 'pending', updated_at = $2, lease_owner = null, lease_expires_at = null
+           set state = 'pending', updated_at = $2, lease_owner = null, lease_expires_at = null, lease_id = null
          where id = $1 and state = 'analyzing' and lease_expires_at < $2`,
         [runId, now],
       );
@@ -216,6 +222,25 @@ export class RunStore {
       );
       return true;
     });
+  }
+
+  /**
+   * Extend the lease on a run this worker still holds — the heartbeat behind a
+   * slow-but-alive analysis. Guarded on BOTH `analyzing` and the fencing token,
+   * so a worker that was already reclaimed/superseded cannot resurrect its lease.
+   * Returns false when the lease is no longer ours (the caller should stop
+   * heartbeating; its eventual commit will be fenced out anyway).
+   */
+  async renewLease(runId: string, leaseId: string, leaseMs: number): Promise<boolean> {
+    const now = this.clock.now();
+    const expires = new Date(now.getTime() + leaseMs);
+    const updated = await this.pool.query(
+      `update evaluation_runs
+         set lease_expires_at = $3, updated_at = $2
+       where id = $1 and state = 'analyzing' and lease_id = $4`,
+      [runId, now, expires, leaseId],
+    );
+    return (updated.rowCount ?? 0) > 0;
   }
 
   /**
@@ -248,9 +273,11 @@ export class RunStore {
     decision: PoisonDecision;
     findings: Finding[];
     effect: OutboxEffect;
+    /** Fencing token from the claim; the commit only lands if the lease still matches. */
+    fenceLease?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason);
+      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
       if (!applied) return false;
 
       const now = this.clock.now();
@@ -310,9 +337,11 @@ export class RunStore {
     findings: Finding[];
     /** Summary check plus any fix-PR effects; enqueued in the same transaction. */
     effects: OutboxEffect[];
+    /** Fencing token from the claim; the commit only lands if the lease still matches. */
+    fenceLease?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason);
+      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
       if (!applied) return false;
 
       const now = this.clock.now();
@@ -367,9 +396,11 @@ export class RunStore {
     decision: ReleaseDecision;
     findings: Finding[];
     effect: OutboxEffect;
+    /** Fencing token from the claim; the commit only lands if the lease still matches. */
+    fenceLease?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason);
+      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
       if (!applied) return false;
 
       const now = this.clock.now();
@@ -404,19 +435,32 @@ export class RunStore {
     });
   }
 
+  /**
+   * Guarded state transition. When `fenceLease` is provided the update also
+   * requires the run's current `lease_id` to match it, so only the worker that
+   * still holds the live lease can commit — a reclaimed/superseded worker's
+   * commit touches 0 rows and is reported as not-applied. Clears the lease.
+   */
   async #transitionOn(
     client: PoolClient,
     runId: string,
     from: RunState,
     to: RunState,
     reason: string,
+    fenceLease?: string,
   ): Promise<boolean> {
     const now = this.clock.now();
+    const params: unknown[] = [runId, to, now, from];
+    let guard = "where id = $1 and state = $4";
+    if (fenceLease !== undefined) {
+      params.push(fenceLease);
+      guard += ` and lease_id = $${params.length}`;
+    }
     const updated = await client.query(
       `update evaluation_runs
-         set state = $2, updated_at = $3, lease_owner = null, lease_expires_at = null
-       where id = $1 and state = $4`,
-      [runId, to, now, from],
+         set state = $2, updated_at = $3, lease_owner = null, lease_expires_at = null, lease_id = null
+       ${guard}`,
+      params,
     );
     if ((updated.rowCount ?? 0) === 0) return false;
 

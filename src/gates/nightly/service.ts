@@ -7,6 +7,7 @@ import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import type { PullRequestPayload } from "../../effects/pull-request.js";
+import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runNightlyAnalysis } from "./analyze.js";
 import { generateFixes } from "./fix.js";
 import type { NightlyDecision } from "./decision.js";
@@ -100,13 +101,13 @@ export class NightlyService {
       return run;
     }
 
-    const claimed = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
-    if (!claimed) return (await runs.getRun(run.id)) ?? run;
+    const lease = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
+    if (!lease) return (await runs.getRun(run.id)) ?? run;
 
     const branch = run.branch;
     if (branch === null) {
       // Data invariant: a nightly run always carries its branch. Abstain loudly.
-      await this.#abstain(run, "nightly run missing branch");
+      await this.#abstain(run, "nightly run missing branch", { from: "analyzing", fenceLease: lease });
       return (await runs.getRun(run.id)) ?? run;
     }
 
@@ -116,12 +117,14 @@ export class NightlyService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision: rawDecision } = await runNightlyAnalysis(range, {
-        scm: this.deps.scm,
-        analyzers: this.deps.analyzers,
-        validator: this.deps.validator,
-        policy: this.deps.policy.nightly,
-      });
+      const { findings, decision: rawDecision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+        runNightlyAnalysis(range, {
+          scm: this.deps.scm,
+          analyzers: this.deps.analyzers,
+          validator: this.deps.validator,
+          policy: this.deps.policy.nightly,
+        }),
+      );
 
       // Turn propose_fix dispositions into concrete patches; any that cannot be
       // patched are downgraded to report inside the returned decision.
@@ -163,10 +166,11 @@ export class NightlyService {
         decision,
         findings,
         effects,
+        fenceLease: lease,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.#abstain(run, message);
+      await this.#abstain(run, message, { from: "analyzing", fenceLease: lease });
     }
 
     return (await runs.getRun(run.id)) ?? run;
@@ -178,10 +182,16 @@ export class NightlyService {
    * Guarded on `analyzing`, so it is a no-op if another worker already moved it.
    */
   async abandon(run: EvaluationRun, reason: string): Promise<void> {
-    await this.#abstain(run, `abandoned after ${run.attempt} attempts: ${reason}`);
+    // Reconciler-driven: transition from the run's OBSERVED state and, when it is
+    // analyzing, fence on the lease we saw so we never clobber a worker that
+    // reclaimed the run between our read and this write.
+    await this.#abstain(run, `abandoned after ${run.attempt} attempts: ${reason}`, {
+      from: run.state,
+      ...(run.state === "analyzing" && run.leaseId !== null ? { fenceLease: run.leaseId } : {}),
+    });
   }
 
-  async #abstain(run: EvaluationRun, message: string): Promise<void> {
+  async #abstain(run: EvaluationRun, message: string, opts: { from: RunState; fenceLease?: string }): Promise<void> {
     const empty: NightlyDecision = { dispositions: [], summary: { reported: 0, proposedFixes: 0, suppressed: 0 } };
     const payload: CheckRunPayload = {
       subject: run.subject,
@@ -193,7 +203,7 @@ export class NightlyService {
     };
     await this.deps.runs.commitNightlyDecision({
       runId: run.id,
-      from: "analyzing",
+      from: opts.from,
       to: "indeterminate",
       reason: "analysis failed",
       repository: run.subject.repository,
@@ -203,6 +213,7 @@ export class NightlyService {
       decision: empty,
       findings: [],
       effects: [{ effectType: "check_run", externalId: payload.externalId, payload }],
+      ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
     });
   }
 

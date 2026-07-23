@@ -26,11 +26,20 @@ export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) =>
     await client.query("begin");
     const result = await fn(client);
     await client.query("commit");
+    client.release();
     return result;
   } catch (err) {
-    await client.query("rollback").catch(() => {});
+    // Roll back, then return the client to the pool. If ROLLBACK itself fails the
+    // connection may be stuck in an aborted transaction; releasing it clean would
+    // hand a poisoned connection back to the pool (every later query on it fails
+    // with "current transaction is aborted"). Release WITH the error so the pool
+    // destroys it instead.
+    try {
+      await client.query("rollback");
+      client.release();
+    } catch (rollbackErr) {
+      client.release(rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr)));
+    }
     throw err;
-  } finally {
-    client.release();
   }
 }

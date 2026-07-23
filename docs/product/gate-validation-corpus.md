@@ -125,8 +125,9 @@ for the full confusion matrices.
 ## Poison — ready today
 
 The corpus schema (`src/corpus/types.ts` `LabeledCase`) and replay harness
-(`src/corpus/replay.ts` `replayCorpus`, `npm run corpus`) already exist and are
-fed only synthetic cases. A poison case is a single subject revision:
+(`src/corpus/replay.ts` `replayCorpus`, `npm run corpus`) exist and are fed the
+synthetic set plus the seeded/grounded cases. A poison case is a single subject
+revision:
 
 - `files`: the changed files (sanitized patches, GitHub's shape).
 - `truthPoison` / `truthDefectClass`: ground truth — is this genuinely
@@ -141,33 +142,33 @@ that matter at once: the gate **blocks** on the real defect, and does **not**
 false-block on the noise. One realistic mixed PR is worth ten single-purpose
 synthetic ones.
 
-## Nightly — needs a small build first
+## Nightly — built
 
-Poison has a corpus + replay harness; **nightly has neither.** It is currently
-tested only through e2e fixtures. Before nightly seed data has anywhere to land,
-build the analog of the poison harness:
+The range corpus schema and replay harness now exist:
 
-- a **range corpus** schema: a labeled `(base, head]` range with per-finding
-  ground truth — for each expected finding, its `defectClass` and the
-  disposition we expect (`report | propose_fix | suppress`), plus whether a
-  generated fix would be **acceptable** (the patch is correct and narrow).
-- a **range replay** that runs `runNightlyAnalysis` + `generateFixes` over the
-  range and scores dispositions and fix quality against ground truth.
+- **range corpus** schema (`src/corpus/nightly-types.ts` `NightlyCase`): a
+  labeled `(base, head]` range with per-finding ground truth — for each expected
+  finding, its `defectClass` and the disposition we expect
+  (`report | propose_fix | suppress`), plus whether a generated fix is expected.
+- **range replay** (`src/corpus/nightly-replay.ts`, `npm run corpus:nightly`)
+  runs `runNightlyAnalysis` + `generateFixes` over the range and scores
+  dispositions, surface precision/recall, and fix generation against ground
+  truth, with an `expectedSummary` regression pin.
 
 A nightly case is naturally *"take a range of changes"* from a repo: a day's
-worth of merges is the real unit the gate reviews. Ground truth is the harder
-part — it needs a human call on which findings are real and which proposed fixes
-are actually good.
+worth of merges is the real unit the gate reviews. Ground truth is still the
+harder part — it needs a human call on which findings are real and which proposed
+fixes are actually good — so the labeled set is deliberately small for now.
 
-## Release — deferred (gate not built)
+## Release — built
 
-There is no `gates/release` yet, so there is nothing to replay a release case
-against. Per the chosen scope we still **author the fixture shape now** so it is
-ready the day the gate lands, but this is structure-ahead-of-runner and must be
-labeled as such — do not imply coverage that does not exist. A release case is a
-range from the previous release to a candidate, with ground truth for the
-ship / sign-off-required / stop decision (and, later, visual evidence). Until
-the gate exists, these fixtures have **no runner** and prove nothing.
+`gates/release` exists, and so does its replay: `src/corpus/release-types.ts`
+(`ReleaseCase`), `src/corpus/release-replay.ts`, `npm run corpus:release`. A
+release case is a range from the previous release to a candidate, with ground
+truth (`truthOutcome`) for the ship / sign-off-required / stop decision and an
+`expectedOutcome` regression pin (visual evidence is still future work). The
+labeled set is small; treat the numbers as a machinery check, not a validated
+precision/recall claim.
 
 # The workflow
 
@@ -194,8 +195,10 @@ For each candidate (all steps gated by the preflight above):
   recall, and abstain rate.
 - **Nightly:** incremental **severe** findings surfaced without inflating
   reviewer effort; proposed fixes narrow and correct (no regressions once repo
-  CI runs them). Requires the range-replay harness to measure.
-- **Release:** deferred with the gate.
+  CI runs them). Measured by `corpus:nightly`; the labeled set is still small.
+- **Release:** no unsafe ship (a stop-class regression never clears), sign-off
+  forced where deterministic confirmation is impossible. Measured by
+  `corpus:release`; labeled set still small.
 
 The synthetic corpus stays as a fast regression smoke test; the sanitized-
 historical cases are what turn "the validator culled 92% of candidates" into an
@@ -203,11 +206,13 @@ actual precision/recall.
 
 # Readiness & phase order
 
-| Phase | Gate | State | Blocking prerequisite |
+| Phase | Gate | State | Remaining work |
 |---|---|---|---|
-| 1 | Poison | **Ready** | none — fetch, sanitize, label, `npm run corpus` |
-| 2 | Nightly | Build first | range-corpus schema + range-replay harness |
-| 3 | Release | Deferred | the release gate itself (`gates/release`) |
+| 1 | Poison | **Harness ready** | grow the sanitized-historical corpus (small-n today) |
+| 2 | Nightly | **Harness ready** | grow the labeled range corpus + fix-quality labels |
+| 3 | Release | **Harness ready** | grow the labeled candidate corpus; visual evidence |
 
-Work the phases in order. Do not let release fixtures (phase 3) imply the
-release gate is validated — it is not built.
+All three gates and their replay harnesses now exist and run in `corpus:all`.
+The remaining work is corpus *size*, not machinery: the labeled sets are small,
+so the metrics are a regression smoke test, not a validated precision/recall
+claim. Do not imply statistical coverage the corpus does not yet have.
