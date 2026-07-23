@@ -62,7 +62,7 @@ export class SecretScanAnalyzer implements Analyzer {
             ruleId: pattern.ruleId,
             defectClass: "leaked-credential",
             subject,
-            primaryRegion: { path: file.path, startLine: line, endLine: line, snippet: text.trim() },
+            primaryRegion: { path: file.path, startLine: line, endLine: line, snippet: text },
             provenance: {
               analyzerId: this.id,
               analyzerVersion: VERSION,

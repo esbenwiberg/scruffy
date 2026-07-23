@@ -56,6 +56,31 @@ describe("DestructiveMigrationAnalyzer", () => {
     const f = await a.analyze(SUBJECT, [file("src/repo.ts", ['db.query("DELETE FROM users");'])]);
     expect(f).toHaveLength(0);
   });
+
+  it("does not false-block a multi-line DELETE whose WHERE is on the next line", async () => {
+    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["DELETE FROM sessions", "WHERE expired = true;"])]);
+    expect(f).toHaveLength(0);
+  });
+
+  it("catches a multi-line UPDATE with no WHERE across lines", async () => {
+    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users", "SET active = false;"])]);
+    expect(f.map((x) => x.ruleId)).toEqual(["MIGRATION.UPDATE_WITHOUT_WHERE"]);
+  });
+
+  it("does not treat -- inside a string literal as a comment", async () => {
+    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'see -- docs' WHERE id = 1;"])]);
+    expect(f).toHaveLength(0);
+  });
+
+  it("does not treat ; inside a string literal as a statement terminator", async () => {
+    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'a;b'", "WHERE id = 1;"])]);
+    expect(f).toHaveLength(0);
+  });
+
+  it("does not scan prose files that merely contain 'migration' in the name", async () => {
+    const f = await a.analyze(SUBJECT, [file("docs/migration-guide.md", ["Example: DELETE FROM users;"])]);
+    expect(f).toHaveLength(0);
+  });
 });
 
 describe("DisabledTlsAnalyzer", () => {
@@ -102,6 +127,20 @@ describe("TlsValidator", () => {
   });
   it("refutes a commented-out disable", async () => {
     expect(await v.validate(findingFor("TLS.REJECT_UNAUTHORIZED_FALSE", "disabled-tls-verification", "src/http.ts", "// rejectUnauthorized: false"))).toBe("refuted");
+  });
+  it("does NOT refute a live disable that follows an inline block comment", async () => {
+    expect(
+      await v.validate(
+        findingFor("TLS.REJECT_UNAUTHORIZED_FALSE", "disabled-tls-verification", "src/http.ts", "/* prod hack */ rejectUnauthorized: false,"),
+      ),
+    ).toBe("validated");
+  });
+  it("refutes when the disable is only inside a trailing comment", async () => {
+    expect(
+      await v.validate(
+        findingFor("TLS.REJECT_UNAUTHORIZED_FALSE", "disabled-tls-verification", "src/http.ts", "doWork(); // rejectUnauthorized: false"),
+      ),
+    ).toBe("refuted");
   });
 });
 

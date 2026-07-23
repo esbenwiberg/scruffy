@@ -45,6 +45,15 @@ const RULES: Rule[] = [
   },
 ];
 
+/**
+ * Whether `text` still contains a TLS-disable pattern (for a given rule, or any).
+ * The validator uses this against the comment-stripped line to tell a live
+ * disable from one that only appears inside a comment.
+ */
+export function tlsDisableMatches(text: string, ruleId?: string): boolean {
+  return RULES.some((r) => (ruleId === undefined || r.ruleId === ruleId) && r.regex.test(text));
+}
+
 export class DisabledTlsAnalyzer implements Analyzer {
   readonly id = "disabled-tls";
 
