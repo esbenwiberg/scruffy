@@ -1,4 +1,4 @@
-import type { EvaluationRun } from "../../domain/evaluation/types.js";
+import type { EvaluationRun, RunState } from "../../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
@@ -88,8 +88,8 @@ export class ReleaseService {
       return run;
     }
 
-    const claimed = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
-    if (!claimed) return (await runs.getRun(run.id)) ?? run;
+    const lease = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
+    if (!lease) return (await runs.getRun(run.id)) ?? run;
 
     try {
       const range: RevisionRange = {
@@ -123,10 +123,11 @@ export class ReleaseService {
         decision,
         findings,
         effect,
+        fenceLease: lease,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.#abstain(run, message);
+      await this.#abstain(run, message, { from: "analyzing", fenceLease: lease });
     }
 
     return (await runs.getRun(run.id)) ?? run;
@@ -138,10 +139,16 @@ export class ReleaseService {
    * `analyzing`, so it is a no-op if another worker already reclaimed it.
    */
   async abandon(run: EvaluationRun, reason: string): Promise<void> {
-    await this.#abstain(run, `abandoned after ${run.attempt} attempts: ${reason}`);
+    // Reconciler-driven: transition from the run's OBSERVED state and, when it is
+    // analyzing, fence on the lease we saw so we never clobber a worker that
+    // reclaimed the run between our read and this write.
+    await this.#abstain(run, `abandoned after ${run.attempt} attempts: ${reason}`, {
+      from: run.state,
+      ...(run.state === "analyzing" && run.leaseId !== null ? { fenceLease: run.leaseId } : {}),
+    });
   }
 
-  async #abstain(run: EvaluationRun, message: string): Promise<void> {
+  async #abstain(run: EvaluationRun, message: string, opts: { from: RunState; fenceLease?: string }): Promise<void> {
     const empty: ReleaseDecision = {
       outcome: "indeterminate",
       reasons: [],
@@ -158,12 +165,13 @@ export class ReleaseService {
     };
     await this.deps.runs.commitReleaseDecision({
       runId: run.id,
-      from: "analyzing",
+      from: opts.from,
       to: "indeterminate",
       reason: "analysis failed",
       decision: empty,
       findings: [],
       effect: { effectType: "check_run", externalId: payload.externalId, payload },
+      ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
     });
   }
 

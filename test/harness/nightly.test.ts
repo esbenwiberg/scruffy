@@ -120,7 +120,7 @@ describe("nightly gate over a seeded range", () => {
 
     // Simulate a crash: ensure the nightly run, claim it, then "die".
     const run = await h.scruffy.runs.ensureNightlyRun({ repository: REPO, commitSha: H1 }, BRANCH, null, "policy-v1");
-    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).toBe(true);
+    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).not.toBeNull();
 
     expect(await h.scruffy.reconcile()).toBe(0); // lease still valid
     h.clock.advance(LEASE_MS + 1);

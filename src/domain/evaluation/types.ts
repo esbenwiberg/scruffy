@@ -46,6 +46,12 @@ export const EvaluationRun = z.object({
   policyVersion: z.string().min(1),
   state: RunState,
   attempt: z.number().int().nonnegative(),
+  /**
+   * Fencing token of the current analysis lease, minted fresh on each claim.
+   * Null when the run holds no lease. A terminal commit is fenced on this so a
+   * zombie worker cannot overwrite the result of the worker that superseded it.
+   */
+  leaseId: z.string().min(1).nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });

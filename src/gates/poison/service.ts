@@ -62,8 +62,8 @@ export class PoisonService {
       return run;
     }
 
-    const claimed = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
-    if (!claimed) {
+    const lease = await runs.claimForAnalysis(run.id, this.#owner, this.#leaseMs);
+    if (!lease) {
       // Another worker/delivery is handling it (or it already moved). Return latest.
       return (await runs.getRun(run.id)) ?? run;
     }
@@ -95,6 +95,7 @@ export class PoisonService {
         decision,
         findings,
         effect: { effectType: "check_run", externalId: payload.externalId, payload },
+        fenceLease: lease,
       });
     } catch (err) {
       // Operationally indeterminate: abstain and post a neutral check.
@@ -115,6 +116,7 @@ export class PoisonService {
         decision: { outcome: "indeterminate", reasons: [], dispositions: [] },
         findings: [],
         effect: { effectType: "check_run", externalId: payload.externalId, payload },
+        fenceLease: lease,
       });
     }
 
@@ -122,9 +124,10 @@ export class PoisonService {
   }
 
   /**
-   * Give up on a run that has exhausted its attempts: analyzing -> indeterminate
-   * with a neutral check. Abstention, never a fabricated block or allow. Guarded
-   * on `analyzing`, so it is a no-op if another worker already reclaimed it.
+   * Give up on a run that has exhausted its attempts: -> indeterminate with a
+   * neutral check. Abstention, never a fabricated block or allow. Reconciler-only:
+   * it transitions from the run's OBSERVED state (analyzing with an expired lease,
+   * or pending after a reclaim), guarded so it is a no-op if a worker took over.
    */
   async abandon(run: EvaluationRun, reason: string): Promise<void> {
     const payload: CheckRunPayload = {
@@ -137,12 +140,15 @@ export class PoisonService {
     };
     await this.deps.runs.commitDecision({
       runId: run.id,
-      from: "analyzing",
+      from: run.state,
       to: "indeterminate",
       reason: `abandoned: ${reason}`,
       decision: { outcome: "indeterminate", reasons: [], dispositions: [] },
       findings: [],
       effect: { effectType: "check_run", externalId: payload.externalId, payload },
+      // Fence on the lease we observed (analyzing only): if another worker reclaimed
+      // and re-took the run in the meantime, do not clobber its fresh attempt.
+      ...(run.state === "analyzing" && run.leaseId !== null ? { fenceLease: run.leaseId } : {}),
     });
   }
 

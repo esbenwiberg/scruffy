@@ -15,11 +15,13 @@ const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
 const DECISION: PoisonDecision = { outcome: "allow", reasons: ["no_blockable_findings"], dispositions: [] };
 
 let runs: RunStore;
+let clock: FixedClock;
 
 beforeEach(async () => {
   await migrate(pool);
   await pool.query("truncate outbox, poison_decisions, run_transitions, evaluation_runs cascade");
-  runs = new RunStore(pool, new FixedClock(new Date("2026-07-15T00:00:00Z")), new SeededIdGenerator("t"));
+  clock = new FixedClock(new Date("2026-07-15T00:00:00Z"));
+  runs = new RunStore(pool, clock, new SeededIdGenerator("t"));
 });
 
 afterAll(async () => {
@@ -78,5 +80,79 @@ describe("RunStore durability", () => {
     expect((await pool.query("select count(*) from poison_decisions")).rows[0].count).toBe("0");
     expect((await pool.query("select count(*) from outbox")).rows[0].count).toBe("0");
     expect((await runs.getRun(run.id))?.state).toBe("pending");
+  });
+
+  it("claimForAnalysis returns a fresh fencing token, and a wrong token cannot commit", async () => {
+    const run = await runs.ensureRun(SUBJECT, "poison", "p1");
+    const lease = await runs.claimForAnalysis(run.id, "worker-a", 60_000);
+    expect(lease).not.toBeNull();
+
+    // A commit fenced on the WRONG token touches nothing.
+    const wrong = await runs.commitDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "poison allow",
+      decision: DECISION,
+      findings: [],
+      effect: { effectType: "check_run", externalId: "x", payload: {} },
+      fenceLease: "lease_not_mine",
+    });
+    expect(wrong).toBe(false);
+    expect((await runs.getRun(run.id))?.state).toBe("analyzing");
+    expect((await pool.query("select count(*) from poison_decisions")).rows[0].count).toBe("0");
+
+    // The real token commits.
+    const right = await runs.commitDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "poison allow",
+      decision: DECISION,
+      findings: [],
+      effect: { effectType: "check_run", externalId: "x", payload: {} },
+      fenceLease: lease!,
+    });
+    expect(right).toBe(true);
+    expect((await runs.getRun(run.id))?.state).toBe("decided");
+  });
+
+  it("a zombie worker cannot overwrite a run that was reclaimed and re-claimed", async () => {
+    const run = await runs.ensureRun(SUBJECT, "poison", "p1");
+    const leaseA = await runs.claimForAnalysis(run.id, "worker-a", 1_000); // A claims
+
+    // A's lease expires; the reconciler reclaims and worker B re-claims.
+    clock.advance(1_001);
+    expect(await runs.reclaimExpired(run.id)).toBe(true);
+    const leaseB = await runs.claimForAnalysis(run.id, "worker-b", 1_000);
+    expect(leaseB).not.toBe(leaseA);
+
+    // Zombie A finally finishes and tries to commit with its stale token — rejected.
+    const zombie = await runs.commitDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "A's stale verdict",
+      decision: DECISION,
+      findings: [],
+      effect: { effectType: "check_run", externalId: "x", payload: {} },
+      fenceLease: leaseA!,
+    });
+    expect(zombie).toBe(false);
+    expect((await runs.getRun(run.id))?.state).toBe("analyzing"); // still B's
+
+    // B commits with its own token — lands.
+    const bWins = await runs.commitDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "B's real verdict",
+      decision: DECISION,
+      findings: [],
+      effect: { effectType: "check_run", externalId: "x", payload: {} },
+      fenceLease: leaseB!,
+    });
+    expect(bWins).toBe(true);
+    expect((await runs.getRun(run.id))?.state).toBe("decided");
   });
 });

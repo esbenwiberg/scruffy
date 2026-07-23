@@ -134,7 +134,7 @@ describe("release gate over a seeded range", () => {
 
     // Simulate a crash: ensure the release run, claim it, then "die".
     const run = await h.scruffy.runs.ensureReleaseRun({ repository: REPO, commitSha: CAND }, PREV, "policy-v1");
-    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).toBe(true);
+    expect(await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS)).not.toBeNull();
 
     expect(await h.scruffy.reconcile()).toBe(0); // lease still valid
     h.clock.advance(LEASE_MS + 1);

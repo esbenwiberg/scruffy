@@ -34,6 +34,21 @@ const PATTERNS: SecretPattern[] = [
   },
 ];
 
+/**
+ * The credential token(s) a line matches, for a given rule (or all rules). The
+ * validator reasons about the MATCHED token, not the surrounding line — an
+ * attacker-written comment ("// example") must not be able to refute a live key.
+ */
+export function matchedSecretTokens(text: string, ruleId?: string): string[] {
+  const tokens: string[] = [];
+  for (const pattern of PATTERNS) {
+    if (ruleId !== undefined && pattern.ruleId !== ruleId) continue;
+    const m = pattern.regex.exec(text);
+    if (m) tokens.push(m[0]);
+  }
+  return tokens;
+}
+
 export class SecretScanAnalyzer implements Analyzer {
   readonly id = "secret-scan";
 
