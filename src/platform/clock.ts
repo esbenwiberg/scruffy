@@ -5,6 +5,8 @@
  * #4 (reconciliation-after-kill must replay deterministically).
  */
 
+import { randomUUID } from "node:crypto";
+
 export interface Clock {
   now(): Date;
 }
@@ -57,5 +59,16 @@ export class SeededIdGenerator implements IdGenerator {
   next(prefix: string): string {
     this.#counter += 1;
     return `${prefix}_${this.#seed}_${this.#counter.toString().padStart(6, "0")}`;
+  }
+}
+
+/**
+ * Production id generator: a random UUID per id. Non-deterministic by design —
+ * only for real entry points (the manual trigger, an eventual server), never the
+ * harness or reconciliation replay, which use SeededIdGenerator for reproducibility.
+ */
+export class UuidIdGenerator implements IdGenerator {
+  next(prefix: string): string {
+    return `${prefix}_${randomUUID()}`;
   }
 }

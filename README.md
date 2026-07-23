@@ -27,6 +27,30 @@ npm run typecheck
 
 `npm run db:down` tears the database down.
 
+### Run the poison gate against a real PR (shadow)
+
+`scruffy:review` runs the poison gate against a real GitHub PR and posts a
+**shadow commit status** on its head commit. It reuses your authenticated `gh`
+CLI session (no token in config) for both reading the diff and posting the status.
+
+```bash
+gh auth status                                   # must be logged in with push access
+npm run db:up && npm run db:migrate              # Postgres for durable runs
+npm run scruffy:review -- <owner/repo> <pr-number>
+```
+
+It reads the PR diff (`gh api compare/base...head`), runs the deterministic poison
+analysis, and posts a `scruffy/poison` commit status: `success` (allow), `failure`
+(block), or `pending` (abstained). **Shadow by construction** — a commit status
+only blocks a merge if a repo admin marks its context a *required* check, so
+scruffy posts the honest state and never blocks on its own. It also prints the
+decision and the PR URL.
+
+Why a status and not a check-run: creating check-runs requires a GitHub App
+(`checks:write`); a user token (which `gh` holds) can't. Commit statuses need only
+push access. The richer check-run object is a later GitHub-App slice. Point it at a
+**test repo you control**, never a customer repo — a status is a visible write.
+
 ## What the skeleton proves
 
 The inbound path runs on real code with faked edges:
@@ -81,8 +105,12 @@ SCRUFFY_MODEL_BACKEND=claude-cli npm run llm-smoke
 
 Honest gaps against ADR 0003's acceptance list:
 
-- **Real GitHub adapter** (Octokit check runs) and **real model adapters**
-  (Claude/Codex CLI locally, Azure AI Foundry deployed). Only fakes today.
+- **Real GitHub writes beyond a shadow status.** A `gh`-backed adapter now reads
+  real PRs and posts a shadow commit status (`npm run scruffy:review`), but the
+  richer **check-run** object and **fix-PR writes** need a GitHub App (deferred),
+  and there is no hosted webhook server yet (the verify path exists; the trigger
+  is manual). Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are off
+  the deterministic critical path.
 - **Hostile-execution runner** (validation #5) — separate trust boundary,
   its own spike.
 - **Merge-group / merge-queue** handling, nightly and release gates.
