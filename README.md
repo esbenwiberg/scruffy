@@ -2,14 +2,18 @@
 
 Service-controlled three-gate review system for organization repositories. See
 `docs/product/vision.md` for the product thesis and `docs/decisions/` for the
-accepted trust, language, and stack ADRs.
+ADRs: trust boundaries (ADR-0001) and language scope (ADR-0002) are **Accepted**;
+the implementation/deployment stack (ADR-0003) is still **Proposed** (its
+acceptance criteria are not all met — see "What is NOT built yet").
 
-This repository currently contains the **walking skeleton**: the poison gate
-driven end-to-end through the real durable path, with the trust edges (GitHub,
-model) faked so the whole thing runs deterministically and offline. Three
-deterministic defect classes are wired — `leaked-credential`,
-`destructive-schema-change` (silent data loss), and `disabled-tls-verification`
-(exploitable security) — each with an adversarial validator.
+This repository is a **walking skeleton**. All three gates — **poison** (blocking),
+**nightly** (proposes fixes), and **release** (ship / sign-off / stop) — are wired
+end-to-end through the real durable path, with the trust edges (GitHub, model)
+faked so the whole thing runs deterministically and offline. The deterministic
+defect classes are `leaked-credential`, `destructive-schema-change` (silent data
+loss), and `disabled-tls-verification` (exploitable security), each with an
+adversarial validator; a model-backed analyzer adds semantic classes off the
+deterministic critical path.
 
 ## Run it
 
@@ -20,12 +24,18 @@ npm install
 npm run db:up        # start Postgres (docker compose) and wait for it
 npm run db:migrate   # apply migrations
 npm run harness      # boot Scruffy, feed seeded PRs, print outcomes
-npm run corpus       # replay the labeled corpus, print metrics (no DB)
+npm run corpus       # replay the labeled poison corpus, print metrics (no DB)
 npm test             # unit + persistence + end-to-end suite
 npm run typecheck
 ```
 
 `npm run db:down` tears the database down.
+
+Other corpus replays (all DB-free): `npm run corpus:nightly`, `npm run
+corpus:release`, `npm run corpus:grounded`, and `npm run corpus:all` — the
+cross-gate sweep that fails loudly on any false-block, unsafe ship, or
+regression. `npm run corpus:grounded:live` runs the grounded detection targets
+against a real model backend.
 
 ### Run the poison gate against a real PR (shadow)
 
@@ -39,9 +49,13 @@ npm run db:up && npm run db:migrate              # Postgres for durable runs
 npm run scruffy:review -- <owner/repo> <pr-number>
 ```
 
-It reads the PR diff (`gh api compare/base...head`), runs the deterministic poison
-analysis, and posts a `scruffy/poison` commit status: `success` (allow), `failure`
-(block), or `pending` (abstained). **Shadow by construction** — a commit status
+It resolves the PR's base (via the commit's associated **open** PR), reads the
+diff (`gh api compare/base...head`, falling back to the head commit's own file
+list when no open PR is associated), runs the deterministic poison analysis, and
+posts a `scruffy/poison` commit status: `success` (allow), `failure`
+(block), or `pending` (abstained). If the diff cannot be read completely (a `gh`
+failure, the 300-file cap, or a file too large to diff) it abstains rather than
+scanning a partial diff as clean. **Shadow by construction** — a commit status
 only blocks a merge if a repo admin marks its context a *required* check, so
 scruffy posts the honest state and never blocks on its own. It also prints the
 decision and the PR URL.
@@ -57,9 +71,9 @@ The inbound path runs on real code with faked edges:
 
 ```
 signed webhook → verify + parse → ensureRun (idempotent)
-  → guarded pending→analyzing → analyze (secret scan) → adversarial validate
-  → atomic { terminal transition + decision + outbox effect }
-  → effects dispatcher → idempotent check-run upsert
+  → guarded pending→analyzing (fenced lease) → analyze (deterministic analyzers)
+  → adversarial validate → atomic { terminal transition + decision + outbox effect }
+  → effects dispatcher (per-effect isolation, dead-letter) → idempotent check-run upsert
 ```
 
 - **Pure decision kernel** (`src/gates/poison/decision.ts`): `block | allow |
@@ -71,7 +85,10 @@ signed webhook → verify + parse → ensureRun (idempotent)
   idempotent dispatch.
 - **Leases + reconciliation** (`src/app/reconciler.ts`): crashed mid-analysis
   runs (expired lease) and stuck `pending` runs are recovered independently of
-  webhook delivery; bounded retry then abstain. Closes validation #4.
+  webhook delivery; commits are fenced on a per-claim lease token so a zombie
+  worker cannot overwrite a live one; bounded retry then abstain. This covers
+  validation #4's lease-expiry, duplicate-webhook, retry, and reconciliation
+  elements; **supersession** is modeled as a run state but not yet exercised.
 - **Measurement** (`src/corpus/`): labeled corpus + replay → confusion matrix,
   block precision with Wilson 95% lower bound, false-block rate, severe-case
   recall, abstain rate. See `docs/product/corpus-labeling-protocol.md`.
@@ -111,23 +128,34 @@ Honest gaps against ADR 0003's acceptance list:
   and there is no hosted webhook server yet (the verify path exists; the trigger
   is manual). Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are off
   the deterministic critical path.
+- **ADR deviations to reconcile.** ADR-0003 specifies GitHub I/O through Octokit;
+  the walking skeleton shells out to the `gh` CLI instead (see the shadow-status
+  section for why). ADR-0001 wants writes to go through a *separately, narrowly
+  privileged* component; today a single `gh` user session serves both read and
+  write. The effects dispatcher is the sole write path (the architectural half of
+  that decision), but the separate credential is not yet real. Neither ADR has
+  been amended.
+- **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
+  labeled with their reduced coverage; no such labeling exists yet.
 - **Hostile-execution runner** (validation #5) — separate trust boundary,
-  its own spike.
-- **Merge-group / merge-queue** handling, nightly and release gates.
+  its own spike. Also unmet: cold-start/latency/ops measurement (#6) and the
+  cross-language capability comparison (#7). These are why ADR-0003 is still
+  Proposed.
+- **Merge-group / merge-queue** handling — the webhook path parses only
+  `pull_request` events; `merge_group_sha` is always null.
 - A statistically meaningful corpus — the synthetic set is a machinery smoke
   test only (small-n; the Wilson lower bound is honest about that).
-- Dev-toolchain audit advisories (vitest/vite/esbuild) — fix via a vitest v4
-  bump.
 
 ## Layout
 
 `src/domain` typed evidence/policy/evaluation/validation contracts ·
-`src/gates/poison` decision kernel + analysis orchestration · `src/providers`
-SCM/model/analyzer/validator ports, deterministic analyzers, and the registry
-that binds analyzers ↔ validators ↔ blockable classes · `src/persistence`
-Postgres, migrations, runs, outbox · `src/effects` idempotent SCM writes ·
-`src/ingest` webhook verify + parse · `src/corpus` labeled corpus + replay
-metrics · `src/app` wiring + reconciler · `test/` unit, persistence, e2e.
+`src/gates/{poison,nightly,release}` each gate's decision kernel + analysis
+orchestration + durable service · `src/providers` SCM/model/analyzer/validator/
+fixer ports, deterministic analyzers, and the registry that binds analyzers ↔
+validators ↔ classes · `src/persistence` Postgres, migrations, runs, outbox ·
+`src/effects` idempotent SCM writes · `src/ingest` webhook verify + parse ·
+`src/corpus` labeled corpora (poison/nightly/release/grounded) + replay metrics ·
+`src/app` wiring + reconciler · `test/` unit, persistence, e2e.
 
 New deterministic defect classes plug in via `src/providers/registry.ts`: add an
 analyzer, a validator for its class, and the class name — the registry keeps
