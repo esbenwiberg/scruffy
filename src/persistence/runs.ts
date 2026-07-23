@@ -225,6 +225,25 @@ export class RunStore {
   }
 
   /**
+   * Extend the lease on a run this worker still holds — the heartbeat behind a
+   * slow-but-alive analysis. Guarded on BOTH `analyzing` and the fencing token,
+   * so a worker that was already reclaimed/superseded cannot resurrect its lease.
+   * Returns false when the lease is no longer ours (the caller should stop
+   * heartbeating; its eventual commit will be fenced out anyway).
+   */
+  async renewLease(runId: string, leaseId: string, leaseMs: number): Promise<boolean> {
+    const now = this.clock.now();
+    const expires = new Date(now.getTime() + leaseMs);
+    const updated = await this.pool.query(
+      `update evaluation_runs
+         set lease_expires_at = $3, updated_at = $2
+       where id = $1 and state = 'analyzing' and lease_id = $4`,
+      [runId, now, expires, leaseId],
+    );
+    return (updated.rowCount ?? 0) > 0;
+  }
+
+  /**
    * Runs that need reconciliation independent of webhook delivery: stuck
    * `pending` runs, and `analyzing` runs whose lease has expired (crashed
    * mid-analysis).

@@ -5,6 +5,7 @@ import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { ReleaseDecision } from "./decision.js";
 
@@ -97,12 +98,14 @@ export class ReleaseService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision } = await runReleaseAnalysis(range, {
-        scm: this.deps.scm,
-        analyzers: this.deps.analyzers,
-        validator: this.deps.validator,
-        policy: this.deps.policy.release,
-      });
+      const { findings, decision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+        runReleaseAnalysis(range, {
+          scm: this.deps.scm,
+          analyzers: this.deps.analyzers,
+          validator: this.deps.validator,
+          policy: this.deps.policy.release,
+        }),
+      );
 
       const check = releaseToCheck(decision);
       const payload: CheckRunPayload = {

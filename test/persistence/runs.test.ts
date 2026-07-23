@@ -117,6 +117,31 @@ describe("RunStore durability", () => {
     expect((await runs.getRun(run.id))?.state).toBe("decided");
   });
 
+  it("renewLease extends a held lease so a slow-but-alive run is not reconcilable", async () => {
+    const run = await runs.ensureRun(SUBJECT, "poison", "p1");
+    const lease = await runs.claimForAnalysis(run.id, "worker-a", 1_000);
+
+    // Almost at expiry, still working: heartbeat renews the lease.
+    clock.advance(900);
+    expect(await runs.renewLease(run.id, lease!, 1_000)).toBe(true);
+
+    // Past the ORIGINAL expiry but inside the renewed window — not reconcilable.
+    clock.advance(200); // now 1_100 since claim, but only 200 since renew
+    expect(await runs.findReconcilable(10)).toHaveLength(0);
+  });
+
+  it("renewLease with a stale token (after reclaim) fails and cannot resurrect the lease", async () => {
+    const run = await runs.ensureRun(SUBJECT, "poison", "p1");
+    const leaseA = await runs.claimForAnalysis(run.id, "worker-a", 1_000);
+
+    clock.advance(1_001);
+    expect(await runs.reclaimExpired(run.id)).toBe(true); // A's lease expired, reclaimed
+
+    // Zombie A tries to heartbeat with its old token — refused.
+    expect(await runs.renewLease(run.id, leaseA!, 1_000)).toBe(false);
+    expect((await runs.getRun(run.id))?.state).toBe("pending"); // still reclaimable
+  });
+
   it("a zombie worker cannot overwrite a run that was reclaimed and re-claimed", async () => {
     const run = await runs.ensureRun(SUBJECT, "poison", "p1");
     const leaseA = await runs.claimForAnalysis(run.id, "worker-a", 1_000); // A claims

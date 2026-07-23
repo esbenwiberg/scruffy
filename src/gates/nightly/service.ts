@@ -7,6 +7,7 @@ import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import type { PullRequestPayload } from "../../effects/pull-request.js";
+import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runNightlyAnalysis } from "./analyze.js";
 import { generateFixes } from "./fix.js";
 import type { NightlyDecision } from "./decision.js";
@@ -116,12 +117,14 @@ export class NightlyService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision: rawDecision } = await runNightlyAnalysis(range, {
-        scm: this.deps.scm,
-        analyzers: this.deps.analyzers,
-        validator: this.deps.validator,
-        policy: this.deps.policy.nightly,
-      });
+      const { findings, decision: rawDecision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+        runNightlyAnalysis(range, {
+          scm: this.deps.scm,
+          analyzers: this.deps.analyzers,
+          validator: this.deps.validator,
+          policy: this.deps.policy.nightly,
+        }),
+      );
 
       // Turn propose_fix dispositions into concrete patches; any that cannot be
       // patched are downgraded to report inside the returned decision.

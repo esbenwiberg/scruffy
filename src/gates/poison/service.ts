@@ -6,6 +6,7 @@ import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader } from "../../providers/scm/port.js";
 import type { RunStore } from "../../persistence/runs.js";
 import { CHECK_NAME, decisionToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runPoisonAnalysis } from "./analyze.js";
 
 export interface PoisonServiceDeps {
@@ -69,12 +70,14 @@ export class PoisonService {
     }
 
     try {
-      const { findings, decision } = await runPoisonAnalysis(subject, {
-        scm: this.deps.scm,
-        analyzers: this.deps.analyzers,
-        validator: this.deps.validator,
-        policy: policy.poison,
-      });
+      const { findings, decision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+        runPoisonAnalysis(subject, {
+          scm: this.deps.scm,
+          analyzers: this.deps.analyzers,
+          validator: this.deps.validator,
+          policy: policy.poison,
+        }),
+      );
 
       const terminal: RunState = decision.outcome === "indeterminate" ? "indeterminate" : "decided";
       const check = decisionToCheck(decision);
