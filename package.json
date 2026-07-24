@@ -42,6 +42,7 @@
     "@types/pg": "^8.11.10",
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^9.1.0",
+    "globals": "^17.7.0",
     "prettier": "^3.4.2",
     "rimraf": "^6.0.1",
     "tsx": "^4.19.2",
