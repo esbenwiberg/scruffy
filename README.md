@@ -65,6 +65,26 @@ Why a status and not a check-run: creating check-runs requires a GitHub App
 push access. Point it at a **test repo you control**, never a customer repo — a
 status is a visible write.
 
+### Hosted webhook server
+
+`npm run serve` boots the durable path behind an HTTP listener
+(`src/server/main.ts`): `POST /webhook` verifies the delivery signature,
+**durably records** the poison run, acks `202` inside GitHub's ~10s budget, and
+drives the analysis in the background; `GET /healthz` probes the DB. A
+reconcile-and-flush loop (default every 10s) is the actual engine — it recovers
+anything a crash leaves behind, so the ack promises durability, never
+completion. The webhook is a prompt; the reconciler is the authority.
+
+```bash
+export SCRUFFY_WEBHOOK_SECRET=...   # the HMAC secret configured on the GitHub webhook
+npm run db:up && npm run serve      # listens on :8080 (PORT overrides)
+```
+
+`docker build .` produces the deployable image (compiled `dist/`, migrations,
+`gh` CLI for the reader — inject `GH_TOKEN` at runtime, never bake it in). What
+still stands between this and a real deployment: exposing an endpoint, a managed
+Postgres, and the GitHub App registration — operator decisions, not code.
+
 ### GitHub App writer (real check-runs + fix PRs)
 
 The App-backed writer (`src/providers/scm/github-app.ts`) is the separately,
@@ -149,10 +169,11 @@ Honest gaps against ADR 0003's acceptance list:
 - **A registered GitHub App + the first outward check-run.** The App-backed
   writer (check-runs + fix PRs through Octokit auth, the separate write
   credential) is built and contract-tested, but no App is registered yet, so the
-  outward e2e has not run against a real repo. There is also no hosted webhook
-  server yet (the verify path exists; the trigger is manual). Model adapters
-  exist (`claude-cli`/`anthropic`/`azure`) but are off the deterministic
-  critical path.
+  outward e2e has not run against a real repo. The webhook server exists and is
+  tested locally (`npm run serve`), but it has never received a real GitHub
+  delivery — hosting it (endpoint, managed Postgres, App registration) is an
+  operator step. Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are
+  off the deterministic critical path.
 - **ADR deviations to reconcile.** ADR-0003 specifies GitHub I/O through
   Octokit; reads still shell out to the `gh` CLI (writes now have the
   Octokit-authenticated App path). ADR-0001's *separately, narrowly privileged*

@@ -99,6 +99,23 @@ export class Scruffy {
   }
 
   /**
+   * Verify + parse a webhook and durably record the poison run WITHOUT driving
+   * it. This is the fast-ack half for an HTTP server working inside GitHub's
+   * ~10s delivery budget: the run is durable BEFORE the 202 goes out, so a crash
+   * between ack and analysis loses nothing — the reconciler finds the `pending`
+   * run and drives it (the webhook is a prompt; the reconciler is the authority).
+   */
+  async acceptWebhook(
+    signature: string,
+    rawBody: string,
+  ): Promise<{ accepted: false; reason: string } | { accepted: true; runId: string; subject: SubjectRevision }> {
+    const result = await verifyAndParseWebhook(this.deps.webhookSecret, signature, rawBody);
+    if (result.kind === "ignored") return { accepted: false, reason: result.reason };
+    const run = await this.runs.ensureRun(result.subject, "poison", this.deps.policy.version);
+    return { accepted: true, runId: run.id, subject: result.subject };
+  }
+
+  /**
    * Trigger a nightly review of (watermark, head] for a branch. Scheduler-driven,
    * not webhook-driven. Idempotent: re-triggering a head already at the watermark
    * is a no-op. The head is parsed through SubjectRevision so a malformed sha is

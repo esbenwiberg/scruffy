@@ -23,6 +23,13 @@ export type IngestResult =
   | { kind: "ignored"; reason: string }
   | { kind: "poison_subject"; subject: SubjectRevision };
 
+/** A delivery whose signature does not verify — a forgery or a secret mismatch.
+ * Typed so the HTTP boundary can map it to 401 without string-matching. */
+export class InvalidSignatureError extends Error {}
+
+/** A verified delivery whose body is not JSON. Maps to 400 at the HTTP boundary. */
+export class MalformedPayloadError extends Error {}
+
 const RELEVANT_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 
 export async function verifyAndParseWebhook(
@@ -31,13 +38,13 @@ export async function verifyAndParseWebhook(
   rawBody: string,
 ): Promise<IngestResult> {
   const valid = await verify(secret, rawBody, signature);
-  if (!valid) throw new Error("invalid webhook signature");
+  if (!valid) throw new InvalidSignatureError("invalid webhook signature");
 
   let json: unknown;
   try {
     json = JSON.parse(rawBody);
   } catch {
-    throw new Error("webhook body is not valid JSON");
+    throw new MalformedPayloadError("webhook body is not valid JSON");
   }
 
   const parsed = PullRequestEvent.safeParse(json);
