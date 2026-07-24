@@ -65,6 +65,18 @@ describe("evaluateNightly", () => {
     expect(d.dispositions[0]!.reason).toBe("refuted");
   });
 
+  it("proposes a fix for a class that is fixable but not listed as reportable", () => {
+    // A fixable class implies reportability, so it must not be suppressed by the
+    // reportable-class gate before it can earn a propose_fix (documented contract).
+    const policy: NightlyPolicy = {
+      reportableDefectClasses: ["leaked-credential"],
+      fixableDefectClasses: ["disabled-tls-verification"],
+    };
+    const d = evaluateNightly([finding()], policy);
+    expect(d.dispositions[0]!.disposition).toBe("propose_fix");
+    expect(d.dispositions[0]!.reason).toBe("fixable_validated");
+  });
+
   it("suppresses a non-reportable class", () => {
     const d = evaluateNightly([finding({ defectClass: "style-nit" })], POLICY);
     expect(d.dispositions[0]!.disposition).toBe("suppress");

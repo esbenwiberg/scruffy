@@ -58,7 +58,11 @@ export interface NightlyReplayDeps {
   policy: NightlyPolicy;
 }
 
-const key = (defectClass: string, path: string): string => `${defectClass}::${path}`;
+// JSON-encode the components as an array so the key is unambiguous even if a
+// path contains the delimiter — matching the domain convention in
+// domain/findings/identity.ts (a delimiter-join would alias `x` + `a::b` with
+// `x::a` + `b`).
+const key = (defectClass: string, path: string): string => JSON.stringify([defectClass, path]);
 
 export async function replayNightlyCorpus(
   corpus: readonly NightlyCase[],

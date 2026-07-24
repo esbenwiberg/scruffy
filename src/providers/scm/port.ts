@@ -47,7 +47,16 @@ export interface CheckRunInput {
 
 export interface CheckRunResult {
   id: string;
-  /** True when this call created a new check run; false when it matched an existing one. */
+  /**
+   * ADVISORY (best-effort): true when this call created a new check run, false
+   * when it matched an existing one. A backend with a prior-existence signal
+   * (e.g. FakeScm, or a real check-run object) reports this exactly; a backend
+   * without one (e.g. the gh-cli adapter, which posts commit statuses that have
+   * no create-vs-supersede signal) may always report true. Effects logic MUST
+   * NOT gate correctness on `created` — the safety invariant is that repeating
+   * the upsert never produces a duplicate effect (see upsertCheckRun), not that
+   * `created` reliably detects a redelivery.
+   */
   created: boolean;
 }
 
@@ -79,7 +88,15 @@ export interface PullRequestResult {
 }
 
 export interface ScmWriter {
-  /** Idempotent upsert keyed by (subject, externalId). */
+  /**
+   * Idempotent upsert. The canonical key is (subject, externalId); the invariant
+   * callers may rely on is that re-invoking with the same input never produces a
+   * duplicate effect. Note the key an adapter can actually enforce may be coarser
+   * than externalId: the gh-cli adapter keys on (subject, name) because a commit
+   * status is "latest per (sha, context) wins", so two inputs sharing a name
+   * supersede each other even with different externalIds. `created` is advisory
+   * (see CheckRunResult) — do not build created-gated side effects on top of it.
+   */
   upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult>;
   /** Idempotent fix-PR open keyed by externalId. Never auto-merges. */
   openPullRequest(input: PullRequestInput): Promise<PullRequestResult>;

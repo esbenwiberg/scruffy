@@ -17,7 +17,10 @@ import type { NightlyPolicy } from "../../domain/policy/types.js";
  *  3. Anything reportable that we could NOT clear or confirm is still `report`
  *     (surfaced for a human), never silently dropped and never auto-fixed.
  *  4. A class the policy does not consider reportable is suppressed: recorded,
- *     but not surfaced.
+ *     but not surfaced. A fixable class is ALWAYS considered reportable — the
+ *     fixable list need not repeat entries in the reportable list — so a class
+ *     configured only as fixable is never suppressed by the reportable gate
+ *     before it can earn a `propose_fix`.
  */
 
 export type NightlyDispositionKind = "suppress" | "report" | "propose_fix";
@@ -55,7 +58,14 @@ function classify(
   finding: Finding,
   policy: NightlyPolicy,
 ): { disposition: NightlyDispositionKind; reason: NightlyReasonCode } {
-  if (!policy.reportableDefectClasses.includes(finding.defectClass)) {
+  // A fixable class implies reportability: the documented propose_fix contract
+  // (fixable + validated + deterministic) says nothing about the reportable list,
+  // so a class configured only as fixable must not be suppressed here before it
+  // can reach the fixable branch below.
+  const reportable =
+    policy.reportableDefectClasses.includes(finding.defectClass) ||
+    policy.fixableDefectClasses.includes(finding.defectClass);
+  if (!reportable) {
     return { disposition: "suppress", reason: "not_reportable_class" };
   }
 
@@ -100,9 +110,19 @@ export function evaluateNightly(findings: readonly Finding[], policy: NightlyPol
     };
   });
 
-  // Ranked most-actionable first, then a fully deterministic tiebreak so the
-  // ordering is reproducible on replay (no clock, no analyzer emission order).
-  dispositions.sort((a, b) => {
+  return { dispositions: rankDispositions(dispositions), summary: summarize(dispositions) };
+}
+
+/**
+ * Rank dispositions most-actionable first, then a fully deterministic tiebreak so
+ * the ordering is reproducible on replay (no clock, no analyzer emission order).
+ * Sorts in place and returns the same array. Exported so fix generation can
+ * re-rank after downgrading a propose_fix it could not patch — otherwise a
+ * downgraded `report` keeps its former propose_fix position ahead of genuine
+ * propose_fix entries, breaking the "ranked most-actionable first" contract.
+ */
+export function rankDispositions(dispositions: NightlyFindingDisposition[]): NightlyFindingDisposition[] {
+  return dispositions.sort((a, b) => {
     const byDisposition = DISPOSITION_PRIORITY[a.disposition] - DISPOSITION_PRIORITY[b.disposition];
     if (byDisposition !== 0) return byDisposition;
     const bySupport = Number(b.deterministicSupport) - Number(a.deterministicSupport);
@@ -114,8 +134,6 @@ export function evaluateNightly(findings: readonly Finding[], policy: NightlyPol
       a.ruleId.localeCompare(b.ruleId)
     );
   });
-
-  return { dispositions, summary: summarize(dispositions) };
 }
 
 /** Recompute the disposition counts. Exported so fix generation can re-summarize

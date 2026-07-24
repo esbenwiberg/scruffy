@@ -18,14 +18,14 @@ const CONFIRMED = new Set([
   "MIGRATION.UPDATE_WITHOUT_WHERE",
   "MIGRATION.TRUNCATE",
 ]);
-const ESCALATE = new Set(["MIGRATION.DROP_TABLE", "MIGRATION.DROP_COLUMN"]);
 
 export class MigrationValidator implements Validator {
   readonly id = "migration-validator";
 
   async validate(finding: Finding): Promise<ValidationOutcome> {
     if (CONFIRMED.has(finding.ruleId)) return "validated";
-    if (ESCALATE.has(finding.ruleId)) return "indeterminate";
+    // Everything else — bare DROPs (DROP_TABLE/DROP_COLUMN) and any rule we
+    // don't recognise — escalates rather than being autonomously blocked.
     return "indeterminate";
   }
 }

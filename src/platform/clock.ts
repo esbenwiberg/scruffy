@@ -27,11 +27,15 @@ export class FixedClock implements Clock {
   #current: Date;
 
   constructor(start: Date) {
-    this.#current = start;
+    // Defensive copy: Date is mutable, so store our own instance to prevent the
+    // caller mutating the one they passed in and silently moving the clock.
+    this.#current = new Date(start.getTime());
   }
 
   now(): Date {
-    return this.#current;
+    // Return a fresh instance (matching SystemClock) so callers cannot mutate
+    // our internal state via the returned reference.
+    return new Date(this.#current.getTime());
   }
 
   advance(ms: number): void {
@@ -39,7 +43,7 @@ export class FixedClock implements Clock {
   }
 
   set(at: Date): void {
-    this.#current = at;
+    this.#current = new Date(at.getTime());
   }
 }
 
