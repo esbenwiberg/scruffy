@@ -143,7 +143,7 @@ export class GhCliScm implements ScmReader, ScmWriter {
    * of whether an open PR happens to point at the head commit. */
   async #commitOwnFiles(repository: string, commitSha: string): Promise<ChangedFile[]> {
     const raw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}`]);
-    const files = this.#parseFiles(this.#parseJson(raw)?.files);
+    const files = this.#parseFiles((this.#parseJson(raw) as { files?: unknown } | null)?.files);
     if (files.length >= COMPARE_FILE_CAP) {
       // The commit endpoint also caps its files array at 300; at the cap we cannot
       // distinguish complete from truncated, so we refuse to scan a partial diff
@@ -229,7 +229,7 @@ export class GhCliScm implements ScmReader, ScmWriter {
     //     a check-run does, and probing for one would need an extra GET on this
     //     blocking write path (plus a TOCTOU race) for a value callers must treat as
     //     advisory anyway. It is left true; effects MUST NOT gate on it.
-    const id = String(this.#parseJson(raw)?.id ?? `${repository}@${commitSha}#${input.name}`);
+    const id = String((this.#parseJson(raw) as { id?: unknown } | null)?.id ?? `${repository}@${commitSha}#${input.name}`);
     return { id, created: true };
   }
 
@@ -241,7 +241,7 @@ export class GhCliScm implements ScmReader, ScmWriter {
 
   // ── Parsing helpers ──────────────────────────────────────────────────────────
 
-  #parseJson(raw: string): any {
+  #parseJson(raw: string): unknown {
     try {
       return JSON.parse(raw);
     } catch {
