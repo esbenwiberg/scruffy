@@ -41,19 +41,37 @@ export class EffectsDispatcher {
     const claimed = await this.outbox.claimPending(batch);
     let sent = 0;
     for (const record of claimed) {
-      const result = await this.#apply(record);
-      if (result.kind === "sent") {
-        await this.outbox.markSent(record.id);
-        sent += 1;
-      } else if (result.kind === "permanent") {
-        console.error(`outbox ${record.id}: permanent failure — dead-lettering: ${result.reason}`);
-        await this.outbox.markFailed(record.id, result.reason);
-      } else if (record.attempts >= MAX_ATTEMPTS) {
-        console.error(`outbox ${record.id}: ${record.attempts} attempts exhausted — dead-lettering: ${result.reason}`);
-        await this.outbox.markFailed(record.id, result.reason);
-      } else {
-        // Transient with budget left: leave pending, retry on a later pass.
-        console.error(`outbox ${record.id}: transient failure (attempt ${record.attempts}), will retry: ${result.reason}`);
+      // The whole per-record body — including the markSent/markFailed store
+      // writes — is contained here. #apply never throws, but a mark* call can
+      // (a DB blip), and letting that reject dispatchOnce would abort the batch
+      // and starve the records behind it: exactly the shape error isolation
+      // exists to prevent. A failed mark leaves the row pending/claimed, so it
+      // is re-processed on a later pass (writes are idempotent).
+      try {
+        const result = await this.#apply(record);
+        if (result.kind === "sent") {
+          await this.outbox.markSent(record.id);
+          sent += 1;
+        } else if (result.kind === "permanent") {
+          console.error(`outbox ${record.id}: permanent failure — dead-lettering: ${result.reason}`);
+          await this.outbox.markFailed(record.id, result.reason);
+        } else if (record.attempts >= MAX_ATTEMPTS) {
+          console.error(`outbox ${record.id}: ${record.attempts} attempts exhausted — dead-lettering: ${result.reason}`);
+          await this.outbox.markFailed(record.id, result.reason);
+        } else {
+          // Transient with budget left: release the claim back to `pending` so it
+          // is re-claimed and retried on the next pass. Without the release the
+          // row would stay in `processing` and only come back after its lease
+          // expired — losing the immediate next-pass retry cadence.
+          console.error(`outbox ${record.id}: transient failure (attempt ${record.attempts}), will retry: ${result.reason}`);
+          await this.outbox.release(record.id);
+        }
+      } catch (err) {
+        // A store write (mark*/release) threw. Contain it to this record so the
+        // rest of the batch still runs; the row stays in `processing` and is
+        // reclaimed once its lease expires (delivery is idempotent, so re-running
+        // it is safe).
+        console.error(`outbox ${record.id}: mark failed, leaving for retry: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     return sent;

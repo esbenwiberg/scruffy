@@ -70,7 +70,8 @@ export const SEEDED_CORPUS: Corpus = [
         // now-removed field. No added risky lines -> must produce no finding.
         path: "src/types/order.ts",
         patch: [
-          "@@ -10,7 +10,6 @@ export interface Order {",
+          // 4 context lines + 1 deletion: old-side length 5, new-side length 4.
+          "@@ -10,5 +10,4 @@ export interface Order {",
           "   id: string;",
           "   total: number;",
           "-  giftWrapNote: string | null;",

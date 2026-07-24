@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import type { Finding } from "../../domain/evidence/types.js";
 import type { ProposedFix } from "../../domain/fixes/types.js";
 import type { Fixer } from "../../providers/fixers/port.js";
-import { summarize, type NightlyDecision, type NightlyFindingDisposition } from "./decision.js";
+import { rankDispositions, summarize, type NightlyDecision, type NightlyFindingDisposition } from "./decision.js";
 
 /**
  * Turn the kernel's `propose_fix` dispositions into concrete fix proposals, by
@@ -43,7 +44,10 @@ export function generateFixes(
     return d;
   });
 
-  return { decision: { dispositions, summary: summarize(dispositions) }, fixes };
+  // Re-rank: downgrading a propose_fix to report leaves it in its former
+  // front-of-list position, so re-apply the kernel's deterministic ordering to
+  // keep the "ranked most-actionable first" contract intact.
+  return { decision: { dispositions: rankDispositions(dispositions), summary: summarize(dispositions) }, fixes };
 }
 
 function dispositionKey(ruleId: string, defectClass: string, path: string, startLine: number): string {
@@ -51,10 +55,21 @@ function dispositionKey(ruleId: string, defectClass: string, path: string, start
   return JSON.stringify([defectClass, ruleId, path, startLine]);
 }
 
-/** Deterministic, human-readable head branch. Also the PR idempotency key. */
+/**
+ * Deterministic, human-readable head branch. Also the PR idempotency key
+ * (externalId), so it MUST be injective over (defectClass, path, startLine).
+ *
+ * The slug alone is lossy — every non-alphanumeric run collapses to `-`, so
+ * distinct paths can alias (e.g. `src/a.b.ts` and `src/a-b.ts` both slug to
+ * `src-a-b-ts`). Two fixes sharing that key would let the outbox treat them as
+ * the same effect and silently drop one real fix PR. We therefore suffix a short
+ * stable hash of the RAW path, restoring injectivity while staying readable —
+ * the same anti-aliasing discipline `dispositionKey` already applies.
+ */
 function fixBranch(defectClass: string, path: string, startLine: number): string {
   const slug = path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return `scruffy/fix/${defectClass}/${slug}-L${startLine}`;
+  const pathHash = createHash("sha256").update(path).digest("hex").slice(0, 8);
+  return `scruffy/fix/${defectClass}/${slug}-${pathHash}-L${startLine}`;
 }
 
 function fixBody(defectClass: string, ruleId: string, path: string, startLine: number, rationale: string): string {

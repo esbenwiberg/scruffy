@@ -37,12 +37,27 @@ export const ValidationOutcome = z.enum([
 ]);
 export type ValidationOutcome = z.infer<typeof ValidationOutcome>;
 
+// A single owner/name segment restricted to the GitHub-legal charset. Must
+// begin and end with an alphanumeric, so dot-only segments (".", "..") and
+// boundary punctuation can never appear.
+const repoSegment = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
 /** Immutable identification of the subject a finding was produced against. */
 export const SubjectRevision = z.object({
-  // Exactly two non-empty, slash-free segments — "owner/name". Enforced (not just
-  // documented) because this value is interpolated into `gh api` URL paths, where
-  // an extra segment or "../" would retarget a different endpoint.
-  repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/, "must be owner/name"),
+  // Exactly two "owner/name" segments, each validated against the GitHub-legal
+  // charset. Enforced (not just documented) because this value is interpolated
+  // into `gh api` URL paths, where a broad allowlist would let dot-segments
+  // ("owner/.."), percent-encoded traversal ("owner/%2e%2e%2fx"), query/fragment
+  // splices ("owner/name?x=1"), or control characters (NUL) retarget a different
+  // endpoint. The per-segment allowlist closes that boundary at the schema.
+  repository: z.string().refine((value) => {
+    const parts = value.split("/");
+    if (parts.length !== 2) return false;
+    return parts.every(
+      (segment) =>
+        segment !== "." && segment !== ".." && repoSegment.test(segment),
+    );
+  }, "must be owner/name"),
   commitSha: z.string().regex(/^[0-9a-f]{40}$/, "must be a full 40-char sha"),
 });
 export type SubjectRevision = z.infer<typeof SubjectRevision>;

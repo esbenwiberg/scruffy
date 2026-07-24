@@ -71,11 +71,14 @@ export function modelAnalyzers(model: ModelProvider): Analyzer[] {
 }
 
 export function defaultValidator(): Validator {
-  return new CompositeValidator({
+  // Keyed over POISON_BLOCKABLE_CLASSES so a blockable class without a validator
+  // is a compile error, not a runtime abstain on the fast blocking path.
+  const byClass: Record<(typeof POISON_BLOCKABLE_CLASSES)[number], Validator> = {
     "leaked-credential": new SecretValidator(),
     "destructive-schema-change": new MigrationValidator(),
     "disabled-tls-verification": new TlsValidator(),
-  });
+  };
+  return new CompositeValidator(byClass);
 }
 
 /**
@@ -83,7 +86,7 @@ export function defaultValidator(): Validator {
  * every class in NIGHTLY_FIXABLE_CLASSES must have a fixer here — a fixable class
  * with no fixer would always downgrade to report, defeating its own eligibility.
  */
-export function defaultFixers(): Record<string, Fixer> {
+export function defaultFixers(): Record<(typeof NIGHTLY_FIXABLE_CLASSES)[number], Fixer> {
   return {
     "disabled-tls-verification": new TlsFixer(),
   };

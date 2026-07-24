@@ -20,8 +20,13 @@ import {
   GROUNDED_POISON_CORPUS,
   GROUNDED_NIGHTLY_CORPUS,
   GROUNDED_RELEASE_CORPUS,
+  GROUNDED_DETECTION_TARGETS,
   groundedModel,
 } from "../../src/corpus/grounded.js";
+import { decideGrounded, formatGroundedCase } from "../../src/corpus/grounded-run.js";
+import type { ReplayReport } from "../../src/corpus/replay.js";
+import type { NightlyReplayReport } from "../../src/corpus/nightly-replay.js";
+import type { ReleaseReplayReport } from "../../src/corpus/release-replay.js";
 import type { PoisonPolicy, NightlyPolicy, ReleasePolicy } from "../../src/domain/policy/types.js";
 
 /**
@@ -133,5 +138,106 @@ describe("grounded corpus (real merged defects, model-backed, all three gates)",
     });
     expect(r.totals.actualSurfaced).toBe(0);
     expect(r.regressions).toEqual([]);
+  });
+});
+
+describe("grounded corpus shas collide ONLY where intended (distinct offset bands)", () => {
+  // The real non-collision invariant is the numeric offset band per role (100/200/300),
+  // NOT the sha() prefix — which is a constant "a" everywhere. This pins that invariant
+  // so a maintainer adding a corpus cannot silently reuse a band and collide.
+  const n = GROUNDED_POISON_CORPUS.length;
+
+  it("shares shas exactly where two gates score the same subject/range, and nowhere else", () => {
+    // Intended sharing #1: poison subject == detection subject (same commit, two views).
+    for (let i = 0; i < n; i++) {
+      expect(GROUNDED_POISON_CORPUS[i]!.subject.commitSha).toBe(GROUNDED_DETECTION_TARGETS[i]!.subject.commitSha);
+    }
+    // Intended sharing #2: nightly and release replay the SAME range (base+head).
+    for (let i = 0; i < n; i++) {
+      expect(GROUNDED_NIGHTLY_CORPUS[i]!.range.baseSha).toBe(GROUNDED_RELEASE_CORPUS[i]!.range.baseSha);
+      expect(GROUNDED_NIGHTLY_CORPUS[i]!.range.headSha).toBe(GROUNDED_RELEASE_CORPUS[i]!.range.headSha);
+    }
+
+    // The three ROLES (subject/base/head) must be mutually disjoint bands, each with
+    // one distinct sha per case — anything else is an unintended collision.
+    const subjects = new Set(GROUNDED_POISON_CORPUS.map((c) => c.subject.commitSha));
+    const bases = new Set(GROUNDED_NIGHTLY_CORPUS.map((c) => c.range.baseSha).filter((s): s is string => s !== null));
+    const heads = new Set(GROUNDED_NIGHTLY_CORPUS.map((c) => c.range.headSha));
+    expect(subjects.size).toBe(n);
+    expect(bases.size).toBe(n);
+    expect(heads.size).toBe(n);
+    // No overlap across roles.
+    for (const s of subjects) expect(bases.has(s) || heads.has(s)).toBe(false);
+    for (const b of bases) expect(heads.has(b)).toBe(false);
+
+    // Whole-corpus tally: the ONLY duplicates in the full multiset are the two
+    // intended shares (subject↔detection, and base/head reused by nightly↔release).
+    const all = [
+      ...GROUNDED_POISON_CORPUS.map((c) => c.subject.commitSha),
+      ...GROUNDED_DETECTION_TARGETS.map((t) => t.subject.commitSha),
+      ...GROUNDED_NIGHTLY_CORPUS.flatMap((c) => [c.range.baseSha, c.range.headSha]),
+      ...GROUNDED_RELEASE_CORPUS.flatMap((c) => [c.range.baseSha, c.range.headSha]),
+    ];
+    // 3 distinct roles × n cases = the true count of unique shas.
+    expect(new Set(all).size).toBe(3 * n);
+  });
+});
+
+describe("grounded-run CI gate decision (exit-code logic)", () => {
+  // Minimal report stubs carrying only the fields decideGrounded reads.
+  const cleanPoison = { regressions: [], confusion: { false_block: 0 } } as unknown as ReplayReport;
+  const cleanRelease = { regressions: [], metrics: { unsafeShips: 0 } } as unknown as ReleaseReplayReport;
+  const nightly = (cases: { id: string; correct: number; falseSurface: number }[], falseSurface = 0) =>
+    ({ regressions: [], totals: { falseSurface }, cases } as unknown as NightlyReplayReport);
+
+  it("passes when every gate handled its cases and no safety metric tripped", () => {
+    const d = decideGrounded(cleanPoison, nightly([{ id: "a", correct: 1, falseSurface: 0 }]), cleanRelease);
+    expect(d.failed).toBe(false);
+    expect(d.mishandledNightly).toEqual([]);
+  });
+
+  it("fails when a nightly case is MISHANDLED (correct !== 1) even with a matching summary and no recorded regression", () => {
+    // The exact latent divergence: correct=0 but no summary regression pushed.
+    const d = decideGrounded(cleanPoison, nightly([{ id: "a", correct: 0, falseSurface: 0 }]), cleanRelease);
+    expect(d.failed).toBe(true);
+    expect(d.mishandledNightly).toEqual(["a"]);
+  });
+
+  it("fails on a poison false-block, mirroring all-run.ts safety gating", () => {
+    const poison = { regressions: [], confusion: { false_block: 1 } } as unknown as ReplayReport;
+    const d = decideGrounded(poison, nightly([{ id: "a", correct: 1, falseSurface: 0 }]), cleanRelease);
+    expect(d.failed).toBe(true);
+    expect(d.poisonFalseBlock).toBe(1);
+  });
+
+  it("fails on a nightly false-surface even without a per-case correctness miss", () => {
+    const d = decideGrounded(cleanPoison, nightly([{ id: "a", correct: 1, falseSurface: 1 }], 1), cleanRelease);
+    expect(d.failed).toBe(true);
+    expect(d.nightlyFalseSurface).toBe(1);
+  });
+
+  it("fails on an unsafe release ship", () => {
+    const release = { regressions: [], metrics: { unsafeShips: 1 } } as unknown as ReleaseReplayReport;
+    const d = decideGrounded(cleanPoison, nightly([{ id: "a", correct: 1, falseSurface: 0 }]), release);
+    expect(d.failed).toBe(true);
+    expect(d.releaseUnsafeShips).toBe(1);
+  });
+});
+
+describe("grounded-run per-case formatting is honest about the gate outcome", () => {
+  it("renders the reassuring 'no false-block' claim only when poison actually allowed", () => {
+    const good = formatGroundedCase("c1", "repo", "ref", "allow", { correct: 1, falseSurface: 0 }, "sign-off-required");
+    expect(good).toContain("no false-block");
+
+    // A regressed poison result must NOT print the reassuring claim next to a block.
+    const regressed = formatGroundedCase("c1", "repo", "ref", "block", { correct: 1, falseSurface: 0 }, "sign-off-required");
+    expect(regressed).not.toContain("no false-block");
+    expect(regressed).toContain("UNEXPECTED");
+  });
+
+  it("renders the release sign-off claim only when release actually required sign-off", () => {
+    const shipped = formatGroundedCase("c1", "repo", "ref", "allow", { correct: 1, falseSurface: 0 }, "ship");
+    expect(shipped).not.toContain("no silent ship");
+    expect(shipped).toContain("UNEXPECTED");
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { defaultAnalyzers, defaultValidator, RELEASE_STOP_CLASSES, RELEASE_SIGNOFF_CLASSES } from "../../src/providers/registry.js";
 import { ReleaseCorpus } from "../../src/corpus/release-types.js";
 import { replayReleaseCorpus } from "../../src/corpus/release-replay.js";
+import { summarizeRelease } from "../../src/corpus/release-run.js";
 import { SEEDED_RELEASE_CORPUS } from "../../src/corpus/release-corpus.js";
 import type { ReleasePolicy } from "../../src/domain/policy/types.js";
 
@@ -43,15 +44,33 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
   });
 
   it("counts an unsafe ship when a stop range is mislabeled shippable", async () => {
-    // Sanity-check the safety metric itself: flip a stop range's truth to ship and
-    // confirm the replay flags the (now truth=ship, actual=stop) as over-caution,
-    // and a genuinely-shipped danger as unsafe. Here we assert the instrument by
-    // constructing a case whose gate output is ship but truth is stop.
+    // Sanity-check the unsafeShip instrument: relabel the clean range's truth as
+    // stop while its gate output stays ship, producing a (truth=stop, actual=ship)
+    // case — THE dangerous error. This exercises unsafeShips, NOT over-caution
+    // (over-caution is truth=ship / actual=stop; see the over-caution test below).
     const tampered = SEEDED_RELEASE_CORPUS.map((c) =>
       c.id === "release-ship-clean" ? { ...c, truthOutcome: "stop" as const } : c,
     );
     const r = await replayReleaseCorpus(tampered, deps);
     expect(r.metrics.unsafeShips).toBe(1); // clean range ships, but truth now says stop
+    expect(r.metrics.overCaution).toBe(0); // no truth=ship range was stopped/escalated
+  });
+
+  it("counts over-caution when a genuinely-stopped range is mislabeled shippable, and zero for the seeded corpus", async () => {
+    // The seeded corpus never over-cautions: every truth=ship range actually ships.
+    const clean = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, deps);
+    expect(clean.metrics.overCaution).toBe(0);
+
+    // Relabel a genuinely-stopped range's truth as ship while its gate output stays
+    // stop, producing a (truth=ship, actual=stop) case — the SAFE-but-not-ideal
+    // over-caution error. This is the only assertion that exercises the counter's
+    // increment path and guards against a swapped ship-truth guard.
+    const tampered = SEEDED_RELEASE_CORPUS.map((c) =>
+      c.id === "release-stop-secret" ? { ...c, truthOutcome: "ship" as const } : c,
+    );
+    const r = await replayReleaseCorpus(tampered, deps);
+    expect(r.metrics.overCaution).toBe(1); // stopped range now labeled shippable
+    expect(r.metrics.unsafeShips).toBe(0); // nothing dangerous was shipped
   });
 
   it("flags a regression when the actual outcome disagrees with the expected pin", async () => {
@@ -60,5 +79,30 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
     );
     const r = await replayReleaseCorpus(tampered, deps);
     expect(r.regressions.map((x) => x.id)).toContain("release-stop-secret");
+  });
+
+  describe("summarizeRelease (pure PASS/FAIL emission)", () => {
+    it("the healthy seeded corpus passes and emits the success line", async () => {
+      const report = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, deps);
+      const { lines, exitCode } = summarizeRelease(report);
+      expect(exitCode).toBe(0);
+      expect(lines).toContain("\nNo regressions against expected outcomes.");
+    });
+
+    it("an unsafe-ship report FAILs and never emits the misleading success line", async () => {
+      // truth=stop / actual=ship (clean range relabeled) -> unsafeShips=1, no regressions.
+      const tampered = SEEDED_RELEASE_CORPUS.map((c) =>
+        c.id === "release-ship-clean" ? { ...c, truthOutcome: "stop" as const } : c,
+      );
+      const report = await replayReleaseCorpus(tampered, deps);
+      expect(report.metrics.unsafeShips).toBe(1);
+      expect(report.regressions).toEqual([]);
+
+      const { lines, exitCode } = summarizeRelease(report);
+      expect(exitCode).toBe(1);
+      // The reassuring line must NOT trail a hard failure.
+      expect(lines).not.toContain("\nNo regressions against expected outcomes.");
+      expect(lines.some((l) => l.startsWith("\nFAIL:"))).toBe(true);
+    });
   });
 });

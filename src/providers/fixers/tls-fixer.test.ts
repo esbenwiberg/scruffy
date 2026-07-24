@@ -49,6 +49,14 @@ describe("TlsFixer", () => {
     expect(fixer.propose(finding("TLS.REJECT_UNAUTHORIZED_FALSE", "const x = 1; // unrelated line"))).toBeNull();
   });
 
+  it("does not corrupt a longer identifier that only starts with the boolean literal", () => {
+    // The value token must be word-boundary anchored so a flip cannot bleed into a
+    // longer identifier (e.g. falseByDefault / trueFallback), which would silently
+    // rewrite a variable reference in a PR that claims to be a one-flag flip.
+    expect(fixer.propose(finding("TLS.REJECT_UNAUTHORIZED_FALSE", "rejectUnauthorized: falseByDefault"))).toBeNull();
+    expect(fixer.propose(finding("TLS.GO_INSECURE_SKIP_VERIFY", "InsecureSkipVerify: trueFallback"))).toBeNull();
+  });
+
   it("preserves the original indentation end-to-end (analyzer -> fixer)", async () => {
     // An indented offending line must yield an indented replacement, or the applied
     // whole-line patch de-indents the code and breaks it.

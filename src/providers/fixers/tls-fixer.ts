@@ -21,7 +21,7 @@ interface Transform {
 
 const TRANSFORMS: Record<string, Transform> = {
   "TLS.REJECT_UNAUTHORIZED_FALSE": {
-    regex: /(rejectUnauthorized\s*:\s*)false/i,
+    regex: /(rejectUnauthorized\s*:\s*)false\b/i,
     replacement: "$1true",
     rationale: "Re-enable Node TLS certificate verification (rejectUnauthorized: true).",
   },
@@ -31,7 +31,7 @@ const TRANSFORMS: Record<string, Transform> = {
     rationale: "Restore Node TLS certificate verification (NODE_TLS_REJECT_UNAUTHORIZED = 1).",
   },
   "TLS.GO_INSECURE_SKIP_VERIFY": {
-    regex: /(InsecureSkipVerify\s*:\s*)true/,
+    regex: /(InsecureSkipVerify\s*:\s*)true\b/,
     replacement: "$1false",
     rationale: "Re-enable Go TLS certificate verification (InsecureSkipVerify: false).",
   },

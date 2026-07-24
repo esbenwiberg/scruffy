@@ -134,14 +134,22 @@ export class GhCliScm implements ScmReader, ScmWriter {
     }
     // No associated PR: fall back to the head commit's own file list. This is a
     // narrower change set than a full PR diff (truncated context), but well-defined.
-    const raw = await this.#runGh(["api", `repos/${subject.repository}/commits/${subject.commitSha}`]);
+    return this.#commitOwnFiles(subject.repository, subject.commitSha);
+  }
+
+  /** The commit's own change set — the files that commit introduces — with no PR
+   * resolution. Both the no-PR reader fallback and the null-base range use this so
+   * the null-base contract ("the head candidate's own change set") holds regardless
+   * of whether an open PR happens to point at the head commit. */
+  async #commitOwnFiles(repository: string, commitSha: string): Promise<ChangedFile[]> {
+    const raw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}`]);
     const files = this.#parseFiles(this.#parseJson(raw)?.files);
     if (files.length >= COMPARE_FILE_CAP) {
       // The commit endpoint also caps its files array at 300; at the cap we cannot
       // distinguish complete from truncated, so we refuse to scan a partial diff
       // (same discipline as the compare path).
       throw new Error(
-        `gh commit ${subject.commitSha}: ${files.length} files hits GitHub's ${COMPARE_FILE_CAP}-file cap — diff too large to scan completely`,
+        `gh commit ${commitSha}: ${files.length} files hits GitHub's ${COMPARE_FILE_CAP}-file cap — diff too large to scan completely`,
       );
     }
     return mapFiles(files);
@@ -151,7 +159,10 @@ export class GhCliScm implements ScmReader, ScmWriter {
     if (range.baseSha === null) {
       // First-ever review of a branch: no base to compare against. Use the head
       // commit's own change set (the port's documented contract for a null base).
-      return this.getChangedFiles({ repository: range.repository, commitSha: range.headSha });
+      // Call #commitOwnFiles directly, NOT getChangedFiles: the latter resolves an
+      // associated open PR and would silently widen the scan to the PR's base...head
+      // diff, breaking the contract whenever a PR happens to point at the head.
+      return this.#commitOwnFiles(range.repository, range.headSha);
     }
 
     // --slurp wraps every page in an array so all files are collected even when
@@ -209,8 +220,15 @@ export class GhCliScm implements ScmReader, ScmWriter {
     ];
     const raw = await this.#runGh(args);
     // Statuses are "latest per (sha, context) wins", so every post is idempotent by
-    // context — re-posting simply supersedes. Report the status id; `created` is
-    // always true (a status has no prior-existence signal like a check-run does).
+    // context — re-posting simply supersedes, satisfying the port's no-duplicate
+    // invariant. Two caveats vs. the port's canonical contract, both documented on
+    // ScmWriter/CheckRunResult and NOT relied on by any effects code:
+    //   - idempotency is keyed on (subject, name=context), NOT externalId — a single
+    //     POST to /statuses/{sha} exposes no way to key on externalId;
+    //   - `created` is always true — a status has no create-vs-supersede signal like
+    //     a check-run does, and probing for one would need an extra GET on this
+    //     blocking write path (plus a TOCTOU race) for a value callers must treat as
+    //     advisory anyway. It is left true; effects MUST NOT gate on it.
     const id = String(this.#parseJson(raw)?.id ?? `${repository}@${commitSha}#${input.name}`);
     return { id, created: true };
   }

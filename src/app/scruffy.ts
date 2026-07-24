@@ -106,11 +106,18 @@ export class Scruffy {
    */
   async runNightly(input: { repository: string; branch: string; head: string; base?: string | null }): Promise<ReviewResult> {
     const subject = SubjectRevision.parse({ repository: input.repository, commitSha: input.head });
+    // Parse `base` at the boundary like runRelease does for prevRelease, so a
+    // malformed base is rejected here with a clear SubjectRevision error rather
+    // than deep in persistence. Preserve the undefined/null distinction the
+    // nightly review relies on: undefined => use the watermark; null => explicit
+    // first-ever base; a sha => validated override.
+    const base =
+      input.base == null ? input.base : SubjectRevision.parse({ repository: input.repository, commitSha: input.base }).commitSha;
     return this.nightly.review({
       repository: subject.repository,
       branch: input.branch,
       head: subject.commitSha,
-      ...(input.base !== undefined ? { base: input.base } : {}),
+      ...(base !== undefined ? { base } : {}),
     });
   }
 
@@ -132,14 +139,21 @@ export class Scruffy {
     });
   }
 
-  /** Drain outbox effects to the SCM writer. Returns count dispatched. */
-  async flushEffects(): Promise<number> {
+  /**
+   * Drain outbox effects to the SCM writer. Returns count dispatched.
+   *
+   * Bounded by `maxPasses` so a poison-pill effect that a batch keeps re-counting
+   * without draining, or a continuously-refilled outbox, can never hot-spin or
+   * block the caller indefinitely in a single flush. Whatever remains pending is
+   * picked up by the next flush/reconcile pass.
+   */
+  async flushEffects(maxPasses = 100): Promise<number> {
     let total = 0;
-    let sent: number;
-    do {
-      sent = await this.dispatcher.dispatchOnce();
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+      const sent = await this.dispatcher.dispatchOnce();
+      if (sent === 0) break;
       total += sent;
-    } while (sent > 0);
+    }
     return total;
   }
 }

@@ -3,6 +3,7 @@ import { defaultAnalyzers, defaultValidator, POISON_BLOCKABLE_CLASSES } from "..
 import { Corpus } from "../../src/corpus/types.js";
 import { replayCorpus } from "../../src/corpus/replay.js";
 import { SYNTHETIC_CORPUS } from "../../src/corpus/synthetic.js";
+import { SEEDED_CORPUS } from "../../src/corpus/seeded.js";
 import type { PoisonPolicy } from "../../src/domain/policy/types.js";
 
 const POLICY: PoisonPolicy = { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true };
@@ -45,6 +46,17 @@ describe("corpus replay (no database, pure measurement)", () => {
     expect(r.metrics.blockPrecisionWilsonLower95).not.toBeNull();
     expect(r.metrics.blockPrecisionWilsonLower95!).toBeLessThan(1);
     expect(r.metrics.blockPrecisionWilsonLower95!).toBeGreaterThan(0.3);
+  });
+
+  it("the seeded corpus conforms and produces no regressions/false-blocks", async () => {
+    // SEEDED_CORPUS carries the security-critical regression pins (hardcoded AWS
+    // key -> block; intentional column removal -> indeterminate) that were only
+    // ever exercised by `npm run corpus`/`corpus:all`, never by CI. Run them here,
+    // mirroring the pass criteria in all-run.ts.
+    expect(() => Corpus.parse(SEEDED_CORPUS)).not.toThrow();
+    const r = await replayCorpus([...SYNTHETIC_CORPUS, ...SEEDED_CORPUS], deps);
+    expect(r.confusion.false_block).toBe(0);
+    expect(r.regressions).toEqual([]);
   });
 
   it("flags a regression when the gate disagrees with a case's expectedOutcome", async () => {

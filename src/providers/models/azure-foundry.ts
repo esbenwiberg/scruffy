@@ -40,8 +40,23 @@ export class AzureFoundryModelProvider implements ModelProvider {
     let mod: Record<string, unknown>;
     try {
       mod = (await import(FOUNDRY_PACKAGE)) as Record<string, unknown>;
-    } catch {
-      throw new Error(`Azure Foundry backend requires the '${FOUNDRY_PACKAGE}' package to be installed`);
+    } catch (err) {
+      const code = (err as { code?: string } | undefined)?.code;
+      if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") {
+        throw new Error(
+          `Azure Foundry backend requires the '${FOUNDRY_PACKAGE}' package to be installed`,
+          { cause: err },
+        );
+      }
+      // Import failed for a reason other than a missing module (broken transitive
+      // dependency, ESM/CJS resolution error, throwing top-level side effect).
+      // Surface the real diagnostic instead of the misleading 'not installed' message.
+      throw new Error(
+        `Azure Foundry backend failed to load the '${FOUNDRY_PACKAGE}' package: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        { cause: err },
+      );
     }
     const Ctor = (mod["default"] ?? mod["AnthropicFoundry"]) as
       | (new (opts: AzureFoundryOptions) => FoundryClient)

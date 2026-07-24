@@ -14,6 +14,19 @@ import type { ModelProvider, ModelRequest, ModelResponse } from "./port.js";
  *
  * Trade-off: each call spawns a CLI process (seconds of latency), so this suits
  * nightly/deeper validation, not the sub-two-minute poison path.
+ *
+ * LIMITATION — no truncation detection (breaks the anti-under-report contract):
+ * the SDK backends (anthropic-cli.ts, azure-foundry.ts) throw when
+ * `stop_reason === "max_tokens"`, because a length-truncated completion is almost
+ * always invalid JSON that the analyzer parses to "no findings" —
+ * indistinguishable from a clean review. `claude -p` returns only text and an
+ * exit code; it does NOT expose `stop_reason`, so this backend CANNOT tell a
+ * truncated completion from a complete one and will return the partial text as a
+ * normal success. It is therefore unsuitable for high-assurance/blocking gates.
+ * Only use it where a downstream consumer validates completeness (e.g. the model
+ * analyzer drops unparseable output — but a partial completion that still parses
+ * to a shorter valid array would silently under-report). See claude-cli.test.ts,
+ * which pins this gap.
  */
 export class ClaudeCliModelProvider implements ModelProvider {
   readonly id: string;
@@ -34,6 +47,9 @@ export class ClaudeCliModelProvider implements ModelProvider {
     if (this.#model) args.push("--model", this.#model);
 
     const text = await this.#run(args, prompt);
+    // NOTE: exit 0 is the only success signal the CLI gives us. Unlike the SDK
+    // backends we have no `stop_reason`, so a length-truncated completion is
+    // returned here as a normal success — see the LIMITATION note above.
     return { modelId: this.id, text: text.trim() };
   }
 

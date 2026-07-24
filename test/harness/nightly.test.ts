@@ -142,7 +142,8 @@ describe("nightly gate over a seeded range", () => {
     // The disabled-TLS finding -> one fix PR; the leaked-credential -> report only.
     const prs = h.scm.recordedPullRequests();
     expect(prs).toHaveLength(1);
-    expect(prs[0]!.input.branch).toMatch(/^scruffy\/fix\/disabled-tls-verification\/src-http-ts-L1$/);
+    // fixBranch now appends a short sha256 of the raw path (anti-collision) before the line suffix.
+    expect(prs[0]!.input.branch).toMatch(/^scruffy\/fix\/disabled-tls-verification\/src-http-ts-[0-9a-f]{8}-L1$/);
     expect(prs[0]!.input.subject.commitSha).toBe(H1);
     expect(prs[0]!.input.edits[0]!.replacement).toBe("const agent = new https.Agent({ rejectUnauthorized: true });");
     expect(prs[0]!.input.body).toMatch(/not\*\* auto-merged/);

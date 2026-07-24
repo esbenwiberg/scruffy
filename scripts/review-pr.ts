@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { z } from "zod";
 import { SystemClock, UuidIdGenerator } from "../src/platform/clock.js";
-import { createPool } from "../src/persistence/db.js";
+import { createPool, type Pool } from "../src/persistence/db.js";
 import { migrate } from "../src/persistence/migrate.js";
 import { Scruffy } from "../src/app/scruffy.js";
 import { GhCliScm } from "../src/providers/scm/gh-cli.js";
@@ -35,9 +37,67 @@ const POLICY: EffectivePolicy = {
   release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
 };
 
-function gh(args: string[]): any {
+function gh(args: string[]): unknown {
   const out = execFileSync("gh", args, { encoding: "utf8" });
   return JSON.parse(out);
+}
+
+/**
+ * Minimal shape we depend on from `gh api repos/.../pulls/N`. `gh()` returns
+ * `unknown` (a parsed JSON blob we do not control), so the head sha and PR URL
+ * are validated here before use — an error object or unexpected payload returned
+ * with exit code 0 would otherwise blow up later with an opaque `TypeError`.
+ */
+export const PrPayload = z.object({
+  head: z.object({ sha: z.string().min(1) }),
+  html_url: z.string().min(1),
+});
+
+/**
+ * Resolve the PR head sha (full 40-char) + URL from GitHub via the `gh` session.
+ * Both the `gh` transport error and an unexpected response shape map to the same
+ * friendly message + exit 1, so a malformed payload never surfaces as a crash.
+ * `runGh` is injectable so the error paths can be exercised in tests.
+ */
+export function resolvePrHead(
+  runGh: (args: string[]) => unknown,
+  repo: string,
+  prArg: string,
+): { headSha: string; htmlUrl: string } {
+  let raw: unknown;
+  try {
+    raw = runGh(["api", `repos/${repo}/pulls/${prArg}`]);
+  } catch (err) {
+    console.error(`Could not read ${repo}#${prArg} via gh — is gh authenticated and the repo accessible?`);
+    console.error(String(err instanceof Error ? err.message : err));
+    process.exit(1);
+  }
+  const parsed = PrPayload.safeParse(raw);
+  if (!parsed.success) {
+    console.error(`Could not read ${repo}#${prArg} via gh — unexpected response shape (no head.sha).`);
+    process.exit(1);
+  }
+  return { headSha: parsed.data.head.sha, htmlUrl: parsed.data.html_url };
+}
+
+/**
+ * Own the pool lifecycle: create it, migrate, run `body`, and ALWAYS `end()` it —
+ * including when `migrate` (or `body`) throws. Migration runs inside the same
+ * try/finally so a bad DATABASE_URL / schema error can't leak an open pool.
+ * `createPoolFn`/`migrateFn` are injectable so teardown can be tested in isolation.
+ */
+export async function withPool(
+  createPoolFn: () => Pool,
+  migrateFn: (pool: Pool) => Promise<unknown>,
+  body: (pool: Pool) => Promise<void>,
+): Promise<void> {
+  const pool = createPoolFn();
+  try {
+    await migrateFn(pool); // idempotent; ensures the schema exists
+    await body(pool);
+  } finally {
+    await pool.end();
+  }
 }
 
 function usage(): never {
@@ -50,37 +110,28 @@ async function main(): Promise<void> {
   if (!repo || !repo.includes("/") || !prArg || !/^\d+$/.test(prArg)) usage();
 
   // Resolve the PR head sha (full 40-char) + URL from GitHub via the gh session.
-  let pr: { head: { sha: string }; html_url: string };
-  try {
-    pr = gh(["api", `repos/${repo}/pulls/${prArg}`]);
-  } catch (err) {
-    console.error(`Could not read ${repo}#${prArg} via gh — is gh authenticated and the repo accessible?`);
-    console.error(String(err instanceof Error ? err.message : err));
-    process.exit(1);
-  }
-  const headSha = pr.head.sha;
+  const { headSha, htmlUrl } = resolvePrHead(gh, repo, prArg);
   const subject = SubjectRevision.parse({ repository: repo, commitSha: headSha });
 
-  const pool = createPool();
-  await migrate(pool); // idempotent; ensures the schema exists
+  // Pool creation + migration live inside withPool's try/finally, so a migrate
+  // failure still ends the pool instead of leaking open connections.
+  await withPool(createPool, migrate, async (pool) => {
+    const scruffy = new Scruffy({
+      pool,
+      clock: new SystemClock(),
+      ids: new UuidIdGenerator(),
+      policy: POLICY,
+      // gh-backed adapter for BOTH read and write; status links back to the PR.
+      scmReader: new GhCliScm({ targetUrl: htmlUrl }),
+      scmWriter: new GhCliScm({ targetUrl: htmlUrl }),
+      analyzers: defaultAnalyzers(),
+      validator: defaultValidator(),
+      fixers: defaultFixers(),
+      webhookSecret: "unused-in-manual-trigger",
+    });
 
-  const scruffy = new Scruffy({
-    pool,
-    clock: new SystemClock(),
-    ids: new UuidIdGenerator(),
-    policy: POLICY,
-    // gh-backed adapter for BOTH read and write; status links back to the PR.
-    scmReader: new GhCliScm({ targetUrl: pr.html_url }),
-    scmWriter: new GhCliScm({ targetUrl: pr.html_url }),
-    analyzers: defaultAnalyzers(),
-    validator: defaultValidator(),
-    fixers: defaultFixers(),
-    webhookSecret: "unused-in-manual-trigger",
-  });
+    console.log(`Reviewing ${repo}#${prArg} @ ${headSha.slice(0, 12)} …`);
 
-  console.log(`Reviewing ${repo}#${prArg} @ ${headSha.slice(0, 12)} …`);
-
-  try {
     const run = await scruffy.poison.evaluate(subject);
     const flushed = await scruffy.flushEffects();
 
@@ -100,24 +151,24 @@ async function main(): Promise<void> {
 
     // Read the status back so we print exactly what landed on the PR.
     try {
-      const statuses: { state: string; context: string; target_url: string | null }[] = gh([
-        "api",
-        `repos/${repo}/commits/${headSha}/statuses`,
-      ]);
+      const rawStatuses = gh(["api", `repos/${repo}/commits/${headSha}/statuses`]);
+      const statuses = rawStatuses as { state: string; context: string; target_url: string | null }[];
       const ours = statuses.find((s) => s.context === "scruffy/poison");
       if (ours) console.log(`Status    : ${ours.state}  (context scruffy/poison — shadow, non-required)`);
     } catch {
       // Non-fatal: the decision + effect count above are the source of truth.
     }
-    console.log(`PR        : ${pr.html_url}`);
+    console.log(`PR        : ${htmlUrl}`);
 
     if (flushed === 0) {
       console.error("\nWARNING: no effect was dispatched — the status may not have been posted. Check gh push access.");
       process.exitCode = 1;
     }
-  } finally {
-    await pool.end();
-  }
+  });
 }
 
-await main();
+// Only run when invoked as a script (`npm run scruffy:review`); importing this
+// module for its pure helpers (e.g. in tests) must not execute the review.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}

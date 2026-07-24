@@ -116,6 +116,23 @@ describe("GhCliScm reader", () => {
     ]);
   });
 
+  it("null-base range returns the commit's own files and never resolves an associated PR (contract: head's own change set)", async () => {
+    // An OPEN PR points at the head commit. The buggy path delegated to
+    // getChangedFiles, which would resolve this PR's base and compare base...head —
+    // silently widening the null-base scan. The fix bypasses PR resolution.
+    const { runGh, calls } = stub([
+      { match: isPulls, reply: JSON.stringify([{ state: "open", base: { sha: BASE } }]) },
+      { match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)), reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }) },
+    ]);
+    const scm = new GhCliScm({ runGh });
+
+    const files = await scm.getChangedFilesInRange({ repository: REPO, baseSha: null, headSha: HEAD });
+
+    expect(files).toEqual([{ path: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }]);
+    expect(calls.some(isPulls)).toBe(false); // PR resolution bypassed entirely
+    expect(calls.some(isCompare)).toBe(false); // never widened to a base...head compare
+  });
+
   it("ignores a closed-only PR and scans the commit itself (stale base would be wrong)", async () => {
     const { runGh, calls } = stub([
       { match: isPulls, reply: JSON.stringify([{ state: "closed", base: { sha: BASE } }]) },
@@ -151,6 +168,25 @@ describe("GhCliScm writer (check-run effect -> commit status)", () => {
     expect(call).toContain("state=failure"); // failure -> failure
     expect(call).toContain("context=scruffy/poison");
     expect(call.some((s) => s.startsWith("description=Poison gate: blocked"))).toBe(true);
+  });
+
+  it("re-posting the same input supersedes idempotently but reports created:true both times (advisory — effects must not gate on it)", async () => {
+    // A commit status has no create-vs-supersede signal, so the gh adapter reports
+    // created:true on every post (documented on ScmWriter/CheckRunResult). This pins
+    // that intentional divergence from FakeScm: the safety invariant is "no duplicate
+    // effect" (both posts hit the same /statuses/{sha} context, latest wins), NOT that
+    // created detects a redelivery. Any created-gated side effect would misfire here.
+    const { runGh, calls } = stub([{ match: isStatus, reply: JSON.stringify({ id: 999 }) }]);
+    const scm = new GhCliScm({ runGh });
+
+    const first = await scm.upsertCheckRun(input);
+    const second = await scm.upsertCheckRun(input);
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true); // NOT false — the real risk the port docstring warns about
+    const statusPosts = calls.filter(isStatus);
+    expect(statusPosts).toHaveLength(2);
+    expect(statusPosts.every((c) => c.some((s) => s === "context=scruffy/poison"))).toBe(true); // same context -> supersede, no duplicate
   });
 
   it("maps conclusions to status states (neutral -> pending, statuses have no neutral)", () => {

@@ -16,8 +16,12 @@ export type ModelBackend = "fake" | "claude-cli" | "anthropic" | "azure";
 
 export function resolveBackend(): ModelBackend {
   const value = process.env.SCRUFFY_MODEL_BACKEND;
+  // Unset/empty: default to the deterministic fake so nothing fires a live model unasked.
+  if (!value) return "fake";
   if (value === "claude-cli" || value === "anthropic" || value === "azure" || value === "fake") return value;
-  return "fake";
+  // A non-empty but unrecognized value is an operator typo — fail loudly rather than
+  // silently selecting the fake, whose empty output parses to a false "no findings" review.
+  throw new Error(`unknown SCRUFFY_MODEL_BACKEND '${value}'`);
 }
 
 export async function createModelProvider(backend: ModelBackend = resolveBackend()): Promise<ModelProvider> {

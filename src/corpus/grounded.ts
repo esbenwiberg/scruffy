@@ -49,7 +49,14 @@ function newFile(lines: string[]): string {
 }
 
 function sha(prefix: string, n: number): string {
-  // Distinct per-spec prefix so grounded shas never collide across corpora.
+  // These are cosmetic identifiers, not real git objects. Collision-avoidance is
+  // NOT from `prefix` (every call site passes the same literal "a"); it comes from
+  // distinct numeric offset BANDS per role: 100+i for the subject/detection sha,
+  // 200+i for a range base, 300+i for a range head. Nightly and release DELIBERATELY
+  // reuse the 200/300 base/head pair (same underlying range, scored by two gates).
+  // If you add a corpus, give it a fresh band (e.g. 400+i) — reusing 100/200/300
+  // silently collides with the existing shas. `prefix` stays a param only so a future
+  // corpus could be namespaced by prefix instead of by band.
   return (prefix + n.toString(16)).padStart(40, "0");
 }
 

@@ -55,25 +55,34 @@ export class Reconciler {
       const maxAttempts = this.#maxAttemptsFor(run.kind);
       if (maxAttempts === undefined) continue;
 
-      // Attempt bound is enforced for BOTH states. A run can reach `pending` with
-      // attempt == maxAttempts if a reconciler crashed after reclaiming but before
-      // driving; without this check the next pass would claim it (attempt+1) and
-      // exceed the documented bound. Abandon from whatever state it is in.
-      if (run.attempt >= maxAttempts) {
-        await this.#abandon(run);
+      // Isolate each run: a transient model/DB error (or a poison-pill payload) in
+      // one run's reclaim/drive/abandon must not abort the pass and starve every
+      // healthy run ordered behind it. findReconcilable is deterministic, so a run
+      // that fails consistently would otherwise head every pass and block all
+      // others forever. Log, skip, and let the next pass retry it.
+      try {
+        // Attempt bound is enforced for BOTH states. A run can reach `pending` with
+        // attempt == maxAttempts if a reconciler crashed after reclaiming but before
+        // driving; without this check the next pass would claim it (attempt+1) and
+        // exceed the documented bound. Abandon from whatever state it is in.
+        if (run.attempt >= maxAttempts) {
+          await this.#abandon(run);
+          acted += 1;
+          continue;
+        }
+
+        if (run.state === "analyzing") {
+          // The query only returns analyzing runs with an EXPIRED lease.
+          const reclaimed = await this.runs.reclaimExpired(run.id);
+          if (!reclaimed) continue; // lost the race to another reconciler
+        }
+
+        // Pending (originally, or just reclaimed): drive it through its gate.
+        await this.#drive(run);
         acted += 1;
-        continue;
+      } catch (err) {
+        console.error(`reconcile: run ${run.id} (${run.kind}) failed this pass; skipping`, err);
       }
-
-      if (run.state === "analyzing") {
-        // The query only returns analyzing runs with an EXPIRED lease.
-        const reclaimed = await this.runs.reclaimExpired(run.id);
-        if (!reclaimed) continue; // lost the race to another reconciler
-      }
-
-      // Pending (originally, or just reclaimed): drive it through its gate.
-      await this.#drive(run);
-      acted += 1;
     }
     return acted;
   }
