@@ -25,6 +25,7 @@
     "corpus:grounded:live": "tsx scripts/grounded-live.ts",
     "scruffy:review": "tsx scripts/review-pr.ts",
     "serve": "tsx src/server/main.ts",
+    "ops:measure": "npm run build && tsx scripts/ops-measure.ts",
     "llm-smoke": "tsx scripts/llm-smoke.ts",
     "db:up": "docker compose up -d db && node scripts/wait-for-db.mjs",
     "db:down": "docker compose down",

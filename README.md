@@ -183,9 +183,11 @@ Honest gaps against ADR 0003's acceptance list:
 - **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
   labeled with their reduced coverage; no such labeling exists yet.
 - **Hostile-execution runner** (validation #5) — separate trust boundary,
-  its own spike. Also unmet: cold-start/latency/ops measurement (#6) and the
-  cross-language capability comparison (#7). These are why ADR-0003 is still
-  Proposed.
+  its own spike. Validation #6 (cold start / latency / memory / ops steps) is
+  now measured — `npm run ops:measure`, methodology and recorded runs in
+  `docs/product/ops-measurement.md` — though only on a dev machine so far, not
+  the target environment. The cross-language capability comparison (#7) is
+  still unwritten. These are why ADR-0003 is still Proposed.
 - **Merge-group / merge-queue** handling — the webhook path parses only
   `pull_request` events; `merge_group_sha` is always null.
 - A statistically meaningful corpus — the synthetic set is a machinery smoke
