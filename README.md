@@ -182,14 +182,17 @@ Honest gaps against ADR 0003's acceptance list:
   App-authenticated reader is the remaining code gap.
 - **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
   labeled with their reduced coverage; no such labeling exists yet.
-- **Hostile-execution runner** (validation #5) — separate trust boundary,
-  its own spike. Validation #6 (cold start / latency / memory / ops steps) is
-  now measured — `npm run ops:measure`, methodology and recorded runs in
-  `docs/product/ops-measurement.md` — though only on a dev machine so far, not
-  the target environment. The language capability record (#7) is written
+- **Hostile-execution runner** (validation #5) — the LOCAL half is done: a
+  Docker-backed disposable runner whose isolation proof suite plants real
+  credential names and attempts every escape the ADR lists (`npm run
+  test:isolation`; `docs/product/hostile-runner-spike.md`). Still open: choosing the
+  production isolation technology (gVisor / microVM / managed sandbox) and
+  re-running the proof there — a container alone is not the final boundary.
+  Validation #6 (cold start / latency / memory / ops steps) is measured —
+  `npm run ops:measure`, `docs/product/ops-measurement.md` — though only on a
+  dev machine so far. The language capability record (#7) is written
   (`docs/decisions/0003-validation-7-language-capability-record.md`; verdict:
-  no material gap). The hostile runner is the remaining substantive blocker to
-  ADR-0003 acceptance.
+  no material gap).
 - **Merge-group / merge-queue** handling — the webhook path parses only
   `pull_request` events; `merge_group_sha` is always null.
 - A statistically meaningful corpus — the synthetic set is a machinery smoke

@@ -16,6 +16,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:isolation": "vitest run --config vitest.isolation.config.ts",
     "harness": "tsx test/harness/e2e.ts",
     "corpus": "tsx src/corpus/run.ts",
     "corpus:nightly": "tsx src/corpus/nightly-run.ts",
