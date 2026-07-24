@@ -6,6 +6,7 @@ import { createPool, type Pool } from "../src/persistence/db.js";
 import { migrate } from "../src/persistence/migrate.js";
 import { Scruffy } from "../src/app/scruffy.js";
 import { GhCliScm } from "../src/providers/scm/gh-cli.js";
+import { createScmWriter, resolveScmWriterBackend } from "../src/providers/scm/factory.js";
 import {
   defaultAnalyzers,
   defaultValidator,
@@ -115,15 +116,20 @@ async function main(): Promise<void> {
 
   // Pool creation + migration live inside withPool's try/finally, so a migrate
   // failure still ends the pool instead of leaking open connections.
+  // Writer backend: gh-cli posts a shadow commit status via the developer's own
+  // session; SCRUFFY_SCM_WRITER=github-app posts a REAL check-run through the
+  // separately privileged App installation (ADR-0001's write credential).
+  const writerBackend = resolveScmWriterBackend();
+
   await withPool(createPool, migrate, async (pool) => {
     const scruffy = new Scruffy({
       pool,
       clock: new SystemClock(),
       ids: new UuidIdGenerator(),
       policy: POLICY,
-      // gh-backed adapter for BOTH read and write; status links back to the PR.
+      // gh-backed reader; the writer comes from the factory (see above).
       scmReader: new GhCliScm({ targetUrl: htmlUrl }),
-      scmWriter: new GhCliScm({ targetUrl: htmlUrl }),
+      scmWriter: createScmWriter(writerBackend, { targetUrl: htmlUrl }),
       analyzers: defaultAnalyzers(),
       validator: defaultValidator(),
       fixers: defaultFixers(),
@@ -147,7 +153,7 @@ async function main(): Promise<void> {
       const reasons = Array.isArray(decision.reasons) ? decision.reasons.join(", ") : "";
       console.log(`Decision  : ${decision.outcome}${reasons ? `  (${reasons})` : ""}`);
     }
-    console.log(`Effects   : ${flushed} dispatched to GitHub`);
+    console.log(`Effects   : ${flushed} dispatched to GitHub (writer: ${writerBackend})`);
 
     // Read the status back so we print exactly what landed on the PR.
     try {

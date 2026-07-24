@@ -147,6 +147,10 @@ export class NightlyService {
           subject: fix.subject,
           externalId: fix.branch,
           branch: fix.branch,
+          // The fix targets the branch this nightly review ran on — opening it
+          // against the repo default branch would propose the patch to the
+          // wrong history whenever nightly reviews a non-default branch.
+          baseBranch: branch,
           title: fix.title,
           body: fix.body,
           edits: fix.edits,
