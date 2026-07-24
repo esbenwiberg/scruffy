@@ -63,7 +63,16 @@ function isSqlFile(path: string): boolean {
 }
 
 interface Statement {
+  /** The raw statement text — what goes in the finding snippet. */
   text: string;
+  /**
+   * The statement with string-literal CONTENTS blanked out — what rules match
+   * against. Matching the raw text let literal content drive the verdict both
+   * ways: `INSERT INTO audit_log VALUES ('note: DELETE FROM temp')` false-BLOCKED
+   * (a keyword inside a string), and `UPDATE t SET note = 'where applicable'`
+   * false-ALLOWED (the literal's "where" masqueraded as the missing guard).
+   */
+  matchText: string;
   line: number;
 }
 
@@ -76,20 +85,23 @@ interface Statement {
 function statements(added: readonly AddedLine[]): Statement[] {
   const out: Statement[] = [];
   let buf = "";
+  let matchBuf = "";
   let startLine = -1;
   let inSingle = false;
   let inDouble = false;
 
   const flush = () => {
     const text = buf.trim();
-    if (text !== "") out.push({ text, line: startLine });
+    if (text !== "") out.push({ text, matchText: matchBuf.trim(), line: startLine });
     buf = "";
+    matchBuf = "";
   };
 
   for (const { text, line } of added) {
     for (let i = 0; i < text.length; i += 1) {
       const c = text[i]!;
       if (!inSingle && !inDouble && c === "-" && text[i + 1] === "-") break; // rest of line is a comment
+      const wasInLiteral = inSingle || inDouble;
       if (c === "'" && !inDouble) inSingle = !inSingle;
       else if (c === '"' && !inSingle) inDouble = !inDouble;
 
@@ -98,10 +110,16 @@ function statements(added: readonly AddedLine[]): Statement[] {
         flush();
       } else {
         buf += c;
+        // Keep the quote delimiters (so the match text still reads as SQL) but
+        // blank everything inside them.
+        matchBuf += wasInLiteral && (inSingle || inDouble) ? " " : c;
       }
     }
     // A physical newline separates tokens across lines; never glue them together.
-    if (buf !== "") buf += " ";
+    if (buf !== "") {
+      buf += " ";
+      matchBuf += " ";
+    }
   }
   flush();
   return out;
@@ -116,7 +134,7 @@ export class DestructiveMigrationAnalyzer implements Analyzer {
       if (!isSqlFile(file.path)) continue;
       for (const stmt of statements(addedLines(file.patch))) {
         for (const rule of RULES) {
-          if (!rule.matches(stmt.text)) continue;
+          if (!rule.matches(stmt.matchText)) continue;
           findings.push(
             deterministicFinding({
               ruleId: rule.ruleId,

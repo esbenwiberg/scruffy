@@ -12,6 +12,7 @@ import type { Corpus } from "./types.js";
  */
 
 const PROV = { source: "synthetic", author: "scruffy-seed", createdAt: "2026-07-15" } as const;
+const PROV2 = { source: "synthetic", author: "scruffy-seed", createdAt: "2026-07-24" } as const;
 
 function newFile(lines: string[]): string {
   return [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join("\n");
@@ -185,5 +186,140 @@ export const SYNTHETIC_CORPUS: Corpus = [
     truthDefectClass: null,
     expectedOutcome: "allow",
     provenance: PROV,
+  },
+
+  // ── Seam cases (2026-07-24): each pins a specific analyzer/validator edge, ──
+  // ── not just another instance of an already-covered happy path.           ──
+  {
+    id: "migration-update-no-where",
+    description: "whole-table UPDATE with no WHERE — unguarded corruption, confirmed destructive",
+    subject: { repository: "acme/api", commitSha: sha(17) },
+    files: [{ path: "migrations/0021_flags.sql", patch: newFile(["UPDATE feature_flags SET enabled = true;"]) }],
+    truthPoison: true,
+    truthDefectClass: "destructive-schema-change",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "migration-multiline-delete-guarded",
+    description: "DELETE whose WHERE guard sits on the NEXT line — statement-level matching must see the guard",
+    subject: { repository: "acme/api", commitSha: sha(18) },
+    files: [
+      { path: "migrations/0022_cleanup.sql", patch: newFile(["DELETE FROM sessions", "WHERE expires_at < now();"]) },
+    ],
+    truthPoison: false,
+    truthDefectClass: null,
+    expectedOutcome: "allow",
+    provenance: PROV2,
+  },
+  {
+    id: "migration-multiline-delete-unguarded",
+    description: "unguarded DELETE split across lines — line-level scanning would miss it",
+    subject: { repository: "acme/api", commitSha: sha(19) },
+    files: [{ path: "migrations/0023_purge.sql", patch: newFile(["DELETE FROM", "  user_events;"]) }],
+    truthPoison: true,
+    truthDefectClass: "destructive-schema-change",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "migration-delete-in-comment",
+    description: "destructive statement only inside a -- comment — inert, must not block",
+    subject: { repository: "acme/api", commitSha: sha(20) },
+    files: [
+      {
+        path: "migrations/0024_index.sql",
+        patch: newFile(["-- DELETE FROM users; (ran manually in 2024, kept for the record)", "CREATE INDEX idx_users_email ON users (email);"]),
+      },
+    ],
+    truthPoison: false,
+    truthDefectClass: null,
+    expectedOutcome: "allow",
+    provenance: PROV2,
+  },
+  {
+    id: "migration-keyword-inside-string",
+    description: "DELETE FROM appearing inside a string LITERAL of an INSERT — literal content must not drive a block",
+    subject: { repository: "acme/api", commitSha: sha(21) },
+    files: [
+      {
+        path: "migrations/0025_audit.sql",
+        patch: newFile(["INSERT INTO audit_log (note)", "VALUES ('cleanup: DELETE FROM temp_rows');"]),
+      },
+    ],
+    truthPoison: false,
+    truthDefectClass: null,
+    expectedOutcome: "allow",
+    provenance: PROV2,
+  },
+  {
+    id: "migration-where-only-in-string",
+    description: "whole-table UPDATE whose only 'where' lives inside a string literal — the fake guard must not mask it",
+    subject: { repository: "acme/api", commitSha: sha(22) },
+    files: [{ path: "migrations/0026_notes.sql", patch: newFile(["UPDATE flags SET note = 'where applicable';"]) }],
+    truthPoison: true,
+    truthDefectClass: "destructive-schema-change",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "orm-delete-in-app-code",
+    description: "DELETE FROM inside an ORM query string in application code — not a migration, out of scope for the class",
+    subject: { repository: "acme/web", commitSha: sha(23) },
+    files: [{ path: "src/jobs/cleanup.ts", patch: newFile(['await db.query("DELETE FROM sessions");']) }],
+    truthPoison: false,
+    truthDefectClass: null,
+    expectedOutcome: "allow",
+    provenance: PROV2,
+  },
+  {
+    id: "tls-env-var-prod",
+    description: "NODE_TLS_REJECT_UNAUTHORIZED=0 baked into a runtime image — process-wide TLS disable",
+    subject: { repository: "acme/svc", commitSha: sha(24) },
+    files: [{ path: "Dockerfile", patch: newFile(["ENV NODE_TLS_REJECT_UNAUTHORIZED=0"]) }],
+    truthPoison: true,
+    truthDefectClass: "disabled-tls-verification",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "tls-live-after-inline-comment",
+    description: "live TLS disable AFTER an inline comment — a comment-prefix heuristic would wave the MITM hole through",
+    subject: { repository: "acme/web", commitSha: sha(25) },
+    files: [{ path: "src/http.ts", patch: newFile(["/* keep for prod */ const agent = new https.Agent({ rejectUnauthorized: false });"]) }],
+    truthPoison: true,
+    truthDefectClass: "disabled-tls-verification",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "leak-key-attacker-comment",
+    description: "live-looking AWS key with an attacker-written 'example' comment on the SAME line — the token, not the line, must be judged",
+    subject: { repository: "acme/web", commitSha: sha(26) },
+    files: [{ path: "src/config.ts", patch: newFile(["export const KEY = 'AKIAQWERTYUIOP123456'; // just an example, ignore"]) }],
+    truthPoison: true,
+    truthDefectClass: "leaked-credential",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "leak-openssh-private-key",
+    description: "OPENSSH-format PEM private key committed to source",
+    subject: { repository: "acme/api", commitSha: sha(27) },
+    files: [{ path: "deploy/ssh_key", patch: newFile(["-----BEGIN OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEA..."]) }],
+    truthPoison: true,
+    truthDefectClass: "leaked-credential",
+    expectedOutcome: "block",
+    provenance: PROV2,
+  },
+  {
+    id: "placeholder-x-key",
+    description: "all-X placeholder AWS key in docs — an obvious dummy, must be refuted",
+    subject: { repository: "acme/web", commitSha: sha(28) },
+    files: [{ path: "docs/setup.md", patch: newFile(["Set AWS_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX"]) }],
+    truthPoison: false,
+    truthDefectClass: null,
+    expectedOutcome: "allow",
+    provenance: PROV2,
   },
 ];

@@ -7,6 +7,7 @@ import type { NightlyCorpus } from "./nightly-types.js";
  */
 
 const PROV = { source: "seeded-mutation", author: "ewi", createdAt: "2026-07-16" } as const;
+const PROV24 = { source: "seeded-mutation", author: "ewi", createdAt: "2026-07-24" } as const;
 
 function newFile(lines: string[]): string {
   return [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join("\n");
@@ -70,5 +71,25 @@ export const SEEDED_NIGHTLY_CORPUS: NightlyCorpus = [
     expected: [{ defectClass: "leaked-credential", path: "src/config/credentials.ts", disposition: "report" }],
     expectedSummary: { reported: 1, proposedFixes: 0, suppressed: 0 },
     provenance: PROV,
+  },
+  {
+    // Adversarial noise range: every finding the analyzers raise here is a
+    // refuted false positive (docs example key, commented-out TLS disable).
+    // Nightly must SUPPRESS them all — surfacing refuted noise would train
+    // humans to ignore the report.
+    id: "nightly-refuted-noise-range",
+    description:
+      "range whose only findings are refuted false positives (docs example key + commented-out TLS) — all suppressed, nothing surfaced",
+    range: { repository: "shop/checkout", baseSha: sha(0x20), headSha: sha(0x21) },
+    files: [
+      { path: "docs/onboarding.md", patch: newFile(["Set AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE to try the sandbox."]) },
+      { path: "src/fetch.ts", patch: newFile(["// rejectUnauthorized: false — removed after the cert rotation"]) },
+    ],
+    expected: [
+      { defectClass: "leaked-credential", path: "docs/onboarding.md", disposition: "suppress" },
+      { defectClass: "disabled-tls-verification", path: "src/fetch.ts", disposition: "suppress" },
+    ],
+    expectedSummary: { reported: 0, proposedFixes: 0, suppressed: 2 },
+    provenance: PROV24,
   },
 ];

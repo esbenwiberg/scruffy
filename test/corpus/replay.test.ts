@@ -18,25 +18,25 @@ describe("corpus replay (no database, pure measurement)", () => {
   it("scores the synthetic corpus: zero false blocks across three defect classes", async () => {
     const r = await replayCorpus(SYNTHETIC_CORPUS, deps);
 
-    expect(r.total).toBe(16);
-    expect(r.positives).toBe(9);
-    expect(r.negatives).toBe(7);
+    expect(r.total).toBe(28);
+    expect(r.positives).toBe(16);
+    expect(r.negatives).toBe(12);
 
-    expect(r.confusion.true_block).toBe(8);
+    expect(r.confusion.true_block).toBe(15);
     expect(r.confusion.false_block).toBe(0);
     expect(r.confusion.missed).toBe(0);
-    expect(r.confusion.true_allow).toBe(7);
+    expect(r.confusion.true_allow).toBe(12);
     expect(r.confusion.abstain_on_poison).toBe(1); // the DROP TABLE escalation
     expect(r.confusion.abstain_on_clean).toBe(0);
 
     expect(r.metrics.blockPrecision).toBe(1);
     expect(r.metrics.falseBlockRate).toBe(0);
-    expect(r.metrics.severeRecall).toBeCloseTo(8 / 9, 5);
-    expect(r.metrics.abstainRate).toBeCloseTo(1 / 16, 5);
+    expect(r.metrics.severeRecall).toBeCloseTo(15 / 16, 5);
+    expect(r.metrics.abstainRate).toBeCloseTo(1 / 28, 5);
 
-    expect(r.byDefectClass["leaked-credential"]).toEqual({ positives: 3, caught: 3, missed: 0, abstained: 0 });
-    expect(r.byDefectClass["destructive-schema-change"]).toEqual({ positives: 3, caught: 2, missed: 0, abstained: 1 });
-    expect(r.byDefectClass["disabled-tls-verification"]).toEqual({ positives: 3, caught: 3, missed: 0, abstained: 0 });
+    expect(r.byDefectClass["leaked-credential"]).toEqual({ positives: 5, caught: 5, missed: 0, abstained: 0 });
+    expect(r.byDefectClass["destructive-schema-change"]).toEqual({ positives: 6, caught: 5, missed: 0, abstained: 1 });
+    expect(r.byDefectClass["disabled-tls-verification"]).toEqual({ positives: 5, caught: 5, missed: 0, abstained: 0 });
     expect(r.regressions).toEqual([]);
   });
 

@@ -26,13 +26,14 @@ describe("nightly corpus replay (pure disposition + fix measurement)", () => {
   it("scores the seeded corpus: right dispositions, a fix generated, nothing spurious", async () => {
     const r = await replayNightlyCorpus(SEEDED_NIGHTLY_CORPUS, deps);
 
-    expect(r.total).toBe(3);
+    expect(r.total).toBe(4);
     expect(r.totals.missed).toBe(0);
     expect(r.totals.wrongDisposition).toBe(0);
     expect(r.totals.falseSurface).toBe(0);
 
     // mixed range: report (leaked-cred) + propose_fix (prod TLS); plus the
-    // agent-harness secret range: report (leaked-cred). Three surfaced total.
+    // agent-harness secret range: report (leaked-cred). Three surfaced total —
+    // the refuted-noise range suppresses both its findings and surfaces nothing.
     expect(r.totals.expectedSurfaced).toBe(3);
     expect(r.totals.actualSurfaced).toBe(3);
     // one fix expected (the prod TLS-disable), one generated.

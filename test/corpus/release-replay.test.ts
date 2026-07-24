@@ -21,7 +21,7 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
   it("reaches the right outcome for every seeded range, and never unsafely ships", async () => {
     const r = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, deps);
 
-    expect(r.total).toBe(5);
+    expect(r.total).toBe(7);
     expect(r.metrics.outcomeAccuracy).toBe(1);
     expect(r.metrics.unsafeShips).toBe(0);
     expect(r.metrics.indeterminates).toBe(0);

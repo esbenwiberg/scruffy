@@ -9,6 +9,7 @@ import type { ReleaseCorpus } from "./release-types.js";
  */
 
 const PROV = { source: "seeded-mutation", author: "ewi", createdAt: "2026-07-16" } as const;
+const PROV24 = { source: "seeded-mutation", author: "ewi", createdAt: "2026-07-24" } as const;
 
 function newFile(lines: string[]): string {
   return [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join("\n");
@@ -87,5 +88,34 @@ export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
     truthOutcome: "stop",
     expectedOutcome: "stop",
     provenance: PROV,
+  },
+  {
+    // The other confirmed-destructive shape: an unguarded whole-table UPDATE is
+    // validated (not escalated like a bare DROP), and destructive-schema-change
+    // is a stop class — irreversible data corruption must not ship.
+    id: "release-stop-update-without-where",
+    description: "release candidate carrying an unguarded whole-table UPDATE in a migration — confirmed destructive, must STOP",
+    range: { repository: "shop/checkout", baseSha: sha(0x20), headSha: sha(0x21) },
+    files: [
+      { path: "migrations/0031_backfill.sql", patch: newFile(["UPDATE orders SET status = 'archived';"]) },
+      { path: "src/status.ts", patch: newFile(["export const ARCHIVED = 'archived';"]) },
+    ],
+    truthOutcome: "stop",
+    expectedOutcome: "stop",
+    provenance: PROV24,
+  },
+  {
+    // Refuted noise must CLEAR, not accumulate into a sign-off: a docs example
+    // key and a test-file TLS disable are both refuted, so the candidate ships.
+    id: "release-ship-despite-refuted-noise",
+    description: "candidate whose only findings are refuted false positives (docs example key + test-file TLS) — ships clean",
+    range: { repository: "shop/checkout", baseSha: sha(0x22), headSha: sha(0x23) },
+    files: [
+      { path: "docs/setup.md", patch: newFile(["Use AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE for the sandbox walkthrough."]) },
+      { path: "test/tls.test.ts", patch: newFile(["const agent = new https.Agent({ rejectUnauthorized: false });"]) },
+    ],
+    truthOutcome: "ship",
+    expectedOutcome: "ship",
+    provenance: PROV24,
   },
 ];
