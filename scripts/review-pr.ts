@@ -7,17 +7,7 @@ import { migrate } from "../src/persistence/migrate.js";
 import { Scruffy } from "../src/app/scruffy.js";
 import { GhCliScm } from "../src/providers/scm/gh-cli.js";
 import { createScmWriter, resolveScmWriterBackend } from "../src/providers/scm/factory.js";
-import {
-  defaultAnalyzers,
-  defaultValidator,
-  defaultFixers,
-  POISON_BLOCKABLE_CLASSES,
-  NIGHTLY_REPORTABLE_CLASSES,
-  NIGHTLY_FIXABLE_CLASSES,
-  RELEASE_STOP_CLASSES,
-  RELEASE_SIGNOFF_CLASSES,
-} from "../src/providers/registry.js";
-import type { EffectivePolicy } from "../src/domain/policy/types.js";
+import { defaultAnalyzers, defaultValidator, defaultFixers, defaultPolicy } from "../src/providers/registry.js";
 import { SubjectRevision } from "../src/domain/evidence/types.js";
 
 /**
@@ -30,13 +20,6 @@ import { SubjectRevision } from "../src/domain/evidence/types.js";
  * Deterministic critical path: poison runs the DETERMINISTIC analyzers only (no
  * model), matching the rest of the skeleton.
  */
-
-const POLICY: EffectivePolicy = {
-  version: "policy-v1",
-  poison: { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true },
-  nightly: { reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES], fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES] },
-  release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
-};
 
 function gh(args: string[]): unknown {
   const out = execFileSync("gh", args, { encoding: "utf8" });
@@ -126,7 +109,7 @@ async function main(): Promise<void> {
       pool,
       clock: new SystemClock(),
       ids: new UuidIdGenerator(),
-      policy: POLICY,
+      policy: defaultPolicy(),
       // gh-backed reader; the writer comes from the factory (see above).
       scmReader: new GhCliScm({ targetUrl: htmlUrl }),
       scmWriter: createScmWriter(writerBackend, { targetUrl: htmlUrl }),

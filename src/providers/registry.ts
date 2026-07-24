@@ -1,4 +1,5 @@
 import type { Analyzer } from "./analyzers/port.js";
+import type { EffectivePolicy } from "../domain/policy/types.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "./fixers/port.js";
 import type { ModelProvider } from "./models/port.js";
@@ -55,6 +56,21 @@ export const NIGHTLY_FIXABLE_CLASSES = ["disabled-tls-verification"] as const;
  */
 export const RELEASE_STOP_CLASSES = ["leaked-credential", "destructive-schema-change"] as const;
 export const RELEASE_SIGNOFF_CLASSES = ["disabled-tls-verification", ...MODEL_DEFECT_CLASSES] as const;
+
+/**
+ * The production policy derived from the registry's class lists — the single
+ * place the class↔gate bindings become an EffectivePolicy, so entrypoints
+ * (server, scripts) cannot drift from each other. The harness keeps its own
+ * copy in test fixtures on purpose (tests pin behavior, not this function).
+ */
+export function defaultPolicy(version = "policy-v1"): EffectivePolicy {
+  return {
+    version,
+    poison: { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true },
+    nightly: { reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES], fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES] },
+    release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
+  };
+}
 
 export function defaultAnalyzers(): Analyzer[] {
   return [new SecretScanAnalyzer(), new DestructiveMigrationAnalyzer(), new DisabledTlsAnalyzer()];
