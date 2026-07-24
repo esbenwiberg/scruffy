@@ -62,8 +62,32 @@ decision and the PR URL.
 
 Why a status and not a check-run: creating check-runs requires a GitHub App
 (`checks:write`); a user token (which `gh` holds) can't. Commit statuses need only
-push access. The richer check-run object is a later GitHub-App slice. Point it at a
-**test repo you control**, never a customer repo — a status is a visible write.
+push access. Point it at a **test repo you control**, never a customer repo — a
+status is a visible write.
+
+### GitHub App writer (real check-runs + fix PRs)
+
+The App-backed writer (`src/providers/scm/github-app.ts`) is the separately,
+narrowly privileged write credential ADR-0001 requires: an App installation
+scoped to `checks:write`, `contents:write`, and `pull_requests:write`, distinct
+from whatever credential reads. It posts **real check-runs** (native `neutral`,
+title + summary, idempotent on the port's canonical `(subject, externalId)` key)
+and opens **fix PRs** (deterministic branch from the reviewed sha, line edits
+committed via the contents API, crash-resumable at every step, never merged).
+
+Select it with `SCRUFFY_SCM_WRITER=github-app` (default stays `gh-cli`, the
+shadow status). Credentials come from the environment only:
+
+```bash
+export SCRUFFY_GH_APP_ID=...               # the App's numeric id
+export SCRUFFY_GH_APP_INSTALLATION_ID=...  # its installation on the target org
+export SCRUFFY_GH_APP_PRIVATE_KEY_FILE=~/.secrets/scruffy-app.pem   # or _KEY with the PEM
+SCRUFFY_SCM_WRITER=github-app npm run scruffy:review -- <owner/repo> <pr-number>
+```
+
+Registering the App (a one-time browser step) and the first outward check-run
+against a real repo remain to be run by a human; the adapter itself is
+contract-tested offline against recorded GitHub response shapes.
 
 ## What the skeleton proves
 
@@ -122,19 +146,19 @@ SCRUFFY_MODEL_BACKEND=claude-cli npm run llm-smoke
 
 Honest gaps against ADR 0003's acceptance list:
 
-- **Real GitHub writes beyond a shadow status.** A `gh`-backed adapter now reads
-  real PRs and posts a shadow commit status (`npm run scruffy:review`), but the
-  richer **check-run** object and **fix-PR writes** need a GitHub App (deferred),
-  and there is no hosted webhook server yet (the verify path exists; the trigger
-  is manual). Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are off
-  the deterministic critical path.
-- **ADR deviations to reconcile.** ADR-0003 specifies GitHub I/O through Octokit;
-  the walking skeleton shells out to the `gh` CLI instead (see the shadow-status
-  section for why). ADR-0001 wants writes to go through a *separately, narrowly
-  privileged* component; today a single `gh` user session serves both read and
-  write. The effects dispatcher is the sole write path (the architectural half of
-  that decision), but the separate credential is not yet real. Neither ADR has
-  been amended.
+- **A registered GitHub App + the first outward check-run.** The App-backed
+  writer (check-runs + fix PRs through Octokit auth, the separate write
+  credential) is built and contract-tested, but no App is registered yet, so the
+  outward e2e has not run against a real repo. There is also no hosted webhook
+  server yet (the verify path exists; the trigger is manual). Model adapters
+  exist (`claude-cli`/`anthropic`/`azure`) but are off the deterministic
+  critical path.
+- **ADR deviations to reconcile.** ADR-0003 specifies GitHub I/O through
+  Octokit; reads still shell out to the `gh` CLI (writes now have the
+  Octokit-authenticated App path). ADR-0001's *separately, narrowly privileged*
+  write component now exists in code (`SCRUFFY_SCM_WRITER=github-app`) but the
+  default local flow still uses one `gh` session for both read and write.
+  Neither ADR has been amended yet.
 - **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
   labeled with their reduced coverage; no such labeling exists yet.
 - **Hostile-execution runner** (validation #5) — separate trust boundary,

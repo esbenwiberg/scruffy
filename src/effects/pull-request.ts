@@ -12,6 +12,9 @@ export const PullRequestPayload = z.object({
   subject: SubjectRevision,
   externalId: z.string().min(1),
   branch: z.string().min(1),
+  /** Merge target (the reviewed branch). Optional: pre-existing persisted
+   * effects lack it; adapters fall back to the repo default branch. */
+  baseBranch: z.string().min(1).optional(),
   title: z.string().min(1),
   body: z.string().min(1),
   edits: z.array(ProposedEdit).min(1),
@@ -23,6 +26,7 @@ export function toPullRequestInput(payload: PullRequestPayload): PullRequestInpu
     subject: payload.subject,
     externalId: payload.externalId,
     branch: payload.branch,
+    ...(payload.baseBranch !== undefined ? { baseBranch: payload.baseBranch } : {}),
     title: payload.title,
     body: payload.body,
     edits: payload.edits.map((e) => ({

@@ -75,6 +75,12 @@ export interface PullRequestInput {
   externalId: string;
   /** Deterministic head branch for the fix. */
   branch: string;
+  /**
+   * The branch the review ran on — the PR's merge target. Optional for
+   * backward compatibility with persisted effects; an adapter falls back to the
+   * repository's default branch when absent.
+   */
+  baseBranch?: string;
   title: string;
   body: string;
   edits: PullRequestEdit[];
