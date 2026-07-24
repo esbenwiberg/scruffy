@@ -238,8 +238,15 @@ deviations recorded rather than papered over:
    met.** Fenced leases with heartbeat, idempotent `ensureRun`, bounded retry
    then abstain, and a reconciler that recovers `pending` and crashed
    `analyzing` runs; exercised by the harness tests.
-5. **Hostile-runner isolation proof — outstanding.** The remaining substantive
-   blocker to acceptance.
+5. **Hostile-runner isolation proof — local half done.** A Docker-backed
+   runner (`src/execution/docker-runner.ts`) runs disposable hostile jobs and
+   an executable proof suite (`test/execution/docker-runner.test.ts`) plants
+   real credential names and attempts every listed escape — credentials,
+   cloud metadata, internal services, cross-job filesystem — asserting each
+   fails (`docs/product/hostile-runner-spike.md`). Open: selecting the
+   production isolation technology from the deployment threat model (gVisor /
+   microVM / managed sandbox — this ADR's own "a container is not
+   automatically sufficient" warning) and re-running the same proof there.
 6. **Ops measurement — instrumented and recorded** on a dev machine
    (`npm run ops:measure`; `docs/product/ops-measurement.md`): cold start
    ~112 ms, RSS ~68 MiB, webhook→dispatch p50 6.5 ms. Re-measurement in the
