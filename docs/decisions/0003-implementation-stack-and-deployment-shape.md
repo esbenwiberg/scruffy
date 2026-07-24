@@ -207,6 +207,56 @@ Revisit the language or deployment shape if:
 - the selected sandbox cannot satisfy the hostile-execution threat model;
 - Azure DevOps integration exposes provider assumptions in the domain kernel.
 
+## Amendments
+
+### 2026-07-24 — validation status and recorded deviations
+
+Status remains **Proposed**. Progress against the required validations, with
+deviations recorded rather than papered over:
+
+1. **Check-run through Octokit — implemented, outward run pending.** The
+   webhook verify path (`@octokit/webhooks-methods`) and an idempotent
+   check-run writer authenticated as a GitHub App installation
+   (`@octokit/auth-app`; `src/providers/scm/github-app.ts`) exist as
+   production-shaped code with offline contract tests, superseding the "thin
+   spike". Not yet done: registering an App and publishing a check run against
+   a real repository — an operator step. **Deviation:** GitHub *reads* go
+   through a `gh`-CLI subprocess adapter rather than Octokit (deliberate for
+   local/shadow use: reuses the developer's session, no token in config, and
+   fails-closed — every read fault throws so the blocking gate abstains).
+   Accepted for development and shadow operation; a hosted deployment should
+   read through the App installation as well. This amendment records the
+   deviation; the Octokit requirement stands for the hosted path.
+2. **Runtime schemas + exhaustive handling — met.** Evaluation states, evidence
+   envelopes, policy, reason codes, outbox payloads, and all external responses
+   are zod-parsed at their boundaries with exhaustive discriminated-union
+   handling in the kernels.
+3. **Atomic transition + outbox — met.** `commitDecision` /
+   `commitNightlyDecision` / `commitReleaseDecision` commit the terminal
+   transition, the decision row, and the outbox effects in one transaction.
+4. **Lease expiry, duplicate delivery, retry, supersession, reconciliation —
+   met.** Fenced leases with heartbeat, idempotent `ensureRun`, bounded retry
+   then abstain, and a reconciler that recovers `pending` and crashed
+   `analyzing` runs; exercised by the harness tests.
+5. **Hostile-runner isolation proof — outstanding.** The remaining substantive
+   blocker to acceptance.
+6. **Ops measurement — instrumented and recorded** on a dev machine
+   (`npm run ops:measure`; `docs/product/ops-measurement.md`): cold start
+   ~112 ms, RSS ~68 MiB, webhook→dispatch p50 6.5 ms. Re-measurement in the
+   target environment remains open.
+7. **Language capability record — written**:
+   `0003-validation-7-language-capability-record.md`. Verdict: no material
+   capability gap; no new revisit trigger.
+
+**Deployment-shape deviation:** the walking skeleton runs the control plane,
+analysis, and effects dispatch in ONE process (`src/server/main.ts` — HTTP
+listener plus reconcile/flush loop) rather than separate worker processes. The
+module and credential boundaries the ADR requires are preserved in code
+structure (`domain`/`gates`/`providers`/`effects`, writer credential separate
+via the App adapter); process separation is deferred until scale or isolation
+measurement demands it. The hostile-execution runner remains a hard physical
+boundary and is NOT collapsed into this.
+
 ## Research basis
 
 The comparison used repository constraints plus current primary documentation for GitHub REST libraries and GitHub Apps, Probot, TypeScript narrowing, runtime schema generation, Node event-loop and child-process behavior, FastAPI and Pydantic, .NET hosting and support policy, Go concurrency and release policy, PostgreSQL drivers, dependency-audit tooling, Docker security guidance, and NIST container-security guidance.

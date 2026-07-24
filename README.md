@@ -174,20 +174,22 @@ Honest gaps against ADR 0003's acceptance list:
   delivery — hosting it (endpoint, managed Postgres, App registration) is an
   operator step. Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are
   off the deterministic critical path.
-- **ADR deviations to reconcile.** ADR-0003 specifies GitHub I/O through
-  Octokit; reads still shell out to the `gh` CLI (writes now have the
-  Octokit-authenticated App path). ADR-0001's *separately, narrowly privileged*
-  write component now exists in code (`SCRUFFY_SCM_WRITER=github-app`) but the
-  default local flow still uses one `gh` session for both read and write.
-  Neither ADR has been amended yet.
+- **ADR deviations — now recorded as amendments.** ADR-0003 (2026-07-24
+  amendment) records the `gh`-CLI read path as a dev/shadow-only deviation
+  (Octokit stands for hosted) and the single-process deployment shape; ADR-0001
+  records the separate write credential as built-but-opt-in, with the
+  single-`gh`-session local default called out as a dev-only relaxation. An
+  App-authenticated reader is the remaining code gap.
 - **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
   labeled with their reduced coverage; no such labeling exists yet.
 - **Hostile-execution runner** (validation #5) — separate trust boundary,
   its own spike. Validation #6 (cold start / latency / memory / ops steps) is
   now measured — `npm run ops:measure`, methodology and recorded runs in
   `docs/product/ops-measurement.md` — though only on a dev machine so far, not
-  the target environment. The cross-language capability comparison (#7) is
-  still unwritten. These are why ADR-0003 is still Proposed.
+  the target environment. The language capability record (#7) is written
+  (`docs/decisions/0003-validation-7-language-capability-record.md`; verdict:
+  no material gap). The hostile runner is the remaining substantive blocker to
+  ADR-0003 acceptance.
 - **Merge-group / merge-queue** handling — the webhook path parses only
   `pull_request` events; `merge_group_sha` is always null.
 - A statistically meaningful corpus — the synthetic set is a machinery smoke

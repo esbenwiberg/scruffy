@@ -68,6 +68,27 @@ This division preserves repository expertise without allowing repository changes
 - Visual QA requires stronger service-managed execution controls.
 - A separate policy store, administration surface, and authorization model are required.
 
+## Amendments
+
+### 2026-07-24 — status of the separate write component
+
+The decision that *"GitHub write operations occur through a separate, narrowly
+privileged component"* is now realized in two halves:
+
+- **Architectural (done):** the effects dispatcher is the sole write path. It
+  consumes committed outbox records; gates and analysis workers cannot write to
+  GitHub at all.
+- **Credential (built, opt-in):** the GitHub App writer
+  (`SCRUFFY_SCM_WRITER=github-app`) authenticates writes as an App installation
+  scoped to exactly `checks:write`, `contents:write`, `pull_requests:write` —
+  a credential distinct from whatever reads.
+
+**Recorded relaxation:** the local development and shadow-review flow defaults
+to a single `gh` user session for both read and write. That is a deliberate
+dev-only convenience (no token in config); it does not satisfy this ADR for
+hosted operation, where the App writer (and eventually an App reader) is the
+required configuration.
+
 ## Unresolved questions
 
 - Which policy store and approval mechanism should be used?
