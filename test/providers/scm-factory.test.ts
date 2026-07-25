@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createScmWriter, resolveScmWriterBackend } from "../../src/providers/scm/factory.js";
+import {
+  createScmReader,
+  createScmWriter,
+  resolveScmReaderBackend,
+  resolveScmWriterBackend,
+} from "../../src/providers/scm/factory.js";
 import { githubAppConfigFromEnv } from "../../src/providers/scm/github-app-auth.js";
 import { GhCliScm } from "../../src/providers/scm/gh-cli.js";
 
@@ -22,6 +27,28 @@ describe("resolveScmWriterBackend", () => {
 describe("createScmWriter", () => {
   it("builds the gh-cli writer without any App env", () => {
     expect(createScmWriter("gh-cli")).toBeInstanceOf(GhCliScm);
+  });
+});
+
+describe("resolveScmReaderBackend", () => {
+  it("defaults to gh-cli when unset or empty — reads stay on the developer session unasked", () => {
+    expect(resolveScmReaderBackend({})).toBe("gh-cli");
+    expect(resolveScmReaderBackend({ SCRUFFY_SCM_READER: "" })).toBe("gh-cli");
+  });
+
+  it("selects the configured backend", () => {
+    expect(resolveScmReaderBackend({ SCRUFFY_SCM_READER: "gh-cli" })).toBe("gh-cli");
+    expect(resolveScmReaderBackend({ SCRUFFY_SCM_READER: "github-app" })).toBe("github-app");
+  });
+
+  it("throws on an unknown value — an operator typo must not silently pick a differently-credentialed reader", () => {
+    expect(() => resolveScmReaderBackend({ SCRUFFY_SCM_READER: "octokit" })).toThrow(/unknown SCRUFFY_SCM_READER/);
+  });
+});
+
+describe("createScmReader", () => {
+  it("builds the gh-cli reader without any App env", () => {
+    expect(createScmReader("gh-cli")).toBeInstanceOf(GhCliScm);
   });
 });
 
