@@ -26,6 +26,7 @@
     "corpus:grounded:live": "tsx scripts/grounded-live.ts",
     "scruffy:review": "tsx scripts/review-pr.ts",
     "scruffy:nightly": "tsx scripts/nightly-review.ts",
+    "scruffy:release": "tsx scripts/release-review.ts",
     "serve": "tsx src/server/main.ts",
     "ops:measure": "npm run build && tsx scripts/ops-measure.ts",
     "llm-smoke": "tsx scripts/llm-smoke.ts",

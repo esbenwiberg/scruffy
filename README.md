@@ -142,6 +142,29 @@ gh-cli adapter — that effect throws and dead-letters. The script **warns loudl
 and exits non-zero rather than letting a proposed fix silently vanish. Opening
 fix PRs needs `SCRUFFY_SCM_WRITER=github-app` once the App is registered.
 
+### Run the release gate against a candidate
+
+`scruffy:release` runs the **release gate** over the range
+`(prev-release, candidate]` and drains its effects. Release is the **last gate**:
+it produces one aggregate outcome — `ship`, `sign-off-required`, or `stop` — and
+**never blocks** (the check is shadow/advisory in the skeleton). Uncertainty maps
+to `sign-off-required`, not abstention — a last gate does not get to shrug; only
+an infra failure that stops analysis maps to `indeterminate`.
+
+```bash
+gh auth status
+npm run db:up && npm run db:migrate
+npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]
+```
+
+The candidate and previous-release refs may be a branch, tag, or sha. Omit
+`prev-release-ref` for a first-ever release (the range is the candidate's own full
+change set). It prints the reviewed range, the run state, the outcome + reasons,
+the finding counts (stopped / escalated / cleared / not-relevant), and the effects
+dispatched. Unlike nightly, release emits **no fix PR** — only the shadow
+`scruffy/release` check (a commit status under gh-cli, a native check-run under
+`SCRUFFY_SCM_WRITER=github-app`), so it never opens a branch or PR.
+
 ## What the skeleton proves
 
 The inbound path runs on real code with faked edges:
