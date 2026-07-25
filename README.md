@@ -109,6 +109,39 @@ Registering the App (a one-time browser step) and the first outward check-run
 against a real repo remain to be run by a human; the adapter itself is
 contract-tested offline against recorded GitHub response shapes.
 
+The read side has an App-backed counterpart too
+(`src/providers/scm/github-app-reader.ts`), selected **independently** of the
+writer via `SCRUFFY_SCM_READER=github-app` (default `gh-cli`) — ADR-0001 wants
+reads and writes on separate credentials, so a hosted deployment can read diffs
+through the App installation without depending on any human's `gh` login. Same
+error discipline as the gh-cli reader: it throws on any API failure and never
+returns an empty diff on a fault (which would false-green the blocking gate).
+
+### Run the nightly gate against a branch
+
+`scruffy:nightly` runs the **nightly gate** over a branch's `(watermark, head]`
+range and drains its effects. The nightly gate **never blocks** — it reviews and
+proposes: `report`, `propose_fix`, or `suppress`. Re-running an unchanged head is
+an idempotent no-op (base == head → up-to-date).
+
+```bash
+gh auth status
+npm run db:up && npm run db:migrate
+npm run scruffy:nightly -- <owner/repo> <branch> [head-sha]
+```
+
+The base defaults to the branch's stored watermark (null on the first-ever run,
+which reviews the head commit itself); pass an explicit `head-sha` to pin the
+range head. It prints the reviewed range, the run state, the disposition counts,
+and the effects dispatched.
+
+**Writer honesty**: under the default `gh-cli` writer the nightly summary
+check-run renders as a shadow commit status (works), but a `propose_fix`
+disposition wants a **real fix PR**, and `openPullRequest` is not enabled in the
+gh-cli adapter — that effect throws and dead-letters. The script **warns loudly**
+and exits non-zero rather than letting a proposed fix silently vanish. Opening
+fix PRs needs `SCRUFFY_SCM_WRITER=github-app` once the App is registered.
+
 ## What the skeleton proves
 
 The inbound path runs on real code with faked edges:
