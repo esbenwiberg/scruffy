@@ -5,8 +5,7 @@ import { SystemClock, UuidIdGenerator } from "../src/platform/clock.js";
 import { createPool, type Pool } from "../src/persistence/db.js";
 import { migrate } from "../src/persistence/migrate.js";
 import { Scruffy } from "../src/app/scruffy.js";
-import { GhCliScm } from "../src/providers/scm/gh-cli.js";
-import { createScmWriter, resolveScmWriterBackend } from "../src/providers/scm/factory.js";
+import { createScmReader, createScmWriter, resolveScmReaderBackend, resolveScmWriterBackend } from "../src/providers/scm/factory.js";
 import { defaultAnalyzers, defaultValidator, defaultFixers, defaultPolicy } from "../src/providers/registry.js";
 import { SubjectRevision } from "../src/domain/evidence/types.js";
 
@@ -103,6 +102,7 @@ async function main(): Promise<void> {
   // session; SCRUFFY_SCM_WRITER=github-app posts a REAL check-run through the
   // separately privileged App installation (ADR-0001's write credential).
   const writerBackend = resolveScmWriterBackend();
+  const readerBackend = resolveScmReaderBackend();
 
   await withPool(createPool, migrate, async (pool) => {
     const scruffy = new Scruffy({
@@ -110,8 +110,9 @@ async function main(): Promise<void> {
       clock: new SystemClock(),
       ids: new UuidIdGenerator(),
       policy: defaultPolicy(),
-      // gh-backed reader; the writer comes from the factory (see above).
-      scmReader: new GhCliScm({ targetUrl: htmlUrl }),
+      // Reader + writer both come from the factory: gh-cli by default (the
+      // developer's own session), github-app when SCRUFFY_SCM_READER/_WRITER say so.
+      scmReader: createScmReader(readerBackend, { targetUrl: htmlUrl }),
       scmWriter: createScmWriter(writerBackend, { targetUrl: htmlUrl }),
       analyzers: defaultAnalyzers(),
       validator: defaultValidator(),
@@ -119,7 +120,7 @@ async function main(): Promise<void> {
       webhookSecret: "unused-in-manual-trigger",
     });
 
-    console.log(`Reviewing ${repo}#${prArg} @ ${headSha.slice(0, 12)} …`);
+    console.log(`Reviewing ${repo}#${prArg} @ ${headSha.slice(0, 12)} … (reader: ${readerBackend})`);
 
     const run = await scruffy.poison.evaluate(subject);
     const flushed = await scruffy.flushEffects();
