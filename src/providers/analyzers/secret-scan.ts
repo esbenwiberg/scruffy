@@ -1,6 +1,6 @@
 import type { Finding, SubjectRevision } from "../../domain/evidence/types.js";
 import type { ChangedFile } from "../scm/port.js";
-import type { Analyzer } from "./port.js";
+import { type Analyzer, type AnalyzerResult, reviewed } from "./port.js";
 import { addedLines } from "./diff.js";
 
 /**
@@ -52,7 +52,7 @@ export function matchedSecretTokens(text: string, ruleId?: string): string[] {
 export class SecretScanAnalyzer implements Analyzer {
   readonly id = "secret-scan";
 
-  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<Finding[]> {
+  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<AnalyzerResult> {
     const findings: Finding[] = [];
     for (const file of files) {
       for (const { text, line } of addedLines(file.patch)) {
@@ -77,6 +77,7 @@ export class SecretScanAnalyzer implements Analyzer {
         }
       }
     }
-    return findings;
+    // A deterministic line scan always sees the whole diff — no coverage gap is possible.
+    return reviewed(findings);
   }
 }

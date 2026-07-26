@@ -4,6 +4,7 @@ import { createPool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
 import { RunStore } from "../../src/persistence/runs.js";
 import type { PoisonDecision } from "../../src/gates/poison/decision.js";
+import { COMPLETE_COVERAGE } from "../../src/domain/evidence/coverage.js";
 
 /**
  * Durability guarantees behind ADR 0003 validations #3 (atomic transition +
@@ -12,7 +13,12 @@ import type { PoisonDecision } from "../../src/gates/poison/decision.js";
 
 const pool = createPool();
 const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
-const DECISION: PoisonDecision = { outcome: "allow", reasons: ["no_blockable_findings"], dispositions: [] };
+const DECISION: PoisonDecision = {
+  outcome: "allow",
+  reasons: ["no_blockable_findings"],
+  dispositions: [],
+  coverage: COMPLETE_COVERAGE,
+};
 
 let runs: RunStore;
 let clock: FixedClock;

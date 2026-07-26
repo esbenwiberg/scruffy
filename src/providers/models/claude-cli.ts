@@ -59,6 +59,7 @@ export class ClaudeCliModelProvider implements ModelProvider {
       let stdout = "";
       let stderr = "";
       let settled = false;
+      let overflowed = false;
       // Decode per chunk so a multibyte char split across a chunk boundary is not
       // corrupted into U+FFFD.
       child.stdout.setEncoding("utf8");
@@ -76,8 +77,24 @@ export class ClaudeCliModelProvider implements ModelProvider {
         settle(() => reject(new Error(`claude CLI timed out after ${CLAUDE_TIMEOUT_MS}ms`)));
       }, CLAUDE_TIMEOUT_MS);
 
-      child.stdout.on("data", (chunk) => (stdout += chunk));
-      child.stderr.on("data", (chunk) => (stderr += chunk));
+      // Bounded accumulation. A wedged or looping CLI can stream indefinitely,
+      // and `stdout += chunk` would grow until the gate process dies of memory
+      // exhaustion — one hostile change taking out the whole reviewer. Past the
+      // cap the reply is not a finding array under any reading, so kill and
+      // reject: the analyzer records provider_unavailable and the gate abstains.
+      child.stdout.on("data", (chunk: string) => {
+        if (overflowed) return;
+        stdout += chunk;
+        if (stdout.length <= MAX_STDOUT_CHARS) return;
+        overflowed = true;
+        child.kill("SIGKILL");
+        settle(() => reject(new Error(`claude CLI produced more than ${MAX_STDOUT_CHARS} chars of output; refusing to buffer it`)));
+      });
+      // stderr only ever feeds an error message, so cap it by discarding the
+      // tail rather than failing the call — but cap it, for the same reason.
+      child.stderr.on("data", (chunk: string) => {
+        if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
+      });
       child.on("error", (err) => settle(() => reject(err)));
       // EPIPE if the child dies before consuming the (full-prompt) stdin: handle it
       // so it rejects rather than throwing an uncaught exception that kills us.
@@ -95,3 +112,7 @@ export class ClaudeCliModelProvider implements ModelProvider {
 
 /** A model call can be slow; but a truly hung CLI must eventually fail the call. */
 const CLAUDE_TIMEOUT_MS = 120_000;
+/** Generous next to a 4096-token reply; small enough that a runaway cannot OOM us. */
+const MAX_STDOUT_CHARS = 1_000_000;
+/** stderr is quoted into an Error message — a megabyte of it helps nobody. */
+const MAX_STDERR_CHARS = 8_192;

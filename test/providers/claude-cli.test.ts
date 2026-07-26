@@ -77,3 +77,38 @@ describe("ClaudeCliModelProvider truncation blindness", () => {
     expect(response.text).toBe(complete.trim());
   });
 });
+
+describe("ClaudeCliModelProvider output bounds", () => {
+  /** A stub that streams `mib` MiB of output, to exercise the accumulation cap. */
+  function floodStub(mib: number, stream: "stdout" | "stderr", code = 0): string {
+    const path = join(dir, `flood-${stubs.length}.sh`);
+    const redirect = stream === "stderr" ? " >&2" : "";
+    writeFileSync(path, `#!/bin/sh\ndd if=/dev/zero bs=1048576 count=${mib} 2>/dev/null | tr '\\0' 'a'${redirect}\nexit ${code}\n`);
+    chmodSync(path, 0o755);
+    stubs.push(path);
+    return path;
+  }
+
+  it("kills a runaway CLI instead of buffering its output until the gate dies", async () => {
+    // `stdout += chunk` with no bound means one wedged or looping CLI can OOM the
+    // reviewer process. Rejecting is the right failure: the analyzer records a
+    // provider_unavailable gap and the gate abstains.
+    const provider = new ClaudeCliModelProvider({ binary: floodStub(4, "stdout") });
+    await expect(provider.complete(request)).rejects.toThrow(/more than \d+ chars of output/);
+  });
+
+  it("bounds stderr too, and still reports the failure", async () => {
+    // stderr is only quoted into an Error message, so it truncates rather than
+    // failing the call — but an unbounded error string is the same memory bug.
+    const provider = new ClaudeCliModelProvider({ binary: floodStub(4, "stderr", 1) });
+    await expect(provider.complete(request)).rejects.toThrow(/exited 1/);
+    await provider.complete(request).catch((err: Error) => {
+      expect(err.message.length).toBeLessThan(100_000);
+    });
+  });
+
+  it("leaves an ordinary-sized completion untouched", async () => {
+    const provider = new ClaudeCliModelProvider({ binary: makeStub("[]") });
+    expect((await provider.complete(request)).text).toBe("[]");
+  });
+});

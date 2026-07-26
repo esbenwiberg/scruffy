@@ -8,6 +8,7 @@ import type { RunStore } from "../../persistence/runs.js";
 import { CHECK_NAME, decisionToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runPoisonAnalysis } from "./analyze.js";
+import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface PoisonServiceDeps {
   runs: RunStore;
@@ -116,7 +117,7 @@ export class PoisonService {
         from: "analyzing",
         to: "indeterminate",
         reason: "analysis failed",
-        decision: { outcome: "indeterminate", reasons: [], dispositions: [] },
+        decision: { outcome: "indeterminate", reasons: [], dispositions: [], coverage: analysisFailed(message) },
         findings: [],
         effect: { effectType: "check_run", externalId: payload.externalId, payload },
         fenceLease: lease,
@@ -146,7 +147,7 @@ export class PoisonService {
       from: run.state,
       to: "indeterminate",
       reason: `abandoned: ${reason}`,
-      decision: { outcome: "indeterminate", reasons: [], dispositions: [] },
+      decision: { outcome: "indeterminate", reasons: [], dispositions: [], coverage: analysisFailed(reason) },
       findings: [],
       effect: { effectType: "check_run", externalId: payload.externalId, payload },
       // Fence on the lease we observed (analyzing only): if another worker reclaimed

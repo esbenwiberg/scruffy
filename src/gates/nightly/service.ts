@@ -11,6 +11,7 @@ import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runNightlyAnalysis } from "./analyze.js";
 import { generateFixes } from "./fix.js";
 import type { NightlyDecision } from "./decision.js";
+import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface NightlyServiceDeps {
   runs: RunStore;
@@ -196,7 +197,11 @@ export class NightlyService {
   }
 
   async #abstain(run: EvaluationRun, message: string, opts: { from: RunState; fenceLease?: string }): Promise<void> {
-    const empty: NightlyDecision = { dispositions: [], summary: { reported: 0, proposedFixes: 0, suppressed: 0 } };
+    const empty: NightlyDecision = {
+      dispositions: [],
+      summary: { reported: 0, proposedFixes: 0, suppressed: 0 },
+      coverage: analysisFailed(message),
+    };
     const payload: CheckRunPayload = {
       subject: run.subject,
       externalId: this.#externalId(run),

@@ -2,6 +2,7 @@ import { createModelProvider, resolveBackend, type ModelBackend } from "../src/p
 import { ModelAnalyzer } from "../src/providers/analyzers/model-analyzer.js";
 import { GROUNDED_DETECTION_TARGETS } from "../src/corpus/grounded.js";
 import type { SubjectRevision } from "../src/domain/evidence/types.js";
+import { describeGaps } from "../src/domain/evidence/coverage.js";
 
 /**
  * Fires the REAL model analyzer against the grounded corpus's changes and reports
@@ -46,20 +47,30 @@ async function main(): Promise<void> {
 
   const analyzer = new ModelAnalyzer(model);
   let hits = 0;
+  let attempted = 0;
 
   for (const target of GROUNDED_DETECTION_TARGETS) {
     const subject: SubjectRevision = { repository: target.subject.repository, commitSha: target.subject.commitSha };
     console.log(`\n── ${target.id}`);
     console.log(`   expecting: ${target.expect.defectClass} at ${target.expect.path}:${target.expect.line}`);
 
-    let findings;
+    let result;
     try {
-      findings = await analyzer.analyze(subject, target.files);
+      result = await analyzer.analyze(subject, target.files);
     } catch (err) {
       console.log(`   ERROR calling model: ${(err as Error).message}`);
       continue;
     }
 
+    // A blind run is NOT a miss. Counting it as one understates detection rate
+    // and, worse, makes an outage look like a model-quality problem.
+    if (result.gaps.length > 0) {
+      console.log(`   BLIND — ${describeGaps(result.gaps)} (not counted as a miss)`);
+      continue;
+    }
+
+    attempted += 1;
+    const findings = result.findings;
     const onDefectFile = findings.filter((f) => f.primaryRegion.path === target.expect.path);
     const hit = onDefectFile.find((f) => f.defectClass === target.expect.defectClass);
     const noise = findings.filter((f) => f.primaryRegion.path !== target.expect.path);
@@ -78,7 +89,13 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\nDetection: ${hits}/${GROUNDED_DETECTION_TARGETS.length} grounded defects caught by the real model.`);
+  // Denominator is what we actually REVIEWED, not what we intended to review — a
+  // blind target in the denominator silently deflates the measured detection rate.
+  const blind = GROUNDED_DETECTION_TARGETS.length - attempted;
+  console.log(
+    `\nDetection: ${hits}/${attempted} grounded defects caught by the real model` +
+      (blind > 0 ? ` (${blind} target(s) not reviewed — excluded).` : "."),
+  );
   console.log("(Evidence, not a regression pin — a real model is non-deterministic.)");
 }
 

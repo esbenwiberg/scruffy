@@ -4,6 +4,7 @@ import type { NightlyPolicy } from "../../domain/policy/types.js";
 import { TlsFixer } from "../../providers/fixers/tls-fixer.js";
 import { evaluateNightly } from "./decision.js";
 import { generateFixes } from "./fix.js";
+import { COMPLETE_COVERAGE } from "../../domain/evidence/coverage.js";
 
 const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
 
@@ -31,7 +32,7 @@ const FIXERS = { "disabled-tls-verification": new TlsFixer() };
 describe("generateFixes", () => {
   it("produces a fix PR for a patchable propose_fix and keeps the disposition", () => {
     const findings = [tlsFinding()];
-    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY), FIXERS);
+    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY, COMPLETE_COVERAGE), FIXERS);
 
     expect(fixes).toHaveLength(1);
     expect(fixes[0]!.branch).toMatch(/^scruffy\/fix\/disabled-tls-verification\//);
@@ -43,7 +44,7 @@ describe("generateFixes", () => {
   it("downgrades propose_fix to report when no fixer can patch it — never an empty PR", () => {
     const findings = [tlsFinding()];
     // Fixable per policy, but no fixer registered for the class.
-    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY), {});
+    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY, COMPLETE_COVERAGE), {});
 
     expect(fixes).toHaveLength(0);
     expect(decision.dispositions[0]!.disposition).toBe("report");
@@ -64,7 +65,7 @@ describe("generateFixes", () => {
       primaryRegion: { path: "src/a-b.ts", startLine: 5, endLine: 5, snippet: "rejectUnauthorized: false" },
     };
     const findings = [a, b];
-    const { fixes } = generateFixes(findings, evaluateNightly(findings, POLICY), FIXERS);
+    const { fixes } = generateFixes(findings, evaluateNightly(findings, POLICY, COMPLETE_COVERAGE), FIXERS);
 
     expect(fixes).toHaveLength(2);
     expect(fixes[0]!.branch).not.toBe(fixes[1]!.branch);
@@ -83,7 +84,7 @@ describe("generateFixes", () => {
       primaryRegion: { path: "src/b.ts", startLine: 5, endLine: 5, snippet: "rejectUnauthorized: false" },
     };
     const findings = [unpatchable, patchable];
-    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY), FIXERS);
+    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY, COMPLETE_COVERAGE), FIXERS);
 
     expect(fixes).toHaveLength(1);
     expect(decision.dispositions[0]!.disposition).toBe("propose_fix");
@@ -96,7 +97,7 @@ describe("generateFixes", () => {
     const report = { ...tlsFinding(), defectClass: "leaked-credential", ruleId: "SECRET.AWS_KEY" };
     const suppress = { ...tlsFinding(), validation: "refuted" as const };
     const findings = [report, suppress];
-    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY), FIXERS);
+    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, POLICY, COMPLETE_COVERAGE), FIXERS);
 
     expect(fixes).toHaveLength(0);
     const byDisposition = Object.fromEntries(decision.dispositions.map((d) => [d.disposition, d.reason]));

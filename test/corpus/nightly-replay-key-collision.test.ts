@@ -36,7 +36,7 @@ function makeFinding(defectClass: string, path: string): Finding {
 // Emits two findings whose (defectClass, path) pairs alias under a "::"-join.
 const collidingAnalyzer: Analyzer = {
   id: "colliding",
-  analyze: async () => [makeFinding("x", "a::b"), makeFinding("x::a", "b")],
+  analyze: async () => ({ findings: [makeFinding("x", "a::b"), makeFinding("x::a", "b")], gaps: [] }),
 };
 
 // Leaves validation as-emitted so classification is driven purely by policy.

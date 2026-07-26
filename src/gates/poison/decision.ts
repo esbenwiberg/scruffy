@@ -1,4 +1,5 @@
 import type { Finding } from "../../domain/evidence/types.js";
+import type { AnalysisCoverage } from "../../domain/evidence/coverage.js";
 import type { PoisonPolicy } from "../../domain/policy/types.js";
 
 /**
@@ -18,6 +19,12 @@ import type { PoisonPolicy } from "../../domain/policy/types.js";
  *     to a deeper gate.
  *  4. Infrastructure failure (validation `failed`) is treated as "could not
  *     decide", never as "validated".
+ *  5. ALLOW REQUIRES COMPLETE COVERAGE. An analyzer that could not run returns no
+ *     findings, which is shape-identical to a clean review. Without coverage the
+ *     kernel would read "we were blind" as "nothing here" and allow — the exact
+ *     silent under-report invariant 3 exists to prevent, arriving through the
+ *     back door. Coverage never softens a block: being blind in one place is no
+ *     reason to stop trusting what we did see.
  */
 
 /** Stable reason codes. Never free-form; these are part of the audit contract. */
@@ -27,7 +34,8 @@ export type PoisonReasonCode =
   | "blockable_class_confirmed"
   | "insufficient_evidence"
   | "no_deterministic_corroboration"
-  | "validation_unavailable";
+  | "validation_unavailable"
+  | "analysis_incomplete";
 
 export interface FindingDisposition {
   ruleId: string;
@@ -37,10 +45,17 @@ export interface FindingDisposition {
   reason: PoisonReasonCode;
 }
 
+interface PoisonDecisionBase {
+  reasons: PoisonReasonCode[];
+  dispositions: FindingDisposition[];
+  /** What the analyzers actually managed to review. Carried for the audit trail. */
+  coverage: AnalysisCoverage;
+}
+
 export type PoisonDecision =
-  | { outcome: "block"; reasons: PoisonReasonCode[]; dispositions: FindingDisposition[] }
-  | { outcome: "allow"; reasons: PoisonReasonCode[]; dispositions: FindingDisposition[] }
-  | { outcome: "indeterminate"; reasons: PoisonReasonCode[]; dispositions: FindingDisposition[] };
+  | ({ outcome: "block" } & PoisonDecisionBase)
+  | ({ outcome: "allow" } & PoisonDecisionBase)
+  | ({ outcome: "indeterminate" } & PoisonDecisionBase);
 
 function hasDeterministicSupport(finding: Finding): boolean {
   return finding.supporting.some((e) => e.trust === "deterministic");
@@ -75,15 +90,28 @@ function disposition(finding: Finding, policy: PoisonPolicy): FindingDisposition
   return { ...base, effect: "blocks", reason: "blockable_class_confirmed" };
 }
 
-export function evaluatePoison(findings: readonly Finding[], policy: PoisonPolicy): PoisonDecision {
+/**
+ * `coverage` is REQUIRED, not defaulted to complete. A forgotten argument would
+ * default to the permissive reading of a blind run, and the compiler is the only
+ * thing that reliably catches that. Callers with genuinely complete coverage pass
+ * COMPLETE_COVERAGE and say so explicitly.
+ */
+export function evaluatePoison(
+  findings: readonly Finding[],
+  policy: PoisonPolicy,
+  coverage: AnalysisCoverage,
+): PoisonDecision {
   const dispositions = findings.map((f) => disposition(f, policy));
 
   const blocking = dispositions.filter((d) => d.effect === "blocks");
   if (blocking.length > 0) {
+    // A coverage gap does not weaken a confirmed block; it is checked below,
+    // where it can only make the outcome MORE conservative.
     return {
       outcome: "block",
       reasons: dedupe(blocking.map((d) => d.reason)),
       dispositions,
+      coverage,
     };
   }
 
@@ -93,16 +121,29 @@ export function evaluatePoison(findings: readonly Finding[], policy: PoisonPolic
       outcome: "indeterminate",
       reasons: dedupe(abstaining.map((d) => d.reason)),
       dispositions,
+      coverage,
     };
   }
 
-  // Allow: no blocker, nothing left to abstain on. Reasons reflect why each
-  // remaining candidate was cleared (dismissed vs never blockable).
+  // Nothing blocked and nothing abstained — but "no findings" only means "clean"
+  // if we actually looked. Blind is not clean: abstain and let a deeper gate see it.
+  if (!coverage.complete) {
+    return {
+      outcome: "indeterminate",
+      reasons: ["analysis_incomplete"],
+      dispositions,
+      coverage,
+    };
+  }
+
+  // Allow: no blocker, nothing left to abstain on, full coverage. Reasons reflect
+  // why each remaining candidate was cleared (dismissed vs never blockable).
   const allowReasons = dedupe(dispositions.map((d) => d.reason));
   return {
     outcome: "allow",
     reasons: allowReasons.length > 0 ? allowReasons : ["no_blockable_findings"],
     dispositions,
+    coverage,
   };
 }
 

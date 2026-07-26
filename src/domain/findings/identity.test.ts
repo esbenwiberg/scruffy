@@ -46,4 +46,47 @@ describe("dedupeFindings", () => {
       expect(survivor!.validation).toBe("validated");
     }
   });
+
+  it("SAFETY: never drops deterministic evidence by collapsing onto a model-asserted duplicate", () => {
+    // Two analyzers can reach the same identity with different evidence. Keeping
+    // one and discarding the other would silently demote a blockable finding to
+    // model-asserted — a detection loss hidden inside a helper called "dedupe".
+    const hard = finding({ supporting: [{ trust: "deterministic", statement: "literal false in source" }] });
+    const soft = finding({ supporting: [{ trust: "model-asserted", statement: "looks disabled" }] });
+    for (const input of [[hard, soft], [soft, hard]]) {
+      const [merged] = dedupeFindings(input);
+      expect(merged!.supporting.some((s) => s.trust === "deterministic")).toBe(true);
+      expect(merged!.supporting).toHaveLength(2);
+    }
+  });
+
+  it("unions evidence in input order, so the result does not depend on which side won", () => {
+    const a = finding({ validation: "pending", supporting: [{ trust: "deterministic", statement: "one" }] });
+    const b = finding({ validation: "validated", supporting: [{ trust: "deterministic", statement: "two" }] });
+    const [merged] = dedupeFindings([a, b]);
+    expect(merged!.supporting.map((s) => s.statement)).toEqual(["one", "two"]);
+    expect(merged!.validation, "scalars still come from the stronger side").toBe("validated");
+  });
+
+  it("does not duplicate identical evidence statements", () => {
+    const [merged] = dedupeFindings([finding(), finding()]);
+    expect(merged!.supporting).toHaveLength(1);
+  });
+
+  it("merges contradicting evidence too — a refutation must not be lost", () => {
+    const plain = finding();
+    const refuted = finding({ contradicting: [{ trust: "deterministic", statement: "it is a test fixture" }] });
+    const [merged] = dedupeFindings([plain, refuted]);
+    expect(merged!.contradicting).toHaveLength(1);
+  });
+
+  it("keeps truncation sticky and evidence-presence optimistic", () => {
+    // Truncation: if either view was partial, the merged one is partial.
+    // Presence: the merged finding holds the union, so either side having what
+    // its class requires makes the merged one complete.
+    const partial = finding({ completeness: { requiredEvidencePresent: false, contextTruncated: true } });
+    const full = finding({ completeness: { requiredEvidencePresent: true, contextTruncated: false } });
+    const [merged] = dedupeFindings([partial, full]);
+    expect(merged!.completeness).toEqual({ requiredEvidencePresent: true, contextTruncated: true });
+  });
 });

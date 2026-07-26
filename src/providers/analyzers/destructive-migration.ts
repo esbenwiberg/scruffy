@@ -1,6 +1,6 @@
 import type { Finding, SubjectRevision } from "../../domain/evidence/types.js";
 import type { ChangedFile } from "../scm/port.js";
-import type { Analyzer } from "./port.js";
+import { type Analyzer, type AnalyzerResult, reviewed } from "./port.js";
 import { addedLines, type AddedLine } from "./diff.js";
 import { deterministicFinding } from "./finding.js";
 
@@ -128,7 +128,7 @@ function statements(added: readonly AddedLine[]): Statement[] {
 export class DestructiveMigrationAnalyzer implements Analyzer {
   readonly id = "destructive-migration";
 
-  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<Finding[]> {
+  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<AnalyzerResult> {
     const findings: Finding[] = [];
     for (const file of files) {
       if (!isSqlFile(file.path)) continue;
@@ -151,6 +151,7 @@ export class DestructiveMigrationAnalyzer implements Analyzer {
         }
       }
     }
-    return findings;
+    // A deterministic line scan always sees the whole diff — no coverage gap is possible.
+    return reviewed(findings);
   }
 }

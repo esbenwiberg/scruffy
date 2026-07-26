@@ -1,4 +1,5 @@
 import type { Finding } from "../../domain/evidence/types.js";
+import type { AnalysisCoverage } from "../../domain/evidence/coverage.js";
 import type { ReleasePolicy } from "../../domain/policy/types.js";
 
 /**
@@ -24,7 +25,13 @@ import type { ReleasePolicy } from "../../domain/policy/types.js";
  *     fabricated `stop` (we don't hard-block on a maybe).
  *  3. A refuted finding was cleared by the adversarial validator — it does not
  *     hold the release.
- *  4. `indeterminate` is NOT produced here. It is reserved for the service to
+ *  4. SHIP REQUIRES COMPLETE COVERAGE. An analyzer that could not run yields no
+ *     findings, which looks exactly like a clean range. At the last gate before
+ *     publication that reading is unacceptable, so an incomplete analysis
+ *     escalates to `sign-off-required`: a human decides whether to ship
+ *     un-reviewed code. It escalates rather than stopping because a gap is not
+ *     evidence of a defect — and it never softens a `stop`.
+ *  5. `indeterminate` is NOT produced here. It is reserved for the service to
  *     record when the analysis machinery itself could not run (infra failure).
  *     The kernel always reaches ship/sign-off-required/stop over the findings it
  *     is given; the discriminated union carries `indeterminate` only so the
@@ -41,7 +48,8 @@ export type ReleaseReasonCode =
   | "signoff_class_confirmed"
   | "signoff_class_unconfirmed"
   | "finding_refuted"
-  | "not_release_relevant";
+  | "not_release_relevant"
+  | "analysis_incomplete";
 
 /** How a single finding affected the release outcome. */
 export type ReleaseEffect = "stops" | "escalates" | "cleared" | "not_relevant";
@@ -67,6 +75,8 @@ interface ReleaseDecisionBase {
   reasons: ReleaseReasonCode[];
   dispositions: ReleaseFindingDisposition[];
   summary: ReleaseSummary;
+  /** What the analyzers actually managed to review. Carried for the audit trail. */
+  coverage: AnalysisCoverage;
 }
 
 export type ReleaseDecision =
@@ -122,7 +132,13 @@ const EFFECT_PRIORITY: Record<ReleaseEffect, number> = {
   not_relevant: 3,
 };
 
-export function evaluateRelease(findings: readonly Finding[], policy: ReleasePolicy): ReleaseDecision {
+/** `coverage` is required for the same reason it is on evaluatePoison — a
+ * defaulted argument would make a blind run look like a clean one. */
+export function evaluateRelease(
+  findings: readonly Finding[],
+  policy: ReleasePolicy,
+  coverage: AnalysisCoverage,
+): ReleaseDecision {
   const dispositions: ReleaseFindingDisposition[] = findings.map((finding) => {
     const { effect, reason } = classify(finding, policy);
     return {
@@ -154,27 +170,29 @@ export function evaluateRelease(findings: readonly Finding[], policy: ReleasePol
 
   const stops = dispositions.filter((d) => d.effect === "stops");
   if (stops.length > 0) {
-    return { outcome: "stop", reasons: dedupe(stops.map((d) => d.reason)), dispositions, summary };
+    // A coverage gap cannot soften a confirmed stop.
+    return { outcome: "stop", reasons: dedupe(stops.map((d) => d.reason)), dispositions, summary, coverage };
   }
 
   const escalations = dispositions.filter((d) => d.effect === "escalates");
-  if (escalations.length > 0) {
-    return {
-      outcome: "sign-off-required",
-      reasons: dedupe(escalations.map((d) => d.reason)),
-      dispositions,
-      summary,
-    };
+  if (escalations.length > 0 || !coverage.complete) {
+    // An incomplete analysis escalates on its own: shipping code we never
+    // reviewed is a human's call to make, not ours.
+    const reasons = dedupe(escalations.map((d) => d.reason));
+    if (!coverage.complete) reasons.push("analysis_incomplete");
+    return { outcome: "sign-off-required", reasons, dispositions, summary, coverage };
   }
 
-  // Ship: nothing stops or escalates. Reasons reflect why each candidate cleared
-  // (refuted vs never relevant); empty range ships with `no_release_findings`.
+  // Ship: nothing stops or escalates, and we reviewed the whole range. Reasons
+  // reflect why each candidate cleared (refuted vs never relevant); an empty
+  // range ships with `no_release_findings`.
   const shipReasons = dedupe(dispositions.map((d) => d.reason));
   return {
     outcome: "ship",
     reasons: shipReasons.length > 0 ? shipReasons : ["no_release_findings"],
     dispositions,
     summary,
+    coverage,
   };
 }
 

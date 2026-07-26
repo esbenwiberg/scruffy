@@ -1,6 +1,6 @@
 import type { Finding, SubjectRevision } from "../../domain/evidence/types.js";
 import type { ChangedFile } from "../scm/port.js";
-import type { Analyzer } from "./port.js";
+import { type Analyzer, type AnalyzerResult, reviewed } from "./port.js";
 import { addedLines } from "./diff.js";
 import { deterministicFinding } from "./finding.js";
 
@@ -57,7 +57,7 @@ export function tlsDisableMatches(text: string, ruleId?: string): boolean {
 export class DisabledTlsAnalyzer implements Analyzer {
   readonly id = "disabled-tls";
 
-  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<Finding[]> {
+  async analyze(subject: SubjectRevision, files: ChangedFile[]): Promise<AnalyzerResult> {
     const findings: Finding[] = [];
     for (const file of files) {
       for (const { text, line } of addedLines(file.patch)) {
@@ -79,6 +79,7 @@ export class DisabledTlsAnalyzer implements Analyzer {
         }
       }
     }
-    return findings;
+    // A deterministic line scan always sees the whole diff — no coverage gap is possible.
+    return reviewed(findings);
   }
 }

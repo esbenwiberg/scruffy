@@ -1,4 +1,5 @@
 import type { Finding } from "../../domain/evidence/types.js";
+import type { AnalysisCoverage } from "../../domain/evidence/coverage.js";
 import type { NightlyPolicy } from "../../domain/policy/types.js";
 
 /**
@@ -21,6 +22,11 @@ import type { NightlyPolicy } from "../../domain/policy/types.js";
  *     fixable list need not repeat entries in the reportable list — so a class
  *     configured only as fixable is never suppressed by the reportable gate
  *     before it can earn a `propose_fix`.
+ *  5. Coverage does NOT change any disposition here — nightly has no permissive
+ *     outcome to withhold, so there is nothing to make conservative. It is
+ *     carried so the report can say the sweep was partial. A quiet nightly after
+ *     a blind run is otherwise indistinguishable from a quiet nightly after a
+ *     clean one, and the whole point of nightly is that someone reads it.
  */
 
 export type NightlyDispositionKind = "suppress" | "report" | "propose_fix";
@@ -48,6 +54,8 @@ export interface NightlyDecision {
   /** One entry per finding, ranked most-actionable first. */
   dispositions: NightlyFindingDisposition[];
   summary: { reported: number; proposedFixes: number; suppressed: number };
+  /** What the analyzers actually managed to review. Surfaced in the report. */
+  coverage: AnalysisCoverage;
 }
 
 function hasDeterministicSupport(finding: Finding): boolean {
@@ -97,7 +105,11 @@ const DISPOSITION_PRIORITY: Record<NightlyDispositionKind, number> = {
   suppress: 2,
 };
 
-export function evaluateNightly(findings: readonly Finding[], policy: NightlyPolicy): NightlyDecision {
+export function evaluateNightly(
+  findings: readonly Finding[],
+  policy: NightlyPolicy,
+  coverage: AnalysisCoverage,
+): NightlyDecision {
   const dispositions: NightlyFindingDisposition[] = findings.map((finding) => {
     const { disposition, reason } = classify(finding, policy);
     return {
@@ -110,7 +122,7 @@ export function evaluateNightly(findings: readonly Finding[], policy: NightlyPol
     };
   });
 
-  return { dispositions: rankDispositions(dispositions), summary: summarize(dispositions) };
+  return { dispositions: rankDispositions(dispositions), summary: summarize(dispositions), coverage };
 }
 
 /**

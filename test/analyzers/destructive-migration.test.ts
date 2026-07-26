@@ -9,7 +9,7 @@ function newFile(lines: string[]): string {
 }
 
 async function findings(path: string, lines: string[]) {
-  return new DestructiveMigrationAnalyzer().analyze(SUBJECT, [{ path, patch: newFile(lines) }]);
+  return (await new DestructiveMigrationAnalyzer().analyze(SUBJECT, [{ path, patch: newFile(lines) }])).findings;
 }
 
 describe("DestructiveMigrationAnalyzer statement matching", () => {

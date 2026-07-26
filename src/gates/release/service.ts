@@ -8,6 +8,7 @@ import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { ReleaseDecision } from "./decision.js";
+import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface ReleaseServiceDeps {
   runs: RunStore;
@@ -157,6 +158,7 @@ export class ReleaseService {
       reasons: [],
       dispositions: [],
       summary: { stopped: 0, escalated: 0, cleared: 0, notRelevant: 0 },
+      coverage: analysisFailed(message),
     };
     const payload: CheckRunPayload = {
       subject: run.subject,

@@ -6,11 +6,20 @@ import { MigrationValidator } from "../../src/providers/validation/migration-val
 import { TlsValidator } from "../../src/providers/validation/tls-validator.js";
 import { CompositeValidator } from "../../src/domain/validation/composite.js";
 import type { ChangedFile } from "../../src/providers/scm/port.js";
+import type { Analyzer } from "../../src/providers/analyzers/port.js";
+import type { SubjectRevision } from "../../src/domain/evidence/types.js";
 
 const SUBJECT = { repository: "acme/x", commitSha: "a".repeat(40) };
 
 function file(path: string, lines: string[]): ChangedFile {
   return { path, patch: [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join("\n") };
+}
+
+/** Deterministic analyzers never report a coverage gap; these tests assert findings only. */
+async function analyzed(a: Analyzer, subject: SubjectRevision, files: ChangedFile[]) {
+  const result = await a.analyze(subject, files);
+  expect(result.gaps).toEqual([]);
+  return result.findings;
 }
 
 function findingFor(ruleId: string, defectClass: string, path: string, snippet: string) {
@@ -31,54 +40,54 @@ describe("DestructiveMigrationAnalyzer", () => {
   const a = new DestructiveMigrationAnalyzer();
 
   it("flags DELETE without WHERE, TRUNCATE, and DROP TABLE", async () => {
-    const rules = (await a.analyze(SUBJECT, [file("migrations/1.sql", ["DELETE FROM users;", "TRUNCATE t;", "DROP TABLE t;"])])).map((f) => f.ruleId);
+    const rules = (await analyzed(a, SUBJECT, [file("migrations/1.sql", ["DELETE FROM users;", "TRUNCATE t;", "DROP TABLE t;"])])).map((f) => f.ruleId);
     expect(rules).toContain("MIGRATION.DELETE_WITHOUT_WHERE");
     expect(rules).toContain("MIGRATION.TRUNCATE");
     expect(rules).toContain("MIGRATION.DROP_TABLE");
   });
 
   it("does not flag DELETE guarded by a real WHERE", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["DELETE FROM users WHERE id = 1;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["DELETE FROM users WHERE id = 1;"])]);
     expect(f).toHaveLength(0);
   });
 
   it("does not treat a WHERE inside a comment as a guard", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["DELETE FROM users; -- WHERE clause was here"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["DELETE FROM users; -- WHERE clause was here"])]);
     expect(f.map((x) => x.ruleId)).toEqual(["MIGRATION.DELETE_WITHOUT_WHERE"]);
   });
 
   it("skips fully commented lines", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["-- DROP TABLE t;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["-- DROP TABLE t;"])]);
     expect(f).toHaveLength(0);
   });
 
   it("is scoped to SQL/migration files, not application code", async () => {
-    const f = await a.analyze(SUBJECT, [file("src/repo.ts", ['db.query("DELETE FROM users");'])]);
+    const f = await analyzed(a, SUBJECT, [file("src/repo.ts", ['db.query("DELETE FROM users");'])]);
     expect(f).toHaveLength(0);
   });
 
   it("does not false-block a multi-line DELETE whose WHERE is on the next line", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["DELETE FROM sessions", "WHERE expired = true;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["DELETE FROM sessions", "WHERE expired = true;"])]);
     expect(f).toHaveLength(0);
   });
 
   it("catches a multi-line UPDATE with no WHERE across lines", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users", "SET active = false;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["UPDATE users", "SET active = false;"])]);
     expect(f.map((x) => x.ruleId)).toEqual(["MIGRATION.UPDATE_WITHOUT_WHERE"]);
   });
 
   it("does not treat -- inside a string literal as a comment", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'see -- docs' WHERE id = 1;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'see -- docs' WHERE id = 1;"])]);
     expect(f).toHaveLength(0);
   });
 
   it("does not treat ; inside a string literal as a statement terminator", async () => {
-    const f = await a.analyze(SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'a;b'", "WHERE id = 1;"])]);
+    const f = await analyzed(a, SUBJECT, [file("migrations/1.sql", ["UPDATE users SET note = 'a;b'", "WHERE id = 1;"])]);
     expect(f).toHaveLength(0);
   });
 
   it("does not scan prose files that merely contain 'migration' in the name", async () => {
-    const f = await a.analyze(SUBJECT, [file("docs/migration-guide.md", ["Example: DELETE FROM users;"])]);
+    const f = await analyzed(a, SUBJECT, [file("docs/migration-guide.md", ["Example: DELETE FROM users;"])]);
     expect(f).toHaveLength(0);
   });
 });
@@ -88,7 +97,7 @@ describe("DisabledTlsAnalyzer", () => {
 
   it("flags Node, Go, and Python TLS-disable patterns", async () => {
     const rules = (
-      await a.analyze(SUBJECT, [
+      await analyzed(a, SUBJECT, [
         file("a.ts", ["rejectUnauthorized: false"]),
         file("b.go", ["InsecureSkipVerify: true"]),
         file("c.py", ["requests.get(u, verify=False)"]),
@@ -102,7 +111,7 @@ describe("DisabledTlsAnalyzer", () => {
   });
 
   it("ignores ordinary lines", async () => {
-    expect(await a.analyze(SUBJECT, [file("a.ts", ["const verify = true;"])])).toHaveLength(0);
+    expect(await analyzed(a, SUBJECT, [file("a.ts", ["const verify = true;"])])).toHaveLength(0);
   });
 });
 

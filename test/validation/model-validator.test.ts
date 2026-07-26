@@ -26,6 +26,30 @@ function stub(behavior: string | (() => never)): ModelProvider {
   };
 }
 
+describe("ModelValidator output tolerance", () => {
+  it("finds the verdict when the prose before it contains a brace", async () => {
+    const chatty = 'Looking at the {config} block first.\n{"verdict":"refuted","reason":"example key"}';
+    expect(await new ModelValidator(stub(chatty)).validate(FINDING)).toBe("refuted");
+  });
+
+  it("falls inward when the verdict arrives wrapped in an envelope", async () => {
+    // Outermost-first candidate order means the outer object is tried and fails
+    // the schema, then the inner one matches.
+    const enveloped = '{"result":{"verdict":"validated","reason":"live key"}}';
+    expect(await new ModelValidator(stub(enveloped)).validate(FINDING)).toBe("validated");
+  });
+
+  it("still abstains when a brace-bearing reply holds no verdict at all", async () => {
+    // Tolerance must not become credulity: no verdict means `failed`, never a
+    // guessed one.
+    expect(await new ModelValidator(stub('{"status":"ok"} and {"note":"none"}')).validate(FINDING)).toBe("failed");
+  });
+
+  it("does not accept a verdict outside the enum", async () => {
+    expect(await new ModelValidator(stub('{"verdict":"probably_fine","reason":"x"}')).validate(FINDING)).toBe("failed");
+  });
+});
+
 describe("ModelValidator", () => {
   it("maps a validated verdict through", async () => {
     const v = new ModelValidator(stub('{"verdict":"validated","reason":"real live key"}'));

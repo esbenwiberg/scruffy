@@ -47,7 +47,12 @@ export function generateFixes(
   // Re-rank: downgrading a propose_fix to report leaves it in its former
   // front-of-list position, so re-apply the kernel's deterministic ordering to
   // keep the "ranked most-actionable first" contract intact.
-  return { decision: { dispositions: rankDispositions(dispositions), summary: summarize(dispositions) }, fixes };
+  // Coverage is carried through untouched: generating fixes does not change how
+  // much of the range we managed to review.
+  return {
+    decision: { dispositions: rankDispositions(dispositions), summary: summarize(dispositions), coverage: decision.coverage },
+    fixes,
+  };
 }
 
 function dispositionKey(ruleId: string, defectClass: string, path: string, startLine: number): string {

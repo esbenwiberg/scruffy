@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Finding, ValidationOutcome } from "../../domain/evidence/types.js";
 import type { NightlyPolicy } from "../../domain/policy/types.js";
 import { evaluateNightly } from "./decision.js";
+import { COMPLETE_COVERAGE } from "../../domain/evidence/coverage.js";
 
 const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
 
@@ -27,7 +28,7 @@ function finding(overrides: Partial<Finding> = {}): Finding {
 
 describe("evaluateNightly", () => {
   it("proposes a fix for a validated, deterministically-supported, fixable class", () => {
-    const d = evaluateNightly([finding()], POLICY);
+    const d = evaluateNightly([finding()], POLICY, COMPLETE_COVERAGE);
     expect(d.dispositions[0]!.disposition).toBe("propose_fix");
     expect(d.dispositions[0]!.reason).toBe("fixable_validated");
     expect(d.summary).toEqual({ reported: 0, proposedFixes: 1, suppressed: 0 });
@@ -37,6 +38,7 @@ describe("evaluateNightly", () => {
     const d = evaluateNightly(
       [finding({ defectClass: "leaked-credential", ruleId: "SECRET.AWS_KEY" })],
       POLICY,
+      COMPLETE_COVERAGE,
     );
     expect(d.dispositions[0]!.disposition).toBe("report");
     expect(d.dispositions[0]!.reason).toBe("reportable_validated");
@@ -44,7 +46,7 @@ describe("evaluateNightly", () => {
 
   it("reports but never auto-fixes a finding it could not validate", () => {
     for (const v of ["pending", "indeterminate", "failed", "not_requested"] as ValidationOutcome[]) {
-      const d = evaluateNightly([finding({ validation: v })], POLICY);
+      const d = evaluateNightly([finding({ validation: v })], POLICY, COMPLETE_COVERAGE);
       expect(d.dispositions[0]!.disposition).toBe("report");
       expect(d.dispositions[0]!.reason).toBe("reportable_unvalidated");
     }
@@ -54,13 +56,14 @@ describe("evaluateNightly", () => {
     const d = evaluateNightly(
       [finding({ supporting: [{ trust: "model-asserted", statement: "looks like a MITM" }] })],
       POLICY,
+      COMPLETE_COVERAGE,
     );
     expect(d.dispositions[0]!.disposition).toBe("report");
     expect(d.dispositions[0]!.reason).toBe("reportable_validated");
   });
 
   it("suppresses a refuted finding", () => {
-    const d = evaluateNightly([finding({ validation: "refuted" })], POLICY);
+    const d = evaluateNightly([finding({ validation: "refuted" })], POLICY, COMPLETE_COVERAGE);
     expect(d.dispositions[0]!.disposition).toBe("suppress");
     expect(d.dispositions[0]!.reason).toBe("refuted");
   });
@@ -72,13 +75,13 @@ describe("evaluateNightly", () => {
       reportableDefectClasses: ["leaked-credential"],
       fixableDefectClasses: ["disabled-tls-verification"],
     };
-    const d = evaluateNightly([finding()], policy);
+    const d = evaluateNightly([finding()], policy, COMPLETE_COVERAGE);
     expect(d.dispositions[0]!.disposition).toBe("propose_fix");
     expect(d.dispositions[0]!.reason).toBe("fixable_validated");
   });
 
   it("suppresses a non-reportable class", () => {
-    const d = evaluateNightly([finding({ defectClass: "style-nit" })], POLICY);
+    const d = evaluateNightly([finding({ defectClass: "style-nit" })], POLICY, COMPLETE_COVERAGE);
     expect(d.dispositions[0]!.disposition).toBe("suppress");
     expect(d.dispositions[0]!.reason).toBe("not_reportable_class");
   });
@@ -87,20 +90,20 @@ describe("evaluateNightly", () => {
     const reported = finding({ defectClass: "leaked-credential", ruleId: "SECRET.AWS_KEY", primaryRegion: { path: "src/z.ts", startLine: 1, endLine: 1, snippet: "x" } });
     const suppressed = finding({ validation: "refuted" });
     const proposed = finding();
-    const d = evaluateNightly([suppressed, reported, proposed], POLICY);
+    const d = evaluateNightly([suppressed, reported, proposed], POLICY, COMPLETE_COVERAGE);
     expect(d.dispositions.map((x) => x.disposition)).toEqual(["propose_fix", "report", "suppress"]);
   });
 
   it("is order-independent: shuffled input yields the same ranked output", () => {
     const a = finding({ ruleId: "TLS.A", primaryRegion: { path: "src/a.ts", startLine: 1, endLine: 1, snippet: "rejectUnauthorized: false" } });
     const b = finding({ ruleId: "TLS.B", primaryRegion: { path: "src/b.ts", startLine: 2, endLine: 2, snippet: "rejectUnauthorized: false" } });
-    const forward = evaluateNightly([a, b], POLICY).dispositions.map((x) => x.ruleId);
-    const backward = evaluateNightly([b, a], POLICY).dispositions.map((x) => x.ruleId);
+    const forward = evaluateNightly([a, b], POLICY, COMPLETE_COVERAGE).dispositions.map((x) => x.ruleId);
+    const backward = evaluateNightly([b, a], POLICY, COMPLETE_COVERAGE).dispositions.map((x) => x.ruleId);
     expect(forward).toEqual(backward);
   });
 
   it("an empty range is a clean nightly", () => {
-    const d = evaluateNightly([], POLICY);
+    const d = evaluateNightly([], POLICY, COMPLETE_COVERAGE);
     expect(d.dispositions).toEqual([]);
     expect(d.summary).toEqual({ reported: 0, proposedFixes: 0, suppressed: 0 });
   });

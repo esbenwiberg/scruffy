@@ -62,7 +62,7 @@ describe("TlsFixer", () => {
     // whole-line patch de-indents the code and breaks it.
     const indented = "        rejectUnauthorized: false,";
     const file: ChangedFile = { path: "src/http.ts", patch: ["@@ -0,0 +1,1 @@", `+${indented}`].join("\n") };
-    const [found] = await new DisabledTlsAnalyzer().analyze(SUBJECT, [file]);
+    const [found] = (await new DisabledTlsAnalyzer().analyze(SUBJECT, [file])).findings;
     expect(found).toBeDefined();
     const edit = fixer.propose(found!);
     expect(edit!.replacement).toBe("        rejectUnauthorized: true,");
