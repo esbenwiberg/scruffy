@@ -1,20 +1,9 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { ClaudeCliModelProvider } from "../../src/providers/models/claude-cli.js";
 import { PROMPT_VERSION } from "../../src/providers/analyzers/model-analyzer.js";
-
-/**
- * Pins the documented LIMITATION of the claude-cli backend: `claude -p` exposes
- * only text + exit code, so a length-truncated completion that exits 0 is
- * returned as a normal success — this backend CANNOT detect truncation the way
- * the SDK backends (which throw on stop_reason === "max_tokens") can. These tests
- * make that gap explicit and executable rather than merely commented.
- *
- * The stub is a real executable script invoked through the provider's `binary`
- * option, so we exercise the actual spawn/stdio path, not a mock.
- */
 
 const dir = mkdtempSync(join(tmpdir(), "claude-cli-stub-"));
 const stubs: string[] = [];
@@ -24,13 +13,19 @@ function makeStub(body: string, code = 0): string {
   const path = join(dir, `stub-${stubs.length}.sh`);
   // Single-quote the payload for the shell; escape embedded single quotes.
   const safe = body.replace(/'/g, `'\\''`);
-  writeFileSync(path, `#!/bin/sh\nprintf '%s' '${safe}'\nexit ${code}\n`);
+  writeFileSync(path, `#!/bin/sh\ncat >/dev/null\nprintf '%s' '${safe}'\nexit ${code}\n`);
   chmodSync(path, 0o755);
   stubs.push(path);
   return path;
 }
 
 const request = { promptVersion: PROMPT_VERSION, system: "sys", input: "in" };
+const successfulEnvelope = {
+  result: '  [{"class":"sql-injection","path":"a.ts","line":1,"reason":"x"}]  ',
+  stop_reason: "end_turn",
+  is_error: false,
+  subtype: "success",
+};
 
 afterAll(() => {
   // mkdtemp dir is under the OS tmp dir; leaving the scripts is harmless, but drop
@@ -38,52 +33,91 @@ afterAll(() => {
   stubs.length = 0;
 });
 
-describe("ClaudeCliModelProvider truncation blindness", () => {
-  it("returns a partial/invalid completion as a NORMAL success when the CLI exits 0 (cannot detect truncation)", async () => {
-    // A JSON array cut off mid-object — exactly what a max_tokens truncation looks
-    // like. The SDK backends throw here; the CLI backend has no stop_reason, so it
-    // hands the partial text back as success. This is the under-report gap.
-    const partial = '[{"class":"sql-inj';
-    const provider = new ClaudeCliModelProvider({ binary: makeStub(partial) });
-
+describe("ClaudeCliModelProvider completion envelope", () => {
+  it("extracts result text only from a successful terminal end_turn", async () => {
+    const provider = new ClaudeCliModelProvider({ binary: makeStub(JSON.stringify(successfulEnvelope)) });
     const response = await provider.complete(request);
 
-    // No throw, no abstain — the truncation is invisible at this layer.
-    expect(response.text).toBe(partial);
+    expect(response.text).toBe(successfulEnvelope.result.trim());
     expect(response.modelId).toBe("claude-cli");
   });
 
-  it("a truncation that still parses to a SHORTER valid array is silently under-reported (no error surfaces)", async () => {
-    // The subtle case the doc warns about: the completion was cut off after the
-    // first finding, but what survived is itself valid JSON. Nothing downstream can
-    // tell it apart from a genuinely single-finding review.
-    const truncatedButValid = '[{"class":"sql-injection","path":"a.ts","line":1,"reason":"x"}';
-    const provider = new ClaudeCliModelProvider({ binary: makeStub(truncatedButValid) });
-
-    const response = await provider.complete(request);
-
-    expect(response.text).toBe(truncatedButValid);
+  it.each(["max_tokens", "tool_use", "pause_turn"])("rejects non-terminal stop_reason %s", async (stopReason) => {
+    const provider = new ClaudeCliModelProvider({
+      binary: makeStub(JSON.stringify({ ...successfulEnvelope, stop_reason: stopReason })),
+    });
+    await expect(provider.complete(request)).rejects.toThrow(new RegExp(`stop_reason=${stopReason}`));
   });
 
-  it("still rejects on a non-zero exit — exit code is the ONLY failure signal this backend has", async () => {
-    const provider = new ClaudeCliModelProvider({ binary: makeStub("boom", 1) });
-    await expect(provider.complete(request)).rejects.toThrow(/exited 1/);
+  it("rejects malformed JSON", async () => {
+    const provider = new ClaudeCliModelProvider({ binary: makeStub('{"result":') });
+    await expect(provider.complete(request)).rejects.toThrow(/malformed JSON completion envelope/);
   });
 
-  it("passes a complete, valid completion through unchanged (trimmed)", async () => {
-    const complete = '  [{"class":"sql-injection","path":"a.ts","line":1,"reason":"x"}]  ';
-    const provider = new ClaudeCliModelProvider({ binary: makeStub(complete) });
-    const response = await provider.complete(request);
-    expect(response.text).toBe(complete.trim());
+  it.each(["result", "stop_reason", "is_error", "subtype"] as const)(
+    "rejects an envelope missing required %s metadata",
+    async (field) => {
+      const envelope: Partial<typeof successfulEnvelope> = { ...successfulEnvelope };
+      delete envelope[field];
+      const provider = new ClaudeCliModelProvider({ binary: makeStub(JSON.stringify(envelope)) });
+      await expect(provider.complete(request)).rejects.toThrow(new RegExp(field));
+    },
+  );
+
+  it("rejects error envelopes even when subtype and stop_reason otherwise look successful", async () => {
+    const provider = new ClaudeCliModelProvider({
+      binary: makeStub(JSON.stringify({ ...successfulEnvelope, is_error: true })),
+    });
+    await expect(provider.complete(request)).rejects.toThrow(/reported an error completion/);
+  });
+
+  it("rejects non-success subtypes even with end_turn and no error", async () => {
+    const provider = new ClaudeCliModelProvider({
+      binary: makeStub(JSON.stringify({ ...successfulEnvelope, subtype: "error_during_execution" })),
+    });
+    await expect(provider.complete(request)).rejects.toThrow(/subtype=error_during_execution/);
   });
 });
 
-describe("ClaudeCliModelProvider output bounds", () => {
+describe("ClaudeCliModelProvider invocation isolation", () => {
+  it("requests JSON and disables built-in and ambient MCP tools while preserving the model", async () => {
+    const argvPath = join(dir, "captured-argv");
+    const path = join(dir, `argv-${stubs.length}.sh`);
+    writeFileSync(
+      path,
+      `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "$@" > '${argvPath}'\nprintf '%s' '${JSON.stringify(successfulEnvelope)}'\n`,
+    );
+    chmodSync(path, 0o755);
+    stubs.push(path);
+
+    const provider = new ClaudeCliModelProvider({ binary: path, model: "claude-test-model" });
+    const response = await provider.complete(request);
+
+    expect(readFileSync(argvPath, "utf8").trimEnd().split("\n")).toEqual([
+      "-p",
+      "--output-format",
+      "json",
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--mcp-config",
+      '{"mcpServers":{}}',
+      "--model",
+      "claude-test-model",
+    ]);
+    expect(response.modelId).toBe("claude-cli:claude-test-model");
+  });
+});
+
+describe("ClaudeCliModelProvider subprocess safety", () => {
   /** A stub that streams `mib` MiB of output, to exercise the accumulation cap. */
   function floodStub(mib: number, stream: "stdout" | "stderr", code = 0): string {
     const path = join(dir, `flood-${stubs.length}.sh`);
     const redirect = stream === "stderr" ? " >&2" : "";
-    writeFileSync(path, `#!/bin/sh\ndd if=/dev/zero bs=1048576 count=${mib} 2>/dev/null | tr '\\0' 'a'${redirect}\nexit ${code}\n`);
+    writeFileSync(
+      path,
+      `#!/bin/sh\ncat >/dev/null\ndd if=/dev/zero bs=1048576 count=${mib} 2>/dev/null | tr '\\0' 'a'${redirect}\nexit ${code}\n`,
+    );
     chmodSync(path, 0o755);
     stubs.push(path);
     return path;
@@ -107,8 +141,23 @@ describe("ClaudeCliModelProvider output bounds", () => {
     });
   });
 
-  it("leaves an ordinary-sized completion untouched", async () => {
-    const provider = new ClaudeCliModelProvider({ binary: makeStub("[]") });
-    expect((await provider.complete(request)).text).toBe("[]");
+  it("reports non-zero exits with bounded stderr", async () => {
+    const provider = new ClaudeCliModelProvider({ binary: makeStub("boom", 7) });
+    await expect(provider.complete(request)).rejects.toThrow(/exited 7/);
+  });
+
+  it("handles a child closing stdin early without double settlement", async () => {
+    const path = join(dir, `early-exit-${stubs.length}.sh`);
+    writeFileSync(path, "#!/bin/sh\nexit 1\n");
+    chmodSync(path, 0o755);
+    stubs.push(path);
+    const provider = new ClaudeCliModelProvider({ binary: path });
+
+    await expect(provider.complete({ ...request, input: "x".repeat(1_000_000) })).rejects.toThrow();
+  });
+
+  it("leaves ordinary-sized terminal output intact", async () => {
+    const provider = new ClaudeCliModelProvider({ binary: makeStub(JSON.stringify(successfulEnvelope)) });
+    expect((await provider.complete(request)).text).toBe(successfulEnvelope.result.trim());
   });
 });

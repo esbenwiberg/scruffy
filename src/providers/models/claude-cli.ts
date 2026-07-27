@@ -15,18 +15,11 @@ import type { ModelProvider, ModelRequest, ModelResponse } from "./port.js";
  * Trade-off: each call spawns a CLI process (seconds of latency), so this suits
  * nightly/deeper validation, not the sub-two-minute poison path.
  *
- * LIMITATION — no truncation detection (breaks the anti-under-report contract):
- * the SDK backends (anthropic-cli.ts, azure-foundry.ts) throw when
- * `stop_reason === "max_tokens"`, because a length-truncated completion is almost
- * always invalid JSON that the analyzer parses to "no findings" —
- * indistinguishable from a clean review. `claude -p` returns only text and an
- * exit code; it does NOT expose `stop_reason`, so this backend CANNOT tell a
- * truncated completion from a complete one and will return the partial text as a
- * normal success. It is therefore unsuitable for high-assurance/blocking gates.
- * Only use it where a downstream consumer validates completeness (e.g. the model
- * analyzer drops unparseable output — but a partial completion that still parses
- * to a shorter valid array would silently under-report). See claude-cli.test.ts,
- * which pins this gap.
+ * The provider uses Claude Code's JSON transport envelope and accepts only a
+ * successful `end_turn`. This keeps truncation and attempted tool use from being
+ * mistaken for a complete review. The invocation also removes built-in tools and
+ * ignores ambient MCP configuration: this adapter supplies all review context and
+ * expects completion text, not an agentic workflow.
  */
 export class ClaudeCliModelProvider implements ModelProvider {
   readonly id: string;
@@ -43,14 +36,21 @@ export class ClaudeCliModelProvider implements ModelProvider {
     // The CLI takes a single prompt; fold the system instructions in ahead of
     // the input, clearly delimited.
     const prompt = `${request.system}\n\n---\n\n${request.input}`;
-    const args = ["-p"];
+    const args = [
+      "-p",
+      "--output-format",
+      "json",
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--mcp-config",
+      EMPTY_MCP_CONFIG,
+    ];
     if (this.#model) args.push("--model", this.#model);
 
-    const text = await this.#run(args, prompt);
-    // NOTE: exit 0 is the only success signal the CLI gives us. Unlike the SDK
-    // backends we have no `stop_reason`, so a length-truncated completion is
-    // returned here as a normal success — see the LIMITATION note above.
-    return { modelId: this.id, text: text.trim() };
+    const stdout = await this.#run(args, prompt);
+    const envelope = parseCompletionEnvelope(stdout);
+    return { modelId: this.id, text: envelope.result.trim() };
   }
 
   #run(args: string[], stdin: string): Promise<string> {
@@ -93,7 +93,9 @@ export class ClaudeCliModelProvider implements ModelProvider {
       // stderr only ever feeds an error message, so cap it by discarding the
       // tail rather than failing the call — but cap it, for the same reason.
       child.stderr.on("data", (chunk: string) => {
-        if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
+        if (stderr.length < MAX_STDERR_CHARS) {
+          stderr += chunk.slice(0, MAX_STDERR_CHARS - stderr.length);
+        }
       });
       child.on("error", (err) => settle(() => reject(err)));
       // EPIPE if the child dies before consuming the (full-prompt) stdin: handle it
@@ -110,6 +112,54 @@ export class ClaudeCliModelProvider implements ModelProvider {
   }
 }
 
+type CompletionEnvelope = {
+  result: string;
+  stop_reason: string;
+  is_error: boolean;
+  subtype: string;
+};
+
+function parseCompletionEnvelope(stdout: string): CompletionEnvelope {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new Error("claude CLI returned malformed JSON completion envelope");
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("claude CLI returned an invalid completion envelope: expected an object");
+  }
+
+  const envelope = value as Record<string, unknown>;
+  const missing = [
+    typeof envelope.result !== "string" && "result",
+    typeof envelope.stop_reason !== "string" && "stop_reason",
+    typeof envelope.is_error !== "boolean" && "is_error",
+    typeof envelope.subtype !== "string" && "subtype",
+  ].filter((field): field is string => field !== false);
+  if (missing.length > 0) {
+    throw new Error(`claude CLI completion envelope has missing or invalid metadata: ${missing.join(", ")}`);
+  }
+
+  const completion = envelope as CompletionEnvelope;
+  if (completion.is_error) {
+    throw new Error(
+      `claude CLI reported an error completion (subtype=${completion.subtype}, stop_reason=${completion.stop_reason})`,
+    );
+  }
+  if (completion.subtype !== "success") {
+    throw new Error(`claude CLI completion was not successful (subtype=${completion.subtype})`);
+  }
+  if (completion.stop_reason !== "end_turn") {
+    throw new Error(`claude CLI completion was not terminal (stop_reason=${completion.stop_reason})`);
+  }
+
+  return completion;
+}
+
+/** Strict MCP mode with an explicit empty server set excludes ambient MCP tools. */
+const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 /** A model call can be slow; but a truly hung CLI must eventually fail the call. */
 const CLAUDE_TIMEOUT_MS = 120_000;
 /** Generous next to a 4096-token reply; small enough that a runaway cannot OOM us. */
