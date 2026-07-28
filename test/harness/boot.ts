@@ -56,7 +56,7 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
   await migrate(pool);
   // Fresh state each boot: truncate everything the skeleton writes.
   await pool.query(
-    "truncate outbox, poison_decisions, nightly_decisions, release_decisions, review_watermarks, run_transitions, evaluation_runs cascade",
+    "truncate outbox, poison_decisions, nightly_decisions, release_decisions, release_reports, review_watermarks, run_transitions, evaluation_runs cascade",
   );
 
   const clock = new FixedClock(new Date("2026-07-15T00:00:00.000Z"));

@@ -4,6 +4,7 @@ import { bootHarness, type Harness } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
 import type { ChangedFile } from "../../src/providers/scm/port.js";
 import type { ReleaseOutcome } from "../../src/gates/release/decision.js";
+import { parseReleaseReport } from "../../src/domain/release/report.js";
 
 /**
  * End-to-end release gate over a seeded RANGE (prev-release, candidate]. Real
@@ -56,6 +57,18 @@ async function decisionOf(candidate: string) {
     [REPO, candidate],
   );
   return r.rows[0];
+}
+
+/** All persisted release_reports rows for a candidate, with the jsonb blob re-parsed at the read boundary. */
+async function reportsOf(candidate: string) {
+  const r = await h.pool.query<{ report_id: string; candidate_sha: string; report: unknown }>(
+    `select rr.report_id, rr.candidate_sha, rr.report from release_reports rr
+       join evaluation_runs r on r.id = rr.run_id
+      where r.repository = $1 and r.commit_sha = $2 and r.kind = 'release'`,
+    [REPO, candidate],
+  );
+  // Never trust the blob: re-validate every stored report through the schema.
+  return r.rows.map((row) => ({ reportId: row.report_id, candidateShaColumn: row.candidate_sha, report: parseReleaseReport(row.report) }));
 }
 
 describeDb("release gate over a seeded range", () => {
@@ -127,6 +140,63 @@ describeDb("release gate over a seeded range", () => {
     await h.scruffy.flushEffects();
 
     expect(releaseChecks(CAND)).toHaveLength(1);
+  });
+
+  it("atomically persists a SHA-bound release report", async () => {
+    h = await bootHarness();
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [CLEAN_FILE]);
+
+    const run = await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    expect(run.state).toBe("decided");
+    await h.scruffy.flushEffects();
+
+    // Exactly one schema-valid report, bound to the immutable range.
+    const reports = await reportsOf(CAND);
+    expect(reports).toHaveLength(1);
+    const { report, reportId, candidateShaColumn } = reports[0]!;
+    expect(report.reportVersion).toBe("1");
+    expect(report.subject.candidateSha).toBe(CAND);
+    expect(report.subject.previousReleaseSha).toBe(PREV);
+    expect(candidateShaColumn).toBe(CAND); // denormalized column agrees with the blob
+    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis"]);
+    expect(report.evidenceLanes[0]!.subjectSha).toBe(CAND);
+
+    // Report, durable decision, and posted check all agree.
+    const decision = await decisionOf(CAND);
+    expect(report.decision.outcome).toBe("ship");
+    expect(decision?.outcome).toBe(report.decision.outcome);
+
+    const checks = releaseChecks(CAND);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.input.conclusion).toBe("neutral"); // shadow-first
+    // The check is rendered FROM the report: it carries the same report id + candidate + outcome.
+    expect(checks[0]!.input.summary).toContain(reportId);
+    expect(checks[0]!.input.summary).toContain(CAND);
+    expect(checks[0]!.input.title).toMatch(/ship/);
+  });
+
+  it("does not duplicate a release report", async () => {
+    h = await bootHarness();
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [TLS_FILE]);
+
+    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    await h.scruffy.flushEffects();
+
+    // Re-trigger the same immutable candidate + policy, and flush repeatedly.
+    const again = await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    expect(again.state).toBe("decided");
+    await h.scruffy.flushEffects();
+    await h.scruffy.flushEffects();
+
+    // One report, one idempotent check effect — a retry never inserts a second.
+    expect(await reportsOf(CAND)).toHaveLength(1);
+    expect(releaseChecks(CAND)).toHaveLength(1);
+    const rows = await h.pool.query<{ count: string }>(
+      `select count(*) from outbox o join evaluation_runs r on r.id = o.run_id
+        where r.repository = $1 and r.commit_sha = $2 and r.kind = 'release'`,
+      [REPO, CAND],
+    );
+    expect(rows.rows[0]!.count).toBe("1");
   });
 
   it("recovers a release run whose worker crashed mid-analysis, via the reconciler", async () => {
