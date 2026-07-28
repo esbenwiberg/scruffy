@@ -1,300 +1,353 @@
 # Scruffy
 
-Service-controlled three-gate review system for organization repositories. See
-`docs/product/vision.md` for the product thesis and `docs/decisions/` for the
-ADRs: trust boundaries (ADR-0001) and language scope (ADR-0002) are **Accepted**;
-the implementation/deployment stack (ADR-0003) is still **Proposed** (its
-acceptance criteria are not all met — see "What is NOT built yet").
+Scruffy is an experimental review service for GitHub repositories. It reviews
+changes at three points—pull request, nightly, and release—and applies a
+different decision policy at each point.
 
-This repository is a **walking skeleton**. All three gates — **poison** (blocking),
-**nightly** (proposes fixes), and **release** (ship / sign-off / stop) — are wired
-end-to-end through the real durable path, with the trust edges (GitHub, model)
-faked so the whole thing runs deterministically and offline. The deterministic
-defect classes are `leaked-credential`, `destructive-schema-change` (silent data
-loss), and `disabled-tls-verification` (exploitable security), each with an
-adversarial validator; a model-backed analyzer adds semantic classes off the
-deterministic critical path.
+The project is currently a **walking skeleton**, not a production service. The
+core workflows run end to end through Postgres and the transactional outbox, but
+all GitHub checks should remain non-required while the system is evaluated in
+shadow mode.
 
-## Run it
+## How Scruffy works
 
-Requires Docker (for Postgres) and Node ≥ 22.
+| Gate        | Runs over                        | Purpose                                                            | Possible result                     |
+| ----------- | -------------------------------- | ------------------------------------------------------------------ | ----------------------------------- |
+| **Poison**  | One pull request                 | Catch only high-confidence security defects or silent data loss    | `allow`, `block`, `indeterminate`   |
+| **Nightly** | Changes since a branch watermark | Perform a deeper review and optionally propose a narrow fix        | `suppress`, `report`, `propose_fix` |
+| **Release** | Previous release to candidate    | Decide whether the candidate is safe to publish or needs attention | `ship`, `sign-off-required`, `stop` |
+
+The gates deliberately have different authority:
+
+- Poison may make a blocking decision, but abstains when evidence is weak.
+- Nightly never blocks. It reports findings or proposes fix PRs.
+- Release produces one aggregate decision. Uncertainty requires sign-off rather
+  than being treated as safe.
+
+Scruffy currently detects three deterministic defect classes:
+
+- leaked credentials;
+- destructive database migrations that can silently lose data;
+- disabled TLS certificate verification.
+
+Each deterministic finding is checked by an adversarial validator before it can
+influence a decision. Model-backed analysis exists for experimentation, but it
+is not part of the deterministic poison path and cannot independently create a
+block.
+
+For the product rationale and intended ownership model, read
+[`docs/product/vision.md`](docs/product/vision.md).
+
+## Current status
+
+What works today:
+
+- all three gates run through the real domain, persistence, and effects layers;
+- run state and decisions are stored in Postgres;
+- decisions and outbound effects are committed atomically;
+- retries, leases, reconciliation, idempotency, and dead-lettering are covered;
+- GitHub can be accessed through an authenticated `gh` session or a GitHub App;
+- the hosted webhook server accepts signed pull-request events for the poison
+  gate;
+- deterministic harnesses and labeled corpus replays run offline.
+
+Important limitations:
+
+- GitHub checks are still intended for shadow use and must remain non-required;
+- the first real GitHub App installation and outward check-run are operator
+  steps that have not been completed;
+- the webhook server handles `pull_request` events, not merge queues;
+- nightly and release have manual entry points but no production scheduler or
+  release integration yet;
+- the included corpora are small synthetic validation sets, not evidence of
+  production accuracy;
+- the local hostile-code runner uses Docker, which is not accepted as the final
+  production isolation boundary;
+- unsupported-language coverage is not yet labeled in results.
+
+See [Known gaps](#known-gaps) for the related design documents.
+
+## Prerequisites
+
+- Node.js 22 or newer
+- npm
+- Docker with Docker Compose
+- GitHub CLI (`gh`) only when running a manual review against GitHub
+
+## Quick start
+
+Install dependencies and start the local Postgres instance:
 
 ```bash
 npm install
-npm run db:up        # start Postgres (docker compose) and wait for it
-npm run db:migrate   # apply migrations
-npm run harness      # boot Scruffy, feed seeded PRs, print outcomes
-npm run corpus       # replay the labeled poison corpus, print metrics (no DB)
-npm test             # unit + persistence + end-to-end suite
-npm run typecheck
+npm run db:up
+npm run db:migrate
 ```
 
-`npm run db:down` tears the database down. `npm test` runs the DB-backed
-persistence/harness suites only when Postgres is reachable; without a database
-(no `npm run db:up`) those suites are **skipped** — with a logged notice —
-rather than failing, so the pure suites still give signal. Bring the DB up to
-run everything.
-
-Other corpus replays (all DB-free): `npm run corpus:nightly`, `npm run
-corpus:release`, `npm run corpus:grounded`, and `npm run corpus:all` — the
-cross-gate sweep that fails loudly on any false-block, unsafe ship, or
-regression. `npm run corpus:grounded:live` runs the grounded detection targets
-against a real model backend.
-
-### Run the poison gate against a real PR (shadow)
-
-`scruffy:review` runs the poison gate against a real GitHub PR and posts a
-**shadow commit status** on its head commit. It reuses your authenticated `gh`
-CLI session (no token in config) for both reading the diff and posting the status.
+Run the deterministic end-to-end harness:
 
 ```bash
-gh auth status                                   # must be logged in with push access
-npm run db:up && npm run db:migrate              # Postgres for durable runs
+npm run harness
+```
+
+Run the normal development checks:
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run format:check
+```
+
+Stop Postgres when finished:
+
+```bash
+npm run db:down
+```
+
+The default local database URL is:
+
+```text
+postgres://scruffy:scruffy@localhost:5433/scruffy
+```
+
+Set `DATABASE_URL` to use a different Postgres instance.
+
+### Test behavior without Postgres
+
+`npm test` always runs the pure unit tests. Database-backed persistence and
+end-to-end suites run only when Postgres is reachable; otherwise Vitest skips
+them with a notice. Start the database first when you need the complete suite:
+
+```bash
+npm run db:up
+npm run db:migrate
+npm test
+```
+
+## Useful development commands
+
+| Command                  | Description                                       |
+| ------------------------ | ------------------------------------------------- |
+| `npm test`               | Run the Vitest suite                              |
+| `npm run test:watch`     | Run Vitest in watch mode                          |
+| `npm run typecheck`      | Type-check without emitting JavaScript            |
+| `npm run lint`           | Run ESLint                                        |
+| `npm run format:check`   | Check Prettier formatting                         |
+| `npm run build`          | Compile the deployable `dist/` tree               |
+| `npm run harness`        | Exercise the poison gate through the durable path |
+| `npm run corpus`         | Replay the poison corpus                          |
+| `npm run corpus:all`     | Replay all deterministic gate corpora             |
+| `npm run test:isolation` | Run the Docker runner's escape-attempt suite      |
+| `npm run ops:measure`    | Build and collect local operational measurements  |
+
+Additional corpus commands are `corpus:nightly`, `corpus:release`,
+`corpus:grounded`, and `corpus:grounded:live`.
+
+## Run a shadow review against GitHub
+
+The manual commands below read a real GitHub diff and write a visible status or
+check. Use a test repository you control. Confirm that the Scruffy check context
+is **not required** by branch protection.
+
+By default, these commands use your authenticated `gh` session for both reads
+and writes:
+
+```bash
+gh auth status
+npm run db:up
+npm run db:migrate
+```
+
+### Review a pull request
+
+```bash
 npm run scruffy:review -- <owner/repo> <pr-number>
 ```
 
-It resolves the PR's base (via the commit's associated **open** PR), reads the
-diff (`gh api compare/base...head`, falling back to the head commit's own file
-list when no open PR is associated), runs the deterministic poison analysis, and
-posts a `scruffy/poison` commit status: `success` (allow), `failure`
-(block), or `pending` (abstained). If the diff cannot be read completely (a `gh`
-failure, the 300-file cap, or a file too large to diff) it abstains rather than
-scanning a partial diff as clean. **Shadow by construction** — a commit status
-only blocks a merge if a repo admin marks its context a _required_ check, so
-scruffy posts the honest state and never blocks on its own. It also prints the
-decision and the PR URL.
+This runs the poison gate and posts `scruffy/poison` on the PR's head commit.
+The result is `success` for allow, `failure` for block, or `pending` for an
+abstention when using the default commit-status writer.
 
-Why a status and not a check-run: creating check-runs requires a GitHub App
-(`checks:write`); a user token (which `gh` holds) can't. Commit statuses need only
-push access. Point it at a **test repo you control**, never a customer repo — a
-status is a visible write.
-
-### Hosted webhook server
-
-`npm run serve` boots the durable path behind an HTTP listener
-(`src/server/main.ts`): `POST /webhook` verifies the delivery signature,
-**durably records** the poison run, acks `202` inside GitHub's ~10s budget, and
-drives the analysis in the background; `GET /healthz` probes the DB. A
-reconcile-and-flush loop (default every 10s) is the actual engine — it recovers
-anything a crash leaves behind, so the ack promises durability, never
-completion. The webhook is a prompt; the reconciler is the authority.
+### Review a branch with the nightly gate
 
 ```bash
-export SCRUFFY_WEBHOOK_SECRET=...   # the HMAC secret configured on the GitHub webhook
-npm run db:up && npm run serve      # listens on :8080 (PORT overrides)
-```
-
-The server resolves and constructs BOTH the reader and the writer through the
-SCM factory (`SCRUFFY_SCM_READER` / `SCRUFFY_SCM_WRITER`, each `gh-cli` by
-default) and logs both selected backends at startup. Set both to `github-app`
-for a fully App-authenticated deployment that needs **no `gh` login and no
-`GH_TOKEN`**; an unknown value fails loudly at boot. For the first App
-installation and webhook test, follow
-[`docs/product/github-app-setup.md`](docs/product/github-app-setup.md) and check
-the installation with `npm run app:doctor` (a read-only preflight — see below).
-
-`docker build .` produces the deployable image (compiled `dist/`, migrations,
-`gh` CLI for the default shadow reader — inject `GH_TOKEN` at runtime, never
-bake it in; App-only mode needs neither). What still stands between this and a
-real deployment: exposing an endpoint, a managed Postgres, and the one-time
-GitHub App registration — operator decisions, not code.
-
-### GitHub App writer (real check-runs + fix PRs)
-
-The App-backed writer (`src/providers/scm/github-app.ts`) is the separately,
-narrowly privileged write credential ADR-0001 requires: an App installation
-scoped to `checks:write`, `contents:write`, and `pull_requests:write`, distinct
-from whatever credential reads. It posts **real check-runs** (native `neutral`,
-title + summary, idempotent on the port's canonical `(subject, externalId)` key)
-and opens **fix PRs** (deterministic branch from the reviewed sha, line edits
-committed via the contents API, crash-resumable at every step, never merged).
-
-Select it with `SCRUFFY_SCM_WRITER=github-app` (default stays `gh-cli`, the
-shadow status). Credentials come from the environment only:
-
-```bash
-export SCRUFFY_GH_APP_ID=...               # the App's numeric id
-export SCRUFFY_GH_APP_INSTALLATION_ID=...  # its installation on the target org
-export SCRUFFY_GH_APP_PRIVATE_KEY_FILE=~/.secrets/scruffy-app.pem   # or _KEY with the PEM
-SCRUFFY_SCM_WRITER=github-app npm run scruffy:review -- <owner/repo> <pr-number>
-```
-
-Registering the App (a one-time browser step) and the first outward check-run
-against a real repo remain to be run by a human; the adapter itself is
-contract-tested offline against recorded GitHub response shapes.
-
-The read side has an App-backed counterpart too
-(`src/providers/scm/github-app-reader.ts`), selected **independently** of the
-writer via `SCRUFFY_SCM_READER=github-app` (default `gh-cli`) — ADR-0001 wants
-reads and writes on separate credentials, so a hosted deployment can read diffs
-through the App installation without depending on any human's `gh` login. Same
-error discipline as the gh-cli reader: it throws on any API failure and never
-returns an empty diff on a fault (which would false-green the blocking gate).
-The hosted server (`npm run serve`) and the manual `scruffy:*` scripts both
-build the reader and writer through the factory, so setting both
-`SCRUFFY_SCM_READER` and `SCRUFFY_SCM_WRITER` to `github-app` is a complete
-App-only path end to end.
-
-`npm run app:doctor` is a **read-only** operator preflight: it parses the same
-`SCRUFFY_GH_APP_*` configuration, authenticates as the installation, and lists
-the repositories in scope — no write of any kind. Run it before the first
-webhook test to confirm the App is installed on exactly the repositories you
-expect; missing or malformed credentials fail with a clear message.
-
-### Run the nightly gate against a branch
-
-`scruffy:nightly` runs the **nightly gate** over a branch's `(watermark, head]`
-range and drains its effects. The nightly gate **never blocks** — it reviews and
-proposes: `report`, `propose_fix`, or `suppress`. Re-running an unchanged head is
-an idempotent no-op (base == head → up-to-date).
-
-```bash
-gh auth status
-npm run db:up && npm run db:migrate
 npm run scruffy:nightly -- <owner/repo> <branch> [head-sha]
 ```
 
-The base defaults to the branch's stored watermark (null on the first-ever run,
-which reviews the head commit itself); pass an explicit `head-sha` to pin the
-range head. It prints the reviewed range, the run state, the disposition counts,
-and the effects dispatched.
+The nightly gate reviews the range after the branch's stored watermark. Running
+it again at the same head is an idempotent no-op.
 
-**Writer honesty**: under the default `gh-cli` writer the nightly summary
-check-run renders as a shadow commit status (works), but a `propose_fix`
-disposition wants a **real fix PR**, and `openPullRequest` is not enabled in the
-gh-cli adapter — that effect throws and dead-letters. The script **warns loudly**
-and exits non-zero rather than letting a proposed fix silently vanish. Opening
-fix PRs needs `SCRUFFY_SCM_WRITER=github-app` once the App is registered.
+The default `gh-cli` writer can publish the nightly summary, but it cannot open
+fix PRs. If the gate chooses `propose_fix`, that effect dead-letters and the
+command exits non-zero with a warning. Opening fix PRs requires the GitHub App
+writer.
 
-### Run the release gate against a candidate
-
-`scruffy:release` runs the **release gate** over the range
-`(prev-release, candidate]` and drains its effects. Release is the **last gate**:
-it produces one aggregate outcome — `ship`, `sign-off-required`, or `stop` — and
-**never blocks** (the check is shadow/advisory in the skeleton). Uncertainty maps
-to `sign-off-required`, not abstention — a last gate does not get to shrug; only
-an infra failure that stops analysis maps to `indeterminate`.
+### Review a release candidate
 
 ```bash
-gh auth status
-npm run db:up && npm run db:migrate
-npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]
+npm run scruffy:release -- <owner/repo> <candidate-ref> [previous-release-ref]
 ```
 
-The candidate and previous-release refs may be a branch, tag, or sha. Omit
-`prev-release-ref` for a first-ever release (the range is the candidate's own full
-change set). It prints the reviewed range, the run state, the outcome + reasons,
-the finding counts (stopped / escalated / cleared / not-relevant), and the effects
-dispatched. Unlike nightly, release emits **no fix PR** — only the shadow
-`scruffy/release` check (a commit status under gh-cli, a native check-run under
-`SCRUFFY_SCM_WRITER=github-app`), so it never opens a branch or PR.
+This reviews `(previous release, candidate]` and publishes the advisory
+`scruffy/release` result. If the previous release is omitted, Scruffy treats the
+candidate as the first release.
 
-## What the skeleton proves
+## Run the webhook server
 
-The inbound path runs on real code with faked edges:
+The hosted entry point serves:
 
+- `POST /webhook` — verify a GitHub signature, record a poison run durably, and
+  return `202` before analysis completes;
+- `GET /healthz` — verify that the process can reach Postgres.
+
+Start it locally with:
+
+```bash
+export SCRUFFY_WEBHOOK_SECRET=<github-webhook-hmac-secret>
+npm run db:up
+npm run serve
 ```
-signed webhook → verify + parse → ensureRun (idempotent)
-  → guarded pending→analyzing (fenced lease) → analyze (deterministic analyzers)
-  → adversarial validate → atomic { terminal transition + decision + outbox effect }
-  → effects dispatcher (per-effect isolation, dead-letter) → idempotent check-run upsert
+
+The server listens on port `8080` by default. `PORT` overrides it.
+
+The webhook handler is intentionally not the work authority. It records the run
+and prompts processing; the reconcile loop claims pending work, recovers expired
+leases, and flushes outbound effects. This means an accepted webhook promises
+durable work, not immediate completion.
+
+### SCM backends
+
+Reader and writer credentials are selected independently:
+
+| Variable             | Values                 | Default  |
+| -------------------- | ---------------------- | -------- |
+| `SCRUFFY_SCM_READER` | `gh-cli`, `github-app` | `gh-cli` |
+| `SCRUFFY_SCM_WRITER` | `gh-cli`, `github-app` | `gh-cli` |
+
+The `gh-cli` backend is convenient for local shadow testing. A hosted App-only
+configuration uses:
+
+```bash
+export SCRUFFY_GH_APP_ID=<app-id>
+export SCRUFFY_GH_APP_INSTALLATION_ID=<installation-id>
+export SCRUFFY_GH_APP_PRIVATE_KEY_FILE=~/.secrets/scruffy-app.pem
+export SCRUFFY_WEBHOOK_SECRET=<webhook-secret>
+export SCRUFFY_SCM_READER=github-app
+export SCRUFFY_SCM_WRITER=github-app
+
+npm run app:doctor
+npm run serve
 ```
 
-- **Pure decision kernel** (`src/gates/poison/decision.ts`): `block | allow |
-indeterminate` over typed evidence + policy. Abstains rather than inventing
-  confidence; infra failure never becomes a clean allow; model-only signals
-  cannot block.
-- **Durable runs + transactional outbox** (`src/persistence/`): guarded
-  transitions (no double-apply), atomic decision+effect commit, at-least-once
-  idempotent dispatch.
-- **Leases + reconciliation** (`src/app/reconciler.ts`): crashed mid-analysis
-  runs (expired lease) and stuck `pending` runs are recovered independently of
-  webhook delivery; commits are fenced on a per-claim lease token so a zombie
-  worker cannot overwrite a live one; bounded retry then abstain. This covers
-  validation #4's lease-expiry, duplicate-webhook, retry, and reconciliation
-  elements; **supersession** is modeled as a run state but not yet exercised.
-- **Measurement** (`src/corpus/`): labeled corpus + replay → confusion matrix,
-  block precision with Wilson 95% lower bound, false-block rate, severe-case
-  recall, abstain rate. See `docs/product/corpus-labeling-protocol.md`.
-- **Deterministic edges** (`src/providers/*/`, `test/fixtures/`): FixedClock +
-  SeededIdGenerator, fake SCM/model, seeded PR fixtures.
+`SCRUFFY_GH_APP_PRIVATE_KEY` can be used instead of the file variable. Never
+store either the private key or webhook secret in this repository.
+
+`npm run app:doctor` is read-only: it authenticates as the installation and
+lists every repository in scope. The complete registration, permissions,
+webhook, verification, and rollback procedure is in
+[`docs/product/github-app-setup.md`](docs/product/github-app-setup.md).
+
+### Server configuration
+
+| Variable                        | Purpose                                      | Default                |
+| ------------------------------- | -------------------------------------------- | ---------------------- |
+| `DATABASE_URL`                  | Postgres connection string                   | Local Compose database |
+| `SCRUFFY_WEBHOOK_SECRET`        | HMAC secret used to verify GitHub deliveries | Required               |
+| `PORT`                          | HTTP listen port                             | `8080`                 |
+| `SCRUFFY_RECONCILE_INTERVAL_MS` | Reconcile and outbox flush interval          | `10000`                |
+| `SCRUFFY_SCM_READER`            | GitHub read adapter                          | `gh-cli`               |
+| `SCRUFFY_SCM_WRITER`            | GitHub write adapter                         | `gh-cli`               |
+
+Unknown backend values and malformed positive-integer settings fail at startup
+instead of silently falling back.
+
+## Architecture
+
+A gate run follows this path:
+
+```text
+GitHub webhook or manual command
+  -> verify and parse input
+  -> create or find an idempotent run in Postgres
+  -> claim the run with a fenced lease
+  -> read the complete GitHub diff
+  -> analyze and adversarially validate findings
+  -> apply the gate's pure decision policy
+  -> atomically store the decision and an outbox effect
+  -> dispatch an idempotent status, check-run, or fix PR
+```
+
+Key properties:
+
+- **Fail closed without false confidence:** incomplete diffs and infrastructure
+  failures do not become clean allows.
+- **Pure decisions:** gate policy is separated from I/O under
+  `src/gates/*/decision.ts`.
+- **Durable execution:** runs, leases, decisions, and effects live in Postgres.
+- **Atomic effects:** a terminal decision and its outbound effect are committed
+  in one transaction.
+- **Crash recovery:** reconciliation retries pending or expired work; lease
+  fencing prevents a stale worker from overwriting a live one.
+- **Idempotent writes:** repeated delivery or dispatch does not intentionally
+  create duplicate runs, checks, or fix PRs.
+- **Separate trust edges:** SCM reads and writes can use separate adapters and
+  credentials.
+
+## Repository map
+
+```text
+src/app/           application wiring, reconciliation, and lease heartbeats
+src/domain/        evidence, policy, finding, validation, and fix contracts
+src/gates/         poison, nightly, and release analysis + decision services
+src/ingest/        GitHub webhook verification and parsing
+src/persistence/   Postgres runs, migrations, leases, decisions, and outbox
+src/effects/       idempotent check-run and pull-request dispatch
+src/providers/     SCM, analyzer, validator, fixer, and model adapters
+src/corpus/        labeled examples, replay logic, and metrics
+src/execution/     hostile-code runner experiment
+src/server/        HTTP server and hosted process entry point
+scripts/           manual GitHub reviews, doctor, smoke, and measurement tools
+test/              unit, persistence, harness, and end-to-end tests
+migrations/        ordered Postgres schema migrations
+```
+
+Built-in analyzers, validators, fixers, and class-to-gate policy are registered
+in [`src/providers/registry.ts`](src/providers/registry.ts). When adding a new
+deterministic blockable class, add both an analyzer and a validator and cover it
+in the relevant gate tests and corpus. A blockable class without validation must
+abstain rather than block.
 
 ## Model backends
 
-Analysis/validation model calls go through one `ModelProvider` port
-(`src/providers/models/`). `SCRUFFY_MODEL_BACKEND` selects the implementation:
+The model provider abstraction supports `fake`, `claude-cli`, `anthropic`, and
+`azure` through `SCRUFFY_MODEL_BACKEND`. The fake backend is the safe default,
+and tests, harnesses, and deterministic corpus runs do not make network model
+calls.
 
-- `fake` (default) — deterministic, no network. Tests, harness, and corpus
-  always use this; nothing fires a live model unless explicitly asked.
-- `claude-cli` — local dev, reuses the authenticated `claude` CLI session (no API
-  key in config).
-- `anthropic` — local dev via the Anthropic SDK (`ant` profile / `ANTHROPIC_API_KEY`).
-- `azure` — deployed service via Azure AI Foundry.
-
-The `ModelValidator` (`src/providers/validation/model-validator.ts`) is the
-adversarial critic: it asks the model to **refute** a deterministic finding.
-Even a `validated` verdict still requires deterministic supporting evidence for
-the poison kernel to block, and any provider/parse failure becomes `failed`
-(abstain) — so the model can never manufacture a block. Fire it against synthetic
-findings:
+Use an explicit smoke command when testing a live provider, for example:
 
 ```bash
 SCRUFFY_MODEL_BACKEND=claude-cli npm run llm-smoke
 ```
 
-## What is NOT built yet
+A model verdict is supporting evidence only. It cannot independently block a
+poison run.
 
-Honest gaps against ADR 0003's acceptance list:
+## Known gaps
 
-- **A registered GitHub App + the first outward check-run.** The App-backed
-  reader and writer (diff reads, check-runs, and fix PRs through Octokit auth —
-  the separate credentials) are built, contract-tested, and wired end to end
-  into both the hosted server and the manual scripts through the factory, so
-  `SCRUFFY_SCM_READER`/`_WRITER=github-app` is a complete App-only path in code.
-  What remains is an **operator step, not code**: registering an App, installing
-  it, and running the first outward check-run against a real repo. The webhook
-  server (`npm run serve`) is tested locally but has never received a real GitHub
-  delivery. The runbook for that first install + webhook test is
-  `docs/product/github-app-setup.md` (initial target: `esbenwiberg/scruffy`,
-  shadow/non-required). Model adapters exist (`claude-cli`/`anthropic`/`azure`)
-  but are off the deterministic critical path.
-- **ADR deviations — now recorded as amendments.** ADR-0003 (2026-07-24
-  amendment) records the `gh`-CLI read path as a dev/shadow-only deviation
-  (Octokit stands for hosted) and the single-process deployment shape; ADR-0001
-  records the separate write credential as built-but-opt-in, with the
-  single-`gh`-session local default called out as a dev-only relaxation. The
-  App-authenticated reader that closes ADR-0001's read-side gap is built and
-  selectable via `SCRUFFY_SCM_READER=github-app`.
-- **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
-  labeled with their reduced coverage; no such labeling exists yet.
-- **Hostile-execution runner** (validation #5) — the LOCAL half is done: a
-  Docker-backed disposable runner whose isolation proof suite plants real
-  credential names and attempts every escape the ADR lists (`npm run
-test:isolation`; `docs/product/hostile-runner-spike.md`). Still open: choosing the
-  production isolation technology (gVisor / microVM / managed sandbox) and
-  re-running the proof there — a container alone is not the final boundary.
-  Validation #6 (cold start / latency / memory / ops steps) is measured —
-  `npm run ops:measure`, `docs/product/ops-measurement.md` — though only on a
-  dev machine so far. The language capability record (#7) is written
-  (`docs/decisions/0003-validation-7-language-capability-record.md`; verdict:
-  no material gap).
-- **Merge-group / merge-queue** handling — the webhook path parses only
-  `pull_request` events; `merge_group_sha` is always null.
-- A statistically meaningful corpus — the synthetic set is a machinery smoke
-  test only (small-n; the Wilson lower bound is honest about that).
+The repository records design choices and unfinished validation explicitly:
 
-## Layout
+- [Product vision](docs/product/vision.md)
+- [Ownership and trust boundaries](docs/decisions/0001-ownership-and-trust-boundaries.md)
+- [Initial language scope](docs/decisions/0002-initial-language-scope.md)
+- [Implementation and deployment shape](docs/decisions/0003-implementation-stack-and-deployment-shape.md)
+- [Opt-in repository integration](docs/product/opt-in-repository-integration.md)
+- [GitHub App setup and first webhook test](docs/product/github-app-setup.md)
+- [Corpus labeling protocol](docs/product/corpus-labeling-protocol.md)
+- [Hostile runner spike](docs/product/hostile-runner-spike.md)
+- [Operational measurements](docs/product/ops-measurement.md)
 
-`src/domain` typed evidence/policy/evaluation/validation contracts ·
-`src/gates/{poison,nightly,release}` each gate's decision kernel + analysis
-orchestration + durable service · `src/providers` SCM/model/analyzer/validator/
-fixer ports, deterministic analyzers, and the registry that binds analyzers ↔
-validators ↔ classes · `src/persistence` Postgres, migrations, runs, outbox ·
-`src/effects` idempotent SCM writes · `src/ingest` webhook verify + parse ·
-`src/corpus` labeled corpora (poison/nightly/release/grounded) + replay metrics ·
-`src/app` wiring + reconciler · `test/` unit, persistence, e2e.
-
-New deterministic defect classes plug in via `src/providers/registry.ts`: add an
-analyzer, a validator for its class, and the class name — the registry keeps
-harness, corpus, and production wiring in sync, and any blockable class without a
-validator abstains rather than blocking.
+The implementation/deployment ADR remains proposed until its validation criteria
+are satisfied. Do not interpret the walking skeleton or synthetic corpus as
+approval to make Scruffy authoritative on a repository.
