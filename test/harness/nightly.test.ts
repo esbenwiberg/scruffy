@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
 import type { ChangedFile } from "../../src/providers/scm/port.js";
@@ -56,7 +57,7 @@ async function summaryOf(head: string) {
   return r.rows[0]?.summary;
 }
 
-describe("nightly gate over a seeded range", () => {
+describeDb("nightly gate over a seeded range", () => {
   it("reviews a range: ranks findings, emits one neutral summary check, advances the watermark", async () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: null, headSha: H1 }, [REPORT_FILE, FIX_FILE, SUPPRESS_FILE]);

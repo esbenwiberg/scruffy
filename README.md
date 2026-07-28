@@ -29,7 +29,11 @@ npm test             # unit + persistence + end-to-end suite
 npm run typecheck
 ```
 
-`npm run db:down` tears the database down.
+`npm run db:down` tears the database down. `npm test` runs the DB-backed
+persistence/harness suites only when Postgres is reachable; without a database
+(no `npm run db:up`) those suites are **skipped** — with a logged notice —
+rather than failing, so the pure suites still give signal. Bring the DB up to
+run everything.
 
 Other corpus replays (all DB-free): `npm run corpus:nightly`, `npm run
 corpus:release`, `npm run corpus:grounded`, and `npm run corpus:all` — the

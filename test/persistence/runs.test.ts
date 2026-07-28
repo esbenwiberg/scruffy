@@ -1,4 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { FixedClock, SeededIdGenerator } from "../../src/platform/clock.js";
 import { createPool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
@@ -34,7 +35,7 @@ afterAll(async () => {
   await pool.end();
 });
 
-describe("RunStore durability", () => {
+describeDb("RunStore durability", () => {
   it("ensureRun is idempotent for the same subject+kind", async () => {
     const a = await runs.ensureRun(SUBJECT, "poison", "p1");
     const b = await runs.ensureRun(SUBJECT, "poison", "p1");

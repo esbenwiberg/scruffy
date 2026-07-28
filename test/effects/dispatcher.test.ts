@@ -1,4 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { FixedClock } from "../../src/platform/clock.js";
 import { createPool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
@@ -101,7 +102,7 @@ async function enqueue(id: string, externalId: string, effectType = "check_run",
   );
 }
 
-describe("EffectsDispatcher error isolation", () => {
+describeDb("EffectsDispatcher error isolation", () => {
   it("a throwing effect at the front of the batch does not starve the ones behind it", async () => {
     const outbox = new OutboxStore(pool, clock);
     const writer = new FlakyWriter(new Set(["pill"]));
