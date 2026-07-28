@@ -42,8 +42,16 @@ export const DB_AVAILABLE = await probe();
 
 if (!DB_AVAILABLE) {
   const { host, port } = target();
+  if (process.env.SCRUFFY_REQUIRE_DB) {
+    // An environment that MEANT to run the DB suites (a real CI with the service
+    // enabled) sets SCRUFFY_REQUIRE_DB so a database that failed to start is a
+    // loud failure, not a silent green with missing coverage.
+    throw new Error(
+      `[test] SCRUFFY_REQUIRE_DB is set but Postgres is not reachable at ${host}:${port} — refusing to skip DB-backed suites`,
+    );
+  }
   console.error(
-    `[test] Postgres not reachable at ${host}:${port} — skipping DB-backed suites (run \`npm run db:up\` to include them)`,
+    `[test] Postgres not reachable at ${host}:${port} — skipping DB-backed suites (run \`npm run db:up\` to include them, or set SCRUFFY_REQUIRE_DB=1 to fail instead)`,
   );
 }
 
