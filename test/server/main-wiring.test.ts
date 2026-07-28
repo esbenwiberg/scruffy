@@ -13,7 +13,11 @@ import { GithubAppScmWriter } from "../../src/providers/scm/github-app.js";
 
 // A syntactically-valid but throwaway PEM. @octokit/auth-app defers key use to
 // the first request, so construction succeeds without any network or real key.
-const FAKE_PEM = ["-----BEGIN RSA PRIVATE KEY-----", "not-a-real-key", "-----END RSA PRIVATE KEY-----"].join("\\n");
+const FAKE_PEM = [
+  "-----BEGIN RSA PRIVATE KEY-----",
+  "not-a-real-key",
+  "-----END RSA PRIVATE KEY-----",
+].join("\\n");
 
 const APP_ENV = {
   SCRUFFY_GH_APP_ID: "123",
@@ -21,7 +25,11 @@ const APP_ENV = {
   SCRUFFY_GH_APP_PRIVATE_KEY: FAKE_PEM,
 };
 
-const APP_KEYS = ["SCRUFFY_GH_APP_ID", "SCRUFFY_GH_APP_INSTALLATION_ID", "SCRUFFY_GH_APP_PRIVATE_KEY"] as const;
+const APP_KEYS = [
+  "SCRUFFY_GH_APP_ID",
+  "SCRUFFY_GH_APP_INSTALLATION_ID",
+  "SCRUFFY_GH_APP_PRIVATE_KEY",
+] as const;
 
 afterEach(() => {
   for (const key of APP_KEYS) delete process.env[key];
@@ -60,16 +68,22 @@ describe("createScmBackends", () => {
   });
 
   it("fails loudly on an unknown reader value — an operator typo must not silently downgrade", () => {
-    expect(() => createScmBackends({ SCRUFFY_SCM_READER: "octokit" })).toThrow(/unknown SCRUFFY_SCM_READER/);
+    expect(() => createScmBackends({ SCRUFFY_SCM_READER: "octokit" })).toThrow(
+      /unknown SCRUFFY_SCM_READER/,
+    );
   });
 
   it("fails loudly on an unknown writer value", () => {
-    expect(() => createScmBackends({ SCRUFFY_SCM_WRITER: "octokit" })).toThrow(/unknown SCRUFFY_SCM_WRITER/);
+    expect(() => createScmBackends({ SCRUFFY_SCM_WRITER: "octokit" })).toThrow(
+      /unknown SCRUFFY_SCM_WRITER/,
+    );
   });
 
   it("fails loudly when the App reader is selected but its credentials are missing", () => {
     // No SCRUFFY_GH_APP_* set — the factory must throw rather than build a
     // half-configured reader.
-    expect(() => createScmBackends({ SCRUFFY_SCM_READER: "github-app" })).toThrow(/SCRUFFY_GH_APP_ID/);
+    expect(() => createScmBackends({ SCRUFFY_SCM_READER: "github-app" })).toThrow(
+      /SCRUFFY_GH_APP_ID/,
+    );
   });
 });

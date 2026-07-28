@@ -1,6 +1,10 @@
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { createGithubAppApi, githubAppConfigFromEnv, type GithubAppConfig } from "../src/providers/scm/github-app-auth.js";
+import {
+  createGithubAppApi,
+  githubAppConfigFromEnv,
+  type GithubAppConfig,
+} from "../src/providers/scm/github-app-auth.js";
 import type { GhApi } from "../src/providers/scm/github-app.js";
 
 /**
@@ -53,7 +57,9 @@ export async function listInstallationRepositories(api: GhApi): Promise<Installa
     const res = await api("GET /installation/repositories", { per_page: PER_PAGE, page });
     const parsed = InstallationReposPage.safeParse(res.data);
     if (!parsed.success) {
-      throw new Error(`app:doctor: unexpected /installation/repositories response shape: ${parsed.error.message}`);
+      throw new Error(
+        `app:doctor: unexpected /installation/repositories response shape: ${parsed.error.message}`,
+      );
     }
     for (const repo of parsed.data.repositories) {
       repos.push({ fullName: repo.full_name, private: repo.private ?? false });
@@ -68,7 +74,11 @@ export async function listInstallationRepositories(api: GhApi): Promise<Installa
  * and print the repositories in scope. `api` and `log` are injected so the flow
  * is testable offline. Returns the repositories so callers/tests can assert.
  */
-export async function runDoctor(config: GithubAppConfig, api: GhApi, log: (message: string) => void): Promise<InstallationRepo[]> {
+export async function runDoctor(
+  config: GithubAppConfig,
+  api: GhApi,
+  log: (message: string) => void,
+): Promise<InstallationRepo[]> {
   log(`GitHub App doctor (read-only)`);
   log(`  app id          : ${config.appId}`);
   log(`  installation id : ${config.installationId}`);
@@ -110,8 +120,12 @@ async function main(): Promise<void> {
     await runDoctor(config, api, (message) => console.log(message));
   } catch (err) {
     console.error("");
-    console.error(`app:doctor: authentication or listing failed — ${err instanceof Error ? err.message : String(err)}`);
-    console.error("Check the App id, installation id, and private key, and that the installation still exists.");
+    console.error(
+      `app:doctor: authentication or listing failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    console.error(
+      "Check the App id, installation id, and private key, and that the installation still exists.",
+    );
     process.exit(1);
   }
 }

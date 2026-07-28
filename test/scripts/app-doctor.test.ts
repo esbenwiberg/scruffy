@@ -30,7 +30,9 @@ const CONFIG: GithubAppConfig = {
   privateKey: "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----",
 };
 
-const repoPage = (names: string[]): { repositories: { full_name: string; private: boolean }[] } => ({
+const repoPage = (
+  names: string[],
+): { repositories: { full_name: string; private: boolean }[] } => ({
   repositories: names.map((full_name) => ({ full_name, private: false })),
 });
 

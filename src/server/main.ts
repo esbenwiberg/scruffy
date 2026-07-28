@@ -12,7 +12,12 @@ import {
   type ScmReaderBackend,
   type ScmWriterBackend,
 } from "../providers/scm/factory.js";
-import { defaultAnalyzers, defaultFixers, defaultPolicy, defaultValidator } from "../providers/registry.js";
+import {
+  defaultAnalyzers,
+  defaultFixers,
+  defaultPolicy,
+  defaultValidator,
+} from "../providers/registry.js";
 import { createWebhookServer } from "./http.js";
 
 /**
@@ -54,7 +59,9 @@ export interface ResolvedScmBackends {
  * an operator typo never silently downgrades to a differently-credentialed
  * backend. github-app credentials come from the environment (SCRUFFY_GH_APP_*).
  */
-export function createScmBackends(env: Record<string, string | undefined> = process.env): ResolvedScmBackends {
+export function createScmBackends(
+  env: Record<string, string | undefined> = process.env,
+): ResolvedScmBackends {
   const readerBackend = resolveScmReaderBackend(env);
   const writerBackend = resolveScmWriterBackend(env);
   return {
@@ -112,7 +119,9 @@ async function main(): Promise<void> {
         await scruffy.reconcile();
         await scruffy.flushEffects();
       } catch (err) {
-        console.error(`reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`);
+        console.error(
+          `reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`,
+        );
       } finally {
         busy = false;
       }
