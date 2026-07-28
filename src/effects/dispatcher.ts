@@ -268,10 +268,7 @@ export class EffectsDispatcher {
     try {
       if (produces.kind === "issue_reference") {
         await this.publications.recordPublicationFailure(produces.workItemId, reason);
-        const cascaded = await this.outbox.failDependentsAwaitingReference(produces.workItemId, reason);
-        if (cascaded > 0) {
-          console.error(`outbox ${record.id}: cascaded terminal failure to ${cascaded} dependent effect(s)`);
-        }
+        await this.#cascadeUnobtainableReference(produces.workItemId, reason);
       } else {
         await this.publications.recordAttachmentFailure(produces.workItemId, reason);
       }
@@ -279,6 +276,48 @@ export class EffectsDispatcher {
       console.error(
         `outbox ${record.id}: could not record terminal publication failure: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /**
+   * Cascade "this reference will never exist" through the dependency graph.
+   *
+   * TRANSITIVE ON PURPOSE. A failed parent orphans its children, and a child that
+   * is never published orphans its attachment. Failing only the immediate
+   * dependents would leave the children's publications forever "not attempted",
+   * which is unsettled — and the reconciliation effects wait on SETTLED, so the
+   * one effect whose whole job is to report the failure would be blocked by it.
+   * Recording each orphaned work item as terminally failed both tells a human what
+   * happened and settles the dependency so reconciliation proceeds.
+   *
+   * `seen` bounds the walk: the graph is a tree today, but a cycle must terminate
+   * rather than spin.
+   */
+  async #cascadeUnobtainableReference(workItemId: string, reason: string): Promise<void> {
+    const publications = this.publications;
+    if (!publications) return;
+    const queue = [workItemId];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (seen.has(current)) continue;
+      seen.add(current);
+
+      const orphaned = await this.outbox.failDependentsAwaitingReference(current, reason);
+      for (const production of orphaned) {
+        if (production.kind === "issue_reference") {
+          await publications.recordPublicationFailure(
+            production.workItemId,
+            `not published: ${current} could not be published (${reason})`,
+          );
+          queue.push(production.workItemId);
+        } else {
+          await publications.recordAttachmentFailure(
+            production.workItemId,
+            `not attached: ${current} could not be published (${reason})`,
+          );
+        }
+      }
     }
   }
 

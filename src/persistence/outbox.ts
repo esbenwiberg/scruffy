@@ -56,6 +56,10 @@ const UNSATISFIED_DEPENDENCY = `
                and p.attachment_error is null
                and p.publication_error is null
              )
+             -- Fail CLOSED on a requirement kind this code does not understand (a
+             -- newer writer against an older reader). Withholding an effect is
+             -- recoverable; delivering one whose precondition was never checked is not.
+             else true
            end
   )`;
 
@@ -83,12 +87,16 @@ export interface OutboxPort {
   release(id: string): Promise<void>;
   markFailed(id: string, error: string): Promise<void>;
   /**
-   * Terminally fail every effect still waiting for a work item's issue reference.
-   * Called when the effect that would have produced it was dead-lettered: the
-   * reference will never arrive, so a dependent that keeps waiting is a silently
-   * stuck effect, and one that is marked sent is a lie.
+   * Terminally fail every effect still waiting for a work item's issue reference,
+   * and report what those effects would have PRODUCED.
+   *
+   * Called when the effect that would have produced the reference was
+   * dead-lettered: it will never arrive, so a dependent that keeps waiting is a
+   * silently stuck effect, and one that is marked sent is a lie. The returned
+   * productions are how the caller continues the cascade — a failed parent orphans
+   * its children, whose own references then orphan their attachments.
    */
-  failDependentsAwaitingReference(workItemId: string, error: string): Promise<number>;
+  failDependentsAwaitingReference(workItemId: string, error: string): Promise<EffectProduction[]>;
 }
 
 export class OutboxStore implements OutboxPort {
@@ -120,7 +128,9 @@ export class OutboxStore implements OutboxPort {
                  or (candidate.status = 'processing' and candidate.claimed_at < $3))
                 and not ${UNSATISFIED_DEPENDENCY}
               order by candidate.created_at
-              for update skip locked
+              -- `of candidate`: the dependency predicate joins the publication table,
+              -- and an unqualified FOR UPDATE would try to lock rows we only read.
+              for update of candidate skip locked
               limit $1
           )
           returning *`,
@@ -168,18 +178,23 @@ export class OutboxStore implements OutboxPort {
    * sent or already dead-lettered effect is never rewritten, and `last_error`
    * records the upstream reason so the dead letter explains itself.
    */
-  async failDependentsAwaitingReference(workItemId: string, error: string): Promise<number> {
-    const updated = await this.pool.query(
+  async failDependentsAwaitingReference(workItemId: string, error: string): Promise<EffectProduction[]> {
+    const updated = await this.pool.query<{ produces_work_item_id: string | null; produces: EffectProduction["kind"] | null }>(
       `update outbox
           set status = 'failed', last_error = $2
         where status in ('pending', 'processing')
           and id in (
             select outbox_id from outbox_dependencies
               where requires_work_item_id = $1 and requires = 'issue_reference'
-          )`,
+          )
+        returning produces_work_item_id, produces`,
       [workItemId, `dependency ${workItemId} will never be published: ${error}`.slice(0, 2000)],
     );
-    return updated.rowCount ?? 0;
+    return updated.rows.flatMap((row) =>
+      row.produces_work_item_id !== null && row.produces !== null
+        ? [{ workItemId: row.produces_work_item_id, kind: row.produces }]
+        : [],
+    );
   }
 
   async countPending(): Promise<number> {
