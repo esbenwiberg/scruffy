@@ -126,6 +126,9 @@ export class NightlyService {
     if (run.state !== "decided" && run.state !== "indeterminate") return run;
     if (run.attempt >= this.#maxAttempts) return run;
 
+    // No report at all (a legacy run committed before reports existed, or a run
+    // whose commit never landed) counts as NOT completely reviewed. Absence of
+    // evidence is not evidence of coverage — the honest move is to re-review.
     const report = await this.deps.runs.latestNightlyReportForRun(run.id);
     if (report !== null && report.requiredCoverageComplete) return run;
 

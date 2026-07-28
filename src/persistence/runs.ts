@@ -709,9 +709,9 @@ export class RunStore implements NightlyRunStore {
       // once per real transition rather than on every re-commit.
       await client.query(
         `insert into nightly_work_item_transitions (work_item_id, seq, axis, from_state, to_state, reason, at)
-         select $1,
-                coalesce((select max(seq) from nightly_work_item_transitions where work_item_id = $1), -1) + 1,
-                'resolution', 'open', 'resolved', $2, $3
+         select $1::text,
+                coalesce((select max(seq) from nightly_work_item_transitions where work_item_id = $1::text), -1) + 1,
+                'resolution', 'open', 'resolved', $2::text, $3::timestamptz
          on conflict (work_item_id, seq) do nothing`,
         [row.work_item_id, "no longer present in the latest report for this identity", now],
       );
