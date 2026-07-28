@@ -136,11 +136,12 @@ async function main(): Promise<void> {
     const run = result.run;
     const flushed = await scruffy.flushEffects();
 
-    const { rows } = await pool.query<{ dispositions: unknown; summary: unknown }>(
-      "select dispositions, summary from nightly_decisions where run_id = $1",
+    const { rows } = await pool.query<{ dispositions: unknown; summary: unknown; coverage: unknown }>(
+      "select dispositions, summary, coverage from nightly_decisions where run_id = $1",
       [run.id],
     );
     const summary = rows[0]?.summary as { reported?: number; proposedFixes?: number; suppressed?: number } | undefined;
+    const coverage = rows[0]?.coverage as { complete?: boolean; gaps?: { analyzerId: string; code: string }[] } | undefined;
 
     console.log("");
     console.log(`Range     : ${run.baseSha ? run.baseSha.slice(0, 12) : "(first review)"} … ${headSha.slice(0, 12)}`);
@@ -151,6 +152,18 @@ async function main(): Promise<void> {
       );
     } else if (run.state === "indeterminate") {
       console.log("Dispositions: none — analysis could not run (abstained; watermark held for re-review).");
+    }
+    // Coverage is the difference between "reviewed and clean" and "could not look".
+    // Print it plainly: an incomplete run holds the complete-review watermark, so a
+    // quiet output here must never read as a clean night.
+    if (coverage) {
+      const gaps = coverage.gaps ?? [];
+      console.log(
+        gaps.length === 0
+          ? "Coverage  : complete"
+          : `Coverage  : INCOMPLETE — ${gaps.map((g) => `${g.analyzerId}: ${g.code}`).join("; ")} ` +
+            `(complete-review watermark held; range stays owed)`,
+      );
     }
     console.log(`Effects   : ${flushed} dispatched to GitHub (writer: ${writerBackend})`);
     console.log(`Branch    : ${htmlUrl}`);

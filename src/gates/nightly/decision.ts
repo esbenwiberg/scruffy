@@ -26,9 +26,11 @@ import type { FindingVisibilityReason } from "../../domain/findings/work-graph.j
  *     before it can earn a `propose_fix`.
  *  5. Coverage does NOT change any disposition here — nightly has no permissive
  *     outcome to withhold, so there is nothing to make conservative. It is
- *     carried so the report can say the sweep was partial. A quiet nightly after
- *     a blind run is otherwise indistinguishable from a quiet nightly after a
- *     clean one, and the whole point of nightly is that someone reads it.
+ *     carried through because it is authoritative ELSEWHERE: the durable report
+ *     renders it, and a required gap holds the complete-review watermark (see
+ *     `domain/findings/work-graph.ts`). A quiet nightly after a blind run is
+ *     otherwise indistinguishable from a quiet nightly after a clean one, and the
+ *     whole point of nightly is that someone reads it.
  */
 
 export type NightlyDispositionKind = "suppress" | "report" | "propose_fix";

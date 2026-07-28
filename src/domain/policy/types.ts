@@ -39,8 +39,10 @@ export const NightlyPolicy = z
     /**
      * Subset of reportable classes eligible for an automated fix PR. A finding only
      * becomes `propose_fix` when it is additionally validated and deterministically
-     * supported (see the nightly kernel). Fix *generation* is a later slice; this
-     * slice records the disposition. Every fixable class MUST also be reportable.
+     * supported (see the nightly kernel), and a registered fixer must actually
+     * produce a patch — an eligible finding with no patch is recorded as surfaced
+     * with unavailable remediation, never as a fix that does not exist.
+     * Every fixable class MUST also be reportable.
      */
     fixableDefectClasses: z.array(z.string().min(1)).readonly(),
   })
