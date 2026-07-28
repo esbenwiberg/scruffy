@@ -7,9 +7,12 @@ import { createGithubAppApi, githubAppConfigFromEnv } from "./github-app-auth.js
 /**
  * Selects the SCM writer backend. Defaults to the gh-cli shadow-status adapter
  * (a developer's own session, statuses only). `SCRUFFY_SCM_WRITER` chooses:
- *   gh-cli     — shadow commit statuses via the authenticated `gh` session
- *   github-app — real check-runs + fix PRs via a GitHub App installation
- *                (the separately privileged write credential, ADR-0001)
+ *   gh-cli     — shadow commit statuses via the authenticated `gh` session.
+ *                Fix PRs and nightly ISSUE publication are refused loudly (never
+ *                faked) — see GhCliScm; issue effects dead-letter with that reason.
+ *   github-app — real check-runs, fix PRs, and nightly parent/child issues via a
+ *                GitHub App installation (the separately privileged write
+ *                credential, ADR-0001; needs `Issues: write`)
  */
 export type ScmWriterBackend = "gh-cli" | "github-app";
 

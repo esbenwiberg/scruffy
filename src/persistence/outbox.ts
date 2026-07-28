@@ -128,8 +128,9 @@ export class OutboxStore implements OutboxPort {
                  or (candidate.status = 'processing' and candidate.claimed_at < $3))
                 and not ${UNSATISFIED_DEPENDENCY}
               order by candidate.created_at
-              -- `of candidate`: the dependency predicate joins the publication table,
-              -- and an unqualified FOR UPDATE would try to lock rows we only read.
+              -- "of candidate": the dependency predicate joins the publication
+              -- table, and an unqualified FOR UPDATE would try to lock rows we
+              -- only read.
               for update of candidate skip locked
               limit $1
           )

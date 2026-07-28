@@ -53,14 +53,53 @@ Create the App under the account that should own it
 
 Grant exactly these, and nothing more:
 
-| Permission        | Access       | Why                                          |
-| ----------------- | ------------ | -------------------------------------------- |
-| **Checks**        | Read & write | post the native `scruffy/poison` check-run   |
-| **Contents**      | Read & write | read the diff; commit fix branches (nightly) |
-| **Pull requests** | Read & write | resolve the associated PR; open fix PRs      |
-| **Metadata**      | Read-only    | mandatory baseline (repo listing, refs)      |
+| Permission        | Access       | Why                                                        |
+| ----------------- | ------------ | ---------------------------------------------------------- |
+| **Checks**        | Read & write | post the native `scruffy/poison` check-run                 |
+| **Contents**      | Read & write | read the diff; commit fix branches (nightly)               |
+| **Pull requests** | Read & write | resolve the associated PR; open fix PRs                    |
+| **Issues**        | Read & write | publish the nightly parent issue and its child sub-issues  |
+| **Metadata**      | Read-only    | mandatory baseline (repo listing, refs)                    |
 
 Leave everything else at **No access**.
+
+#### Why `Issues: Read & write` is required
+
+Nightly review produces a **work graph**: one parent issue per reviewed range,
+with a **native child (sub-)issue** for every surviving finding and for every
+required coverage gap. Publishing that graph needs all three halves of the Issues
+permission, which GitHub bundles into one scope:
+
+- **write** to create the parent issue and each child issue, and to update the
+  parent as children are filed (`POST`/`PATCH /repos/{owner}/{repo}/issues`);
+- **write** to attach each child under the parent through GitHub's native
+  sub-issue endpoint
+  (`POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`), which
+  installation tokens gate behind `Issues: write`;
+- **read** for the idempotency that keeps a crash from duplicating work. GitHub
+  issues have no `external_id` field, so Scruffy embeds a hidden marker comment in
+  every issue body and **lists** the repository's Scruffy-labelled issues to find
+  it again. If the process dies between GitHub creating an issue and Scruffy
+  storing its number, the retry re-reads that list, recognises the marker, and
+  updates the existing issue instead of opening a second one. (The list endpoint
+  is used deliberately rather than the search API, whose index lags a write by up
+  to minutes — exactly the window a crash-resume lands in.)
+
+Without `Issues: write` the nightly gate still reviews and still posts its check,
+but every issue effect fails: it is retried, then dead-lettered with an explicit
+reason, and the nightly check reports that the work graph **could not be
+published**. Nothing is silently dropped and nothing claims success it did not
+have — but no human gets a tracked work item, which defeats the point of the
+nightly loop.
+
+Scruffy never closes an issue on a human's behalf, never auto-merges a fix PR, and
+never changes branch protection. Issues it creates are advisory work items; a
+human retains merge and dismissal authority.
+
+Note the **development** adapter (`SCRUFFY_SCM_WRITER=gh-cli`, a developer's own
+`gh` session) deliberately **refuses** issue writes rather than performing them
+under a human identity: issue publication requires
+`SCRUFFY_SCM_WRITER=github-app`.
 
 ### Event subscriptions
 
