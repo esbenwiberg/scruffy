@@ -9,6 +9,10 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
@@ -68,6 +72,12 @@ class FlakyWriter implements ScmWriter {
     if (this.throwOn.has(input.externalId)) throw new Error(`boom on ${input.externalId}`);
     this.pullRequests.push(input);
     return { number: this.pullRequests.length, created: true };
+  }
+  async upsertIssue(_input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    throw new Error("this writer publishes no issues");
+  }
+  async linkChildIssue(_input: IssueLinkInput): Promise<IssueLinkResult> {
+    throw new Error("this writer publishes no issues");
   }
   async getChangedFiles(_s: SubjectRevision): Promise<ChangedFile[]> {
     return [];

@@ -6,6 +6,7 @@ import type { Fixer } from "../../providers/fixers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { NightlyRunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import { planIssuePublicationEffects } from "../../effects/publication-plan.js";
 import type { PullRequestPayload } from "../../effects/pull-request.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runNightlyAnalysis } from "./analyze.js";
@@ -214,6 +215,10 @@ export class NightlyService {
         };
         effects.push({ effectType: "pull_request", externalId: fix.branch, payload: prPayload });
       }
+      // Publish the durable work graph as a parent issue with native child issues.
+      // The gate only ENQUEUES: every GitHub call happens in the effects component,
+      // behind the separate write credential. A complete, clean run plans nothing.
+      effects.push(...planIssuePublicationEffects({ report, workGraph, check: checkPayload }));
 
       await runs.commitNightlyDecision({
         runId: run.id,
@@ -262,6 +267,7 @@ export class NightlyService {
     // coverage gap and the planner turns that into durable, human-visible work.
     // A night with no news is exactly the case that must not look like good news.
     const report = abstainedNightlyReport(this.#reportIdentity(run, run.branch ?? UNKNOWN_BRANCH), empty);
+    const workGraph = planNightlyWorkGraph(report);
     const payload: CheckRunPayload = {
       subject: run.subject,
       externalId: this.#externalId(run),
@@ -276,10 +282,16 @@ export class NightlyService {
       to: "indeterminate",
       reason: "analysis failed",
       report,
-      workGraph: planNightlyWorkGraph(report),
+      workGraph,
       decision: empty,
       findings: [],
-      effects: [{ effectType: "check_run", externalId: payload.externalId, payload }],
+      effects: [
+        { effectType: "check_run", externalId: payload.externalId, payload },
+        // An abstention reviewed nothing, so its coverage gap is durable human work
+        // that must reach a human as an issue. A silent abstention is the failure
+        // mode this whole slice exists to prevent.
+        ...planIssuePublicationEffects({ report, workGraph, check: payload }),
+      ],
       ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
     });
   }

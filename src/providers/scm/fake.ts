@@ -3,6 +3,10 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
@@ -26,8 +30,11 @@ export class FakeScm implements ScmReader, ScmWriter {
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, { number: number; input: PullRequestInput }>();
+  readonly #issues = new Map<string, { ref: IssueUpsertResult; input: IssueUpsertInput }>();
+  readonly #subIssues = new Map<number, Set<number>>();
   #idSeq = 0;
   #prSeq = 0;
+  #issueSeq = 0;
 
   seedChangedFiles(subject: SubjectRevision, files: ChangedFile[]): void {
     this.#files.set(this.#subjectKey(subject), files);
@@ -72,6 +79,36 @@ export class FakeScm implements ScmReader, ScmWriter {
     return { number, created: true };
   }
 
+  /**
+   * Idempotent on (repository, marker) exactly like the GitHub adapter, so the
+   * harness can assert that a re-dispatched publication converges on ONE issue.
+   */
+  async upsertIssue(input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    const key = `${input.repository}#${input.marker}`;
+    const existing = this.#issues.get(key);
+    if (existing) {
+      this.#issues.set(key, { ref: existing.ref, input });
+      return { ...existing.ref, created: false };
+    }
+    this.#issueSeq += 1;
+    const ref: IssueUpsertResult = {
+      number: this.#issueSeq,
+      id: `issue_${this.#issueSeq}`,
+      url: `https://github.com/${input.repository}/issues/${this.#issueSeq}`,
+      created: true,
+    };
+    this.#issues.set(key, { ref, input });
+    return ref;
+  }
+
+  async linkChildIssue(input: IssueLinkInput): Promise<IssueLinkResult> {
+    const children = this.#subIssues.get(input.parent.number) ?? new Set<number>();
+    const alreadyLinked = children.has(input.child.number);
+    children.add(input.child.number);
+    this.#subIssues.set(input.parent.number, children);
+    return { alreadyLinked };
+  }
+
   /** Test/harness introspection. */
   recordedCheckRuns(): { id: string; input: CheckRunInput }[] {
     return [...this.#checkRuns.values()];
@@ -79,6 +116,15 @@ export class FakeScm implements ScmReader, ScmWriter {
 
   recordedPullRequests(): { number: number; input: PullRequestInput }[] {
     return [...this.#pullRequests.values()];
+  }
+
+  recordedIssues(): { ref: IssueUpsertResult; input: IssueUpsertInput }[] {
+    return [...this.#issues.values()];
+  }
+
+  /** Parent issue number -> attached child issue numbers. */
+  recordedSubIssues(): Map<number, number[]> {
+    return new Map([...this.#subIssues].map(([parent, children]) => [parent, [...children].sort((a, b) => a - b)]));
   }
 
   #subjectKey(subject: SubjectRevision): string {

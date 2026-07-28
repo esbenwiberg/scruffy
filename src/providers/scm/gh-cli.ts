@@ -4,6 +4,10 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
@@ -237,6 +241,36 @@ export class GhCliScm implements ScmReader, ScmWriter {
     // Fix-PR writes are a later slice. Fail LOUDLY so a stray pull_request effect is
     // left pending by the dispatcher, never silently dropped.
     throw new Error("openPullRequest is not enabled in the gh-cli adapter (poison posts a commit status only)");
+  }
+
+  // ── Writer (work-item issues) ────────────────────────────────────────────────
+  //
+  // NOT IMPLEMENTED, ON PURPOSE. This is the development adapter: it reuses a
+  // developer's `gh` session, which is a different (broader) credential from the
+  // App installation ADR-0001 reserves for effects, and it has no way to prove a
+  // marker lookup read the primary store rather than a lagging index. Publishing
+  // real, human-visible issues from a developer's own identity — or worse,
+  // duplicating a repository's nightly parent issue because the lookup missed — is
+  // not a tradeoff this adapter gets to make.
+  //
+  // Both methods THROW so a stray issue effect is retried and then dead-lettered
+  // with an honest reason. The one thing they must never do is return a fabricated
+  // reference: that would let the dispatcher record a publication that does not
+  // exist and mark the graph published. Set SCRUFFY_SCM_WRITER=github-app to
+  // publish issues.
+
+  async upsertIssue(_input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    throw new Error(
+      "upsertIssue is not enabled in the gh-cli adapter — nightly issue publication requires the GitHub App writer " +
+        "(set SCRUFFY_SCM_WRITER=github-app)",
+    );
+  }
+
+  async linkChildIssue(_input: IssueLinkInput): Promise<IssueLinkResult> {
+    throw new Error(
+      "linkChildIssue is not enabled in the gh-cli adapter — native sub-issue attachment requires the GitHub App writer " +
+        "(set SCRUFFY_SCM_WRITER=github-app)",
+    );
   }
 
   // ── Parsing helpers ──────────────────────────────────────────────────────────

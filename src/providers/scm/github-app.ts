@@ -1,7 +1,12 @@
 import { z } from "zod";
+import { withIssueMarker } from "../../domain/findings/work-publication.js";
 import type {
   CheckRunInput,
   CheckRunResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestEdit,
   PullRequestInput,
   PullRequestResult,
@@ -14,7 +19,8 @@ import type {
  * user session (read + write on one credential, statuses only), this adapter
  * authenticates as a GitHub App installation whose permissions are scoped to
  * exactly what the effects component performs: `checks:write` (check runs),
- * `contents:write` (fix branches/commits), `pull_requests:write` (fix PRs).
+ * `contents:write` (fix branches/commits), `pull_requests:write` (fix PRs),
+ * `issues:write` (nightly parent/child work items).
  *
  * It writes REAL check-runs — which, unlike commit statuses, carry a native
  * `neutral` conclusion (no neutral→pending fudge), a summary body, and an
@@ -58,6 +64,36 @@ const FileContents = z.object({
   encoding: z.string(),
   sha: z.string().min(1),
 });
+
+/**
+ * An issue as GitHub returns it. `pull_request` is present on PRs, which the
+ * `/issues` list endpoint mixes in with real issues — we must filter them out or a
+ * marker-bearing PR body would be mistaken for a published work item.
+ */
+const IssueResponse = z.object({
+  number: z.number().int().positive(),
+  id: z.number(),
+  html_url: z.string().min(1),
+  body: z.string().nullable().optional(),
+  pull_request: z.unknown().optional(),
+});
+type IssueResponse = z.infer<typeof IssueResponse>;
+
+const IssueList = z.array(IssueResponse);
+
+const SubIssueList = z.array(z.object({ id: z.number(), number: z.number().int().positive() }));
+
+/** Page size for issue/sub-issue listings. GitHub's maximum. */
+const ISSUE_PAGE_SIZE = 100;
+
+/**
+ * Hard page cap on the marker lookup (100 issues per page). The lookup normally
+ * stops at the first short page, so this only bites a repository with thousands of
+ * Scruffy-labelled issues — where exhausting the cap makes the adapter THROW
+ * rather than fall through to a create. A duplicate parent issue is a far worse
+ * outcome than a loud, retryable failure that an operator can act on.
+ */
+const ISSUE_LOOKUP_MAX_PAGES = 50;
 
 export interface GithubAppScmWriterOptions {
   api: GhApi;
@@ -164,6 +200,131 @@ export class GithubAppScmWriter implements ScmWriter {
     }
   }
 
+  // ── Work-item issues ────────────────────────────────────────────────────────
+
+  /**
+   * Idempotent on (repository, marker). GitHub issues carry no `external_id`, so
+   * the marker embedded in the body IS the key:
+   *
+   *  1. list this repository's Scruffy-labelled issues newest-first and look for
+   *     the marker in a body. Deliberately NOT the search API: `GET /search/issues`
+   *     is index-backed and lags a write by seconds to minutes, which is exactly
+   *     the window a crash-resume lands in — it would report "no match" for an
+   *     issue GitHub had already created and we would open a duplicate. The
+   *     `/issues` list endpoint reads the primary store and is immediately
+   *     consistent. The title is never consulted either: titles carry counts and
+   *     line numbers that change between attempts;
+   *  2. a match is UPDATED in place (title/body refreshed, `created: false`) —
+   *     this is what makes the crash-after-create retry recover instead of
+   *     duplicate;
+   *  3. no match creates the issue with the marker appended and the labels applied.
+   *
+   * The marker is appended here rather than trusted from the caller's body, so the
+   * lookup key and the published text cannot drift apart.
+   */
+  async upsertIssue(input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    const body = withIssueMarker(input.body, input.marker);
+    const existing = await this.#findIssueByMarker(input.repository, input.marker, input.labels);
+
+    if (existing !== null) {
+      const patched = await this.#api(`PATCH /repos/${input.repository}/issues/${existing.number}`, {
+        title: input.title,
+        body,
+      });
+      // Re-parse the PATCH response rather than reusing the listed row: the update
+      // is the authoritative post-write view of the issue.
+      const issue = this.#parse(IssueResponse, patched.data, "updated issue");
+      return { ...toIssueRef(issue), created: false };
+    }
+
+    const created = await this.#api(`POST /repos/${input.repository}/issues`, {
+      title: input.title,
+      body,
+      labels: [...input.labels],
+    });
+    return { ...toIssueRef(this.#parse(IssueResponse, created.data, "created issue")), created: true };
+  }
+
+  /**
+   * Attach a child using GitHub's NATIVE sub-issue hierarchy
+   * (`POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`), which keys on
+   * the child's database id rather than its number. Idempotent: an already-attached
+   * child is detected by listing first, and a concurrent attach that loses the race
+   * surfaces as a 422 which we resolve by re-listing.
+   */
+  async linkChildIssue(input: IssueLinkInput): Promise<IssueLinkResult> {
+    if (await this.#hasSubIssue(input.repository, input.parent.number, input.child.number)) {
+      return { alreadyLinked: true };
+    }
+
+    const childId = Number(input.child.id);
+    if (!Number.isSafeInteger(childId) || childId <= 0) {
+      // The native endpoint takes an integer database id. A non-numeric handle means
+      // the stored reference came from a different provider or a bad parse; refuse
+      // rather than POST something GitHub will misinterpret.
+      throw new Error(`github-app: child issue id '${input.child.id}' is not a GitHub issue database id`);
+    }
+
+    try {
+      await this.#api(`POST /repos/${input.repository}/issues/${input.parent.number}/sub_issues`, {
+        sub_issue_id: childId,
+      });
+      return { alreadyLinked: false };
+    } catch (err) {
+      // 422 covers "already a sub-issue" and a lost concurrent-attach race. Re-list
+      // to distinguish it from a genuine rejection (e.g. a cycle), which must throw.
+      if (statusOf(err) !== 422) throw err;
+      if (await this.#hasSubIssue(input.repository, input.parent.number, input.child.number)) {
+        return { alreadyLinked: true };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * The Scruffy-labelled issue carrying `marker`, or null. Walks pages newest-first
+   * and stops at the first short page; exhausting `ISSUE_LOOKUP_MAX_PAGES` throws
+   * rather than reporting a false "not found" that would open a duplicate.
+   */
+  async #findIssueByMarker(repository: string, marker: string, labels: readonly string[]): Promise<IssueResponse | null> {
+    for (let page = 1; page <= ISSUE_LOOKUP_MAX_PAGES; page += 1) {
+      const listed = await this.#api(`GET /repos/${repository}/issues`, {
+        state: "all",
+        labels: labels.join(","),
+        sort: "created",
+        direction: "desc",
+        per_page: ISSUE_PAGE_SIZE,
+        page,
+      });
+      const issues = this.#parse(IssueList, listed.data, "issues list");
+      // `/issues` returns pull requests too; a PR body is not a published work item.
+      const match = issues.find((issue) => issue.pull_request === undefined && (issue.body ?? "").includes(marker));
+      if (match) return match;
+      if (issues.length < ISSUE_PAGE_SIZE) return null;
+    }
+    throw new Error(
+      `github-app: marker lookup for ${marker} exceeded ${ISSUE_LOOKUP_MAX_PAGES} pages in ${repository} — ` +
+        "refusing to create a possible duplicate issue",
+    );
+  }
+
+  /** Is `childNumber` already a native sub-issue of `parentNumber`? */
+  async #hasSubIssue(repository: string, parentNumber: number, childNumber: number): Promise<boolean> {
+    for (let page = 1; page <= ISSUE_LOOKUP_MAX_PAGES; page += 1) {
+      const listed = await this.#api(`GET /repos/${repository}/issues/${parentNumber}/sub_issues`, {
+        per_page: ISSUE_PAGE_SIZE,
+        page,
+      });
+      const subs = this.#parse(SubIssueList, listed.data, "sub-issues list");
+      if (subs.some((sub) => sub.number === childNumber)) return true;
+      if (subs.length < ISSUE_PAGE_SIZE) return false;
+    }
+    throw new Error(
+      `github-app: sub-issue listing for #${parentNumber} exceeded ${ISSUE_LOOKUP_MAX_PAGES} pages in ${repository} — ` +
+        "refusing to create a possible duplicate attachment",
+    );
+  }
+
   async #commitEdits(repository: string, branch: string, edits: readonly PullRequestEdit[], title: string): Promise<void> {
     // One contents-API commit per file: group the edits by path.
     const byPath = new Map<string, PullRequestEdit[]>();
@@ -219,6 +380,11 @@ export class GithubAppScmWriter implements ScmWriter {
     if (!parsed.success) throw new Error(`github-app: unexpected ${what} response shape: ${parsed.error.message}`);
     return parsed.data;
   }
+}
+
+/** GitHub issue JSON -> the provider-neutral reference the domain stores. */
+function toIssueRef(issue: IssueResponse): { number: number; id: string; url: string } {
+  return { number: issue.number, id: String(issue.id), url: issue.html_url };
 }
 
 /** A numeric `status` off an unknown error (Octokit's RequestError carries one), or null. */

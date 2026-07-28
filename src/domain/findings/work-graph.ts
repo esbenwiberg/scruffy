@@ -515,20 +515,27 @@ export function planNightlyWorkGraph(report: NightlyReport): NightlyWorkGraph {
     occurrenceId: null,
     coverageGap: null,
     title: `Nightly review ${identity.repository}@${identity.branch} ${rangeLabel(identity)}: ${surfaced.length} finding(s), ${gaps.length} coverage gap(s)`,
+    // COVERAGE BEFORE COUNTS, deliberately. A reader who sees "0 findings" first
+    // has already formed a conclusion by the time they reach the caveat; a finding
+    // count is only interpretable once you know whether anything was actually read.
     body: [
-      `Scruffy reviewed \`${identity.repository}\` branch \`${identity.branch}\` over \`${rangeLabel(identity)}\`.`,
+      `Scruffy reviewed \`${identity.repository}\` branch \`${identity.branch}\` over the immutable range \`${rangeLabel(identity)}\`.`,
+      "",
+      `- base: ${identity.baseSha === null ? "_(first review of this branch)_" : `\`${identity.baseSha}\``}`,
+      `- head: \`${identity.headSha}\``,
+      "",
+      report.requiredCoverageComplete
+        ? "**Coverage: complete.** Every analyzer reviewed this whole range."
+        : "**Coverage: INCOMPLETE — this run is not a clean bill of health.** The range stays unreviewed until every required gap is closed, so the complete-review watermark is held here.",
+      "",
+      `- required coverage gaps: ${gaps.length}`,
+      `- surfaced findings: ${surfaced.length}`,
+      `- suppressed (audit only, no issue): ${report.summary.suppressed}`,
       "",
       `- report: \`${report.reportId}\``,
       `- policy: \`${identity.policyVersion}\` (report schema \`${identity.schemaVersion}\`)`,
-      `- surfaced findings: ${surfaced.length}`,
-      `- required coverage gaps: ${gaps.length}`,
-      `- suppressed (audit only): ${report.summary.suppressed}`,
       "",
-      report.requiredCoverageComplete
-        ? "Coverage was complete for this range."
-        : "**Coverage was incomplete — this run is not a clean bill of health.** The range stays unreviewed until every required gap is closed.",
-      "",
-      "Each item below is tracked as its own child. This parent closes only when every child is verified resolved or explicitly dismissed and required coverage is complete.",
+      "Each item above is tracked as its own child issue. This parent closes only when required coverage is complete and every child is verified resolved or explicitly dismissed.",
     ].join("\n"),
     resolution: "open",
   };

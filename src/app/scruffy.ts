@@ -2,6 +2,7 @@ import type { Clock, IdGenerator } from "../platform/clock.js";
 import type { Pool } from "../persistence/db.js";
 import { RunStore } from "../persistence/runs.js";
 import { OutboxStore } from "../persistence/outbox.js";
+import { PublicationStore } from "../persistence/publications.js";
 import { EffectsDispatcher } from "../effects/dispatcher.js";
 import { PoisonService } from "../gates/poison/service.js";
 import { NightlyService, type ReviewResult } from "../gates/nightly/service.js";
@@ -41,6 +42,7 @@ export interface ScruffyDeps {
 export class Scruffy {
   readonly runs: RunStore;
   readonly outbox: OutboxStore;
+  readonly publications: PublicationStore;
   readonly poison: PoisonService;
   readonly nightly: NightlyService;
   readonly release: ReleaseService;
@@ -50,6 +52,7 @@ export class Scruffy {
   constructor(private readonly deps: ScruffyDeps) {
     this.runs = new RunStore(deps.pool, deps.clock, deps.ids);
     this.outbox = new OutboxStore(deps.pool, deps.clock);
+    this.publications = new PublicationStore(deps.pool, deps.clock);
     this.poison = new PoisonService({
       runs: this.runs,
       scm: deps.scmReader,
@@ -78,7 +81,7 @@ export class Scruffy {
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });
-    this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter);
+    this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter, this.publications);
     this.reconciler = new Reconciler(this.runs, this.poison, this.nightly, this.release);
   }
 

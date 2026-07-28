@@ -14,6 +14,7 @@ import {
   type ProposalDelivery,
   type ProposalMergeState,
 } from "../domain/findings/work-graph.js";
+import type { EffectDependency, EffectProduction } from "../domain/findings/work-publication.js";
 import { withTransaction, type Pool, type PoolClient } from "./db.js";
 
 /**
@@ -95,6 +96,18 @@ export interface OutboxEffect {
   effectType: string;
   externalId: string;
   payload: unknown;
+  /**
+   * The external reference this effect makes available to dependent effects, if
+   * any. Recorded so a dead letter can be attributed to the right work item.
+   */
+  produces?: EffectProduction;
+  /**
+   * References this effect needs before it may be delivered. Persisted as explicit
+   * dependency rows and enforced by the claim query — outbox insertion order is NOT
+   * a correctness mechanism, because a retry, an expired claim, or a partly failed
+   * batch reorders delivery freely.
+   */
+  dependsOn?: readonly EffectDependency[];
 }
 
 /**
@@ -535,12 +548,7 @@ export class RunStore implements NightlyRunStore {
       await this.#writeReport(client, params, now);
 
       for (const effect of params.effects) {
-        await client.query(
-          `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
-           values ($1, $2, $3, $4, $5, 'pending', 0, $6)
-           on conflict (run_id, external_id) do nothing`,
-          [this.ids.next("obx"), params.runId, effect.effectType, effect.externalId, JSON.stringify(effect.payload), now],
-        );
+        await this.#enqueueEffect(client, params.runId, effect, now);
       }
 
       // The attempt is always on record; only a COMPLETE review moves the watermark.
@@ -565,6 +573,56 @@ export class RunStore implements NightlyRunStore {
       }
       return true;
     });
+  }
+
+  /**
+   * Enqueue one effect and its dependency edges, inside the caller's transaction.
+   *
+   * `on conflict do nothing` preserves the existing at-most-one-row-per
+   * (run_id, external_id) behaviour for check/PR effects — a re-commit must not
+   * resurrect an effect a dispatcher already sent or dead-lettered. Because that
+   * returns no row on conflict, the existing id is read back explicitly: dependency
+   * rows still have to attach to the row that IS there, or a redelivered commit
+   * would leave a dependent effect with no declared dependencies and let it be
+   * claimed before its references exist.
+   */
+  async #enqueueEffect(client: PoolClient, runId: string, effect: OutboxEffect, now: Date): Promise<void> {
+    const inserted = await client.query<{ id: string }>(
+      `insert into outbox
+         (id, run_id, effect_type, external_id, payload, status, attempts, created_at,
+          produces_work_item_id, produces)
+       values ($1, $2, $3, $4, $5, 'pending', 0, $6, $7, $8)
+       on conflict (run_id, external_id) do nothing
+       returning id`,
+      [
+        this.ids.next("obx"),
+        runId,
+        effect.effectType,
+        effect.externalId,
+        JSON.stringify(effect.payload),
+        now,
+        effect.produces?.workItemId ?? null,
+        effect.produces?.kind ?? null,
+      ],
+    );
+    let outboxId = inserted.rows[0]?.id;
+    if (outboxId === undefined) {
+      const existing = await client.query<{ id: string }>(`select id from outbox where run_id = $1 and external_id = $2`, [
+        runId,
+        effect.externalId,
+      ]);
+      outboxId = existing.rows[0]?.id;
+      if (outboxId === undefined) return; // Cannot happen; nothing sensible to attach to.
+    }
+
+    for (const dependency of effect.dependsOn ?? []) {
+      await client.query(
+        `insert into outbox_dependencies (outbox_id, requires_work_item_id, requires)
+         values ($1, $2, $3)
+         on conflict (outbox_id, requires_work_item_id, requires) do nothing`,
+        [outboxId, dependency.workItemId, dependency.requires],
+      );
+    }
   }
 
   /** Report + finding graph + work items + proposals, inside the caller's transaction. */
