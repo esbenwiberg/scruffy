@@ -93,6 +93,7 @@ describe("ModelReleaseRiskAnalyst", () => {
     expect(failed.risks).toEqual([]);
     expect(failed.gaps.map((g) => g.code)).toContain("provider_unavailable");
     expect(failed.gaps.length).toBeGreaterThan(0); // NOT a complete empty risk list
+    expect(failed.reviewedLines).toBe(0);
 
     // (b) Malformed output — reached the model, cannot use what it said.
     const malformed = await new ModelReleaseRiskAnalyst(fakeModel("I am not JSON at all")).assess(RANGE, files);

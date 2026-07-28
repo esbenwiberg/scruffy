@@ -203,6 +203,7 @@ function riskKey(risk: ReleaseRisk): string {
 
 export class ModelReleaseRiskAnalyst implements ReleaseRiskAnalyst {
   readonly id = "release-risk-analyst";
+  readonly version = VERSION;
 
   constructor(private readonly model: ModelProvider) {}
 
@@ -218,17 +219,18 @@ export class ModelReleaseRiskAnalyst implements ReleaseRiskAnalyst {
 
     const allChunks = chunk(flat);
     const sentChunks = allChunks.slice(0, MAX_CHUNKS);
-    const reviewedLines = sentChunks.reduce((n, c) => n + c.length, 0);
+    const slatedLines = sentChunks.reduce((n, c) => n + c.length, 0);
     if (allChunks.length > MAX_CHUNKS) {
       // The range is larger than we will review in full. Say so — never inspect a
       // hidden prefix and pass it off as the whole range.
-      addGap(gaps, "input_truncated", `reviewed ${reviewedLines} of ${totalLines} added lines (${sentChunks.length} of ${allChunks.length} chunks)`);
+      addGap(gaps, "input_truncated", `slated ${slatedLines} of ${totalLines} added lines (${sentChunks.length} of ${allChunks.length} chunks) for review`);
     }
 
     const collected: ReleaseRisk[] = [];
     let assertedCount = 0;
     let modelId: string | null = null;
     let summary = "";
+    let reviewedLines = 0;
 
     for (let i = 0; i < sentChunks.length; i += 1) {
       let text: string;
@@ -240,6 +242,7 @@ export class ModelReleaseRiskAnalyst implements ReleaseRiskAnalyst {
         });
         text = response.text;
         modelId = response.modelId;
+        reviewedLines += sentChunks[i]!.length;
       } catch (error) {
         // Never crash — and never pass a provider failure off as a clean review.
         addGap(gaps, "provider_unavailable", describeError(error));

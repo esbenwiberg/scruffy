@@ -6,7 +6,6 @@ import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
-import { RELEASE_RISK_ANALYZER_VERSION } from "../../providers/release-risk/model-release-risk.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
@@ -228,19 +227,19 @@ export class ReleaseService {
       provenance: { analyzers: this.deps.analyzers.map((a) => ({ id: a.id })) },
       findings,
       decision,
-      ...(releaseRisk ? { releaseRisk: this.#releaseRiskLane(releaseRisk) } : {}),
+      ...(releaseRisk ? { releaseRisk: this.#releaseRiskLane(releaseRisk, this.deps.releaseRisk!) } : {}),
     });
   }
 
   /** Map the analyst's assessment onto the report's release-risk lane input. */
-  #releaseRiskLane(assessment: ReleaseRiskAssessment): ReleaseRiskLaneInput {
+  #releaseRiskLane(assessment: ReleaseRiskAssessment, analyst: ReleaseRiskAnalyst): ReleaseRiskLaneInput {
     return {
       changeSummary: assessment.changeSummary,
       risks: assessment.risks,
       gaps: assessment.gaps.map((g) => ({ code: g.code, detail: g.detail })),
       reviewedLines: assessment.reviewedLines,
       totalLines: assessment.totalLines,
-      analyzer: { id: this.deps.releaseRisk?.id ?? "release-risk-analyst", version: RELEASE_RISK_ANALYZER_VERSION },
+      analyzer: { id: analyst.id, version: analyst.version },
       ...(assessment.provenance.modelId !== null ? { modelId: assessment.provenance.modelId } : {}),
       promptVersion: assessment.provenance.promptVersion,
     };

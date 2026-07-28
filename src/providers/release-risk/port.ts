@@ -74,5 +74,6 @@ export interface ReleaseRiskAssessment {
  */
 export interface ReleaseRiskAnalyst {
   readonly id: string;
+  readonly version: string;
   assess(range: RevisionRange, files: ChangedFile[]): Promise<ReleaseRiskAssessment>;
 }
