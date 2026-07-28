@@ -28,6 +28,7 @@
     "scruffy:nightly": "tsx scripts/nightly-review.ts",
     "scruffy:release": "tsx scripts/release-review.ts",
     "serve": "tsx src/server/main.ts",
+    "app:doctor": "tsx scripts/app-doctor.ts",
     "ops:measure": "npm run build && tsx scripts/ops-measure.ts",
     "llm-smoke": "tsx scripts/llm-smoke.ts",
     "db:up": "docker compose up -d db && node scripts/wait-for-db.mjs",

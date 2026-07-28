@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
 import type { ChangedFile } from "../../src/providers/scm/port.js";
@@ -57,7 +58,7 @@ async function decisionOf(candidate: string) {
   return r.rows[0];
 }
 
-describe("release gate over a seeded range", () => {
+describeDb("release gate over a seeded range", () => {
   it("STOPS a range that ships a confirmed leaked credential, recording an advisory neutral check", async () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [SECRET_FILE, CLEAN_FILE]);

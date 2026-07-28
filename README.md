@@ -29,7 +29,11 @@ npm test             # unit + persistence + end-to-end suite
 npm run typecheck
 ```
 
-`npm run db:down` tears the database down.
+`npm run db:down` tears the database down. `npm test` runs the DB-backed
+persistence/harness suites only when Postgres is reachable; without a database
+(no `npm run db:up`) those suites are **skipped** — with a logged notice —
+rather than failing, so the pure suites still give signal. Bring the DB up to
+run everything.
 
 Other corpus replays (all DB-free): `npm run corpus:nightly`, `npm run
 corpus:release`, `npm run corpus:grounded`, and `npm run corpus:all` — the
@@ -56,7 +60,7 @@ posts a `scruffy/poison` commit status: `success` (allow), `failure`
 (block), or `pending` (abstained). If the diff cannot be read completely (a `gh`
 failure, the 300-file cap, or a file too large to diff) it abstains rather than
 scanning a partial diff as clean. **Shadow by construction** — a commit status
-only blocks a merge if a repo admin marks its context a *required* check, so
+only blocks a merge if a repo admin marks its context a _required_ check, so
 scruffy posts the honest state and never blocks on its own. It also prints the
 decision and the PR URL.
 
@@ -80,10 +84,20 @@ export SCRUFFY_WEBHOOK_SECRET=...   # the HMAC secret configured on the GitHub w
 npm run db:up && npm run serve      # listens on :8080 (PORT overrides)
 ```
 
+The server resolves and constructs BOTH the reader and the writer through the
+SCM factory (`SCRUFFY_SCM_READER` / `SCRUFFY_SCM_WRITER`, each `gh-cli` by
+default) and logs both selected backends at startup. Set both to `github-app`
+for a fully App-authenticated deployment that needs **no `gh` login and no
+`GH_TOKEN`**; an unknown value fails loudly at boot. For the first App
+installation and webhook test, follow
+[`docs/product/github-app-setup.md`](docs/product/github-app-setup.md) and check
+the installation with `npm run app:doctor` (a read-only preflight — see below).
+
 `docker build .` produces the deployable image (compiled `dist/`, migrations,
-`gh` CLI for the reader — inject `GH_TOKEN` at runtime, never bake it in). What
-still stands between this and a real deployment: exposing an endpoint, a managed
-Postgres, and the GitHub App registration — operator decisions, not code.
+`gh` CLI for the default shadow reader — inject `GH_TOKEN` at runtime, never
+bake it in; App-only mode needs neither). What still stands between this and a
+real deployment: exposing an endpoint, a managed Postgres, and the one-time
+GitHub App registration — operator decisions, not code.
 
 ### GitHub App writer (real check-runs + fix PRs)
 
@@ -116,6 +130,16 @@ reads and writes on separate credentials, so a hosted deployment can read diffs
 through the App installation without depending on any human's `gh` login. Same
 error discipline as the gh-cli reader: it throws on any API failure and never
 returns an empty diff on a fault (which would false-green the blocking gate).
+The hosted server (`npm run serve`) and the manual `scruffy:*` scripts both
+build the reader and writer through the factory, so setting both
+`SCRUFFY_SCM_READER` and `SCRUFFY_SCM_WRITER` to `github-app` is a complete
+App-only path end to end.
+
+`npm run app:doctor` is a **read-only** operator preflight: it parses the same
+`SCRUFFY_GH_APP_*` configuration, authenticates as the installation, and lists
+the repositories in scope — no write of any kind. Run it before the first
+webhook test to confirm the App is installed on exactly the repositories you
+expect; missing or malformed credentials fail with a clear message.
 
 ### Run the nightly gate against a branch
 
@@ -177,7 +201,7 @@ signed webhook → verify + parse → ensureRun (idempotent)
 ```
 
 - **Pure decision kernel** (`src/gates/poison/decision.ts`): `block | allow |
-  indeterminate` over typed evidence + policy. Abstains rather than inventing
+indeterminate` over typed evidence + policy. Abstains rather than inventing
   confidence; infra failure never becomes a clean allow; model-only signals
   cannot block.
 - **Durable runs + transactional outbox** (`src/persistence/`): guarded
@@ -223,25 +247,30 @@ SCRUFFY_MODEL_BACKEND=claude-cli npm run llm-smoke
 Honest gaps against ADR 0003's acceptance list:
 
 - **A registered GitHub App + the first outward check-run.** The App-backed
-  writer (check-runs + fix PRs through Octokit auth, the separate write
-  credential) is built and contract-tested, but no App is registered yet, so the
-  outward e2e has not run against a real repo. The webhook server exists and is
-  tested locally (`npm run serve`), but it has never received a real GitHub
-  delivery — hosting it (endpoint, managed Postgres, App registration) is an
-  operator step. Model adapters exist (`claude-cli`/`anthropic`/`azure`) but are
-  off the deterministic critical path.
+  reader and writer (diff reads, check-runs, and fix PRs through Octokit auth —
+  the separate credentials) are built, contract-tested, and wired end to end
+  into both the hosted server and the manual scripts through the factory, so
+  `SCRUFFY_SCM_READER`/`_WRITER=github-app` is a complete App-only path in code.
+  What remains is an **operator step, not code**: registering an App, installing
+  it, and running the first outward check-run against a real repo. The webhook
+  server (`npm run serve`) is tested locally but has never received a real GitHub
+  delivery. The runbook for that first install + webhook test is
+  `docs/product/github-app-setup.md` (initial target: `esbenwiberg/scruffy`,
+  shadow/non-required). Model adapters exist (`claude-cli`/`anthropic`/`azure`)
+  but are off the deterministic critical path.
 - **ADR deviations — now recorded as amendments.** ADR-0003 (2026-07-24
   amendment) records the `gh`-CLI read path as a dev/shadow-only deviation
   (Octokit stands for hosted) and the single-process deployment shape; ADR-0001
   records the separate write credential as built-but-opt-in, with the
-  single-`gh`-session local default called out as a dev-only relaxation. An
-  App-authenticated reader is the remaining code gap.
+  single-`gh`-session local default called out as a dev-only relaxation. The
+  App-authenticated reader that closes ADR-0001's read-side gap is built and
+  selectable via `SCRUFFY_SCM_READER=github-app`.
 - **Coverage labeling** (ADR-0002): unsupported-language results are meant to be
   labeled with their reduced coverage; no such labeling exists yet.
 - **Hostile-execution runner** (validation #5) — the LOCAL half is done: a
   Docker-backed disposable runner whose isolation proof suite plants real
   credential names and attempts every escape the ADR lists (`npm run
-  test:isolation`; `docs/product/hostile-runner-spike.md`). Still open: choosing the
+test:isolation`; `docs/product/hostile-runner-spike.md`). Still open: choosing the
   production isolation technology (gVisor / microVM / managed sandbox) and
   re-running the proof there — a container alone is not the final boundary.
   Validation #6 (cold start / latency / memory / ops steps) is measured —

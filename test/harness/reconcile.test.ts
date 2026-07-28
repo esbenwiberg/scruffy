@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness } from "./boot.js";
 import { REPO, SCENARIOS } from "../fixtures/scenarios.js";
 
@@ -21,7 +22,7 @@ function checksFor(h: Harness, sha: string) {
   return h.scm.recordedCheckRuns().filter((c) => c.input.subject.commitSha === sha);
 }
 
-describe("reconciliation", () => {
+describeDb("reconciliation", () => {
   it("recovers a run whose worker crashed mid-analysis (analyzing + expired lease)", async () => {
     h = await bootHarness({ leaseMs: LEASE_MS });
     const scenario = SCENARIOS.realSecret!;

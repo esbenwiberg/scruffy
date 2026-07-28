@@ -1,4 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { FixedClock } from "../../src/platform/clock.js";
 import { createPool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
@@ -41,7 +42,7 @@ async function enqueue(id: string, externalId: string): Promise<void> {
   );
 }
 
-describe("OutboxStore.claimPending durability", () => {
+describeDb("OutboxStore.claimPending durability", () => {
   it("does not re-claim an effect that is claimed but not yet marked sent/failed", async () => {
     await enqueue("obx_1", "eff-1");
 

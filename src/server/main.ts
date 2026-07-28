@@ -1,10 +1,23 @@
+import { pathToFileURL } from "node:url";
 import { SystemClock, UuidIdGenerator } from "../platform/clock.js";
 import { createPool } from "../persistence/db.js";
 import { migrate } from "../persistence/migrate.js";
 import { Scruffy } from "../app/scruffy.js";
-import { GhCliScm } from "../providers/scm/gh-cli.js";
-import { createScmWriter, resolveScmWriterBackend } from "../providers/scm/factory.js";
-import { defaultAnalyzers, defaultFixers, defaultPolicy, defaultValidator } from "../providers/registry.js";
+import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
+import {
+  createScmReader,
+  createScmWriter,
+  resolveScmReaderBackend,
+  resolveScmWriterBackend,
+  type ScmReaderBackend,
+  type ScmWriterBackend,
+} from "../providers/scm/factory.js";
+import {
+  defaultAnalyzers,
+  defaultFixers,
+  defaultPolicy,
+  defaultValidator,
+} from "../providers/registry.js";
 import { createWebhookServer } from "./http.js";
 
 /**
@@ -22,12 +35,42 @@ import { createWebhookServer } from "./http.js";
  *   PORT                            — listen port (default 8080)
  *   SCRUFFY_RECONCILE_INTERVAL_MS   — reconcile/flush cadence (default 10s)
  *   DATABASE_URL                    — Postgres (persistence default otherwise)
+ *   SCRUFFY_SCM_READER              — gh-cli (default) | github-app (+ its env)
  *   SCRUFFY_SCM_WRITER              — gh-cli (default) | github-app (+ its env)
  *
- * Reads still go through the gh CLI (`gh` must be on PATH and authenticated —
- * in a container, set GH_TOKEN). An App-authenticated READER is a known gap,
- * tracked in the README.
+ * Reads and writes are selected INDEPENDENTLY through the factory (ADR-0001:
+ * separate credentials). The default stays gh-cli for both — a developer's own
+ * `gh` session (set GH_TOKEN in a container). Set both to `github-app` for a
+ * fully App-authenticated hosted deployment that needs no `gh` login or
+ * GH_TOKEN at all; see docs/product/github-app-setup.md.
  */
+
+/** The reader + writer the server will run on, plus their selected labels. */
+export interface ResolvedScmBackends {
+  scmReader: ScmReader;
+  scmWriter: ScmWriter;
+  readerBackend: ScmReaderBackend;
+  writerBackend: ScmWriterBackend;
+}
+
+/**
+ * Resolve BOTH SCM backends from env and construct their adapters through the
+ * factory. An unknown reader/writer value throws (the factory fails loudly), so
+ * an operator typo never silently downgrades to a differently-credentialed
+ * backend. github-app credentials come from the environment (SCRUFFY_GH_APP_*).
+ */
+export function createScmBackends(
+  env: Record<string, string | undefined> = process.env,
+): ResolvedScmBackends {
+  const readerBackend = resolveScmReaderBackend(env);
+  const writerBackend = resolveScmWriterBackend(env);
+  return {
+    readerBackend,
+    writerBackend,
+    scmReader: createScmReader(readerBackend),
+    scmWriter: createScmWriter(writerBackend),
+  };
+}
 
 async function main(): Promise<void> {
   const secret = process.env.SCRUFFY_WEBHOOK_SECRET;
@@ -37,7 +80,11 @@ async function main(): Promise<void> {
   }
   const port = intFromEnv("PORT", 8080);
   const reconcileIntervalMs = intFromEnv("SCRUFFY_RECONCILE_INTERVAL_MS", 10_000);
-  const writerBackend = resolveScmWriterBackend();
+  // Resolve + build BOTH backends before touching the DB, so a bad
+  // SCRUFFY_SCM_READER/_WRITER (or missing App credential) fails at boot rather
+  // than mid-run. With both set to github-app the server runs fully
+  // App-authenticated — no gh login or GH_TOKEN required.
+  const { scmReader, scmWriter, readerBackend, writerBackend } = createScmBackends();
 
   const pool = createPool();
   await migrate(pool);
@@ -47,8 +94,8 @@ async function main(): Promise<void> {
     clock: new SystemClock(),
     ids: new UuidIdGenerator(),
     policy: defaultPolicy(),
-    scmReader: new GhCliScm({}),
-    scmWriter: createScmWriter(writerBackend),
+    scmReader,
+    scmWriter,
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     fixers: defaultFixers(),
@@ -72,7 +119,9 @@ async function main(): Promise<void> {
         await scruffy.reconcile();
         await scruffy.flushEffects();
       } catch (err) {
-        console.error(`reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`);
+        console.error(
+          `reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`,
+        );
       } finally {
         busy = false;
       }
@@ -80,7 +129,9 @@ async function main(): Promise<void> {
   }, reconcileIntervalMs);
 
   server.listen(port, () => {
-    console.error(`scruffy listening on :${port} (writer: ${writerBackend}, reconcile every ${reconcileIntervalMs}ms)`);
+    console.error(
+      `scruffy listening on :${port} (reader: ${readerBackend}, writer: ${writerBackend}, reconcile every ${reconcileIntervalMs}ms)`,
+    );
   });
 
   let shuttingDown = false;
@@ -112,4 +163,9 @@ function intFromEnv(name: string, fallback: number): number {
   return value;
 }
 
-await main();
+// Only boot when invoked as the entrypoint (`npm run serve` / `node dist/...`).
+// Importing this module for its pure helpers (createScmBackends) in tests must
+// not start the server or touch the database.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}

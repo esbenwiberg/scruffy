@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { createWebhookServer } from "../../src/server/http.js";
@@ -64,7 +65,7 @@ afterAll(async () => {
   await harness.pool.end();
 });
 
-describe("POST /webhook", () => {
+describeDb("POST /webhook", () => {
   it("rejects a missing signature with 401 and creates nothing", async () => {
     const res = await post(webhookBody(SCENARIOS.clean!), {});
     expect(res.status).toBe(401);
@@ -131,7 +132,7 @@ describe("POST /webhook", () => {
   });
 });
 
-describe("routing and health", () => {
+describeDb("routing and health", () => {
   it("GET /healthz reports ok and runs the injected probe", async () => {
     const res = await fetch(`${base}/healthz`);
     expect(res.status).toBe(200);
@@ -145,7 +146,7 @@ describe("routing and health", () => {
   });
 });
 
-describe("healthz failure", () => {
+describeDb("healthz failure", () => {
   it("returns 503 when the probe throws", async () => {
     const failing = createWebhookServer(harness.scruffy, {
       log: () => {},

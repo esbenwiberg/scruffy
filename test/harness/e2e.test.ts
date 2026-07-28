@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness } from "./boot.js";
 import { REPO, SCENARIOS, signBody, webhookBody } from "../fixtures/scenarios.js";
 
@@ -14,7 +15,7 @@ afterAll(async () => {
   await h.pool.end();
 });
 
-describe("end-to-end poison gate over seeded PRs", () => {
+describeDb("end-to-end poison gate over seeded PRs", () => {
   for (const scenario of Object.values(SCENARIOS)) {
     it(`${scenario.name} -> ${scenario.expectedOutcome}`, async () => {
       const subject = { repository: REPO, commitSha: scenario.commitSha };
