@@ -318,11 +318,19 @@ describeDb("nightly issue publication (Postgres)", () => {
     const fixture = reportWithFindingAndCoverageGap();
     const reportId = await commit(fixture);
 
+    // One pass: the check and the parent issue go out; every child is still blocked
+    // on the parent's reference, so nothing else reached GitHub. (A single-record
+    // batch would be ambiguous — all effects share one FixedClock `created_at`, so
+    // the claim order among them is not defined.)
+    await dispatcher.dispatchOnce();
+    const parentWorkItemId = fixture.workGraph.parent!.workItemId;
+    for (const child of fixture.workGraph.children) {
+      expect(await publications.getIssueRef(child.workItemId)).toBeNull();
+    }
+
     // Simulate the crash: the parent effect reached GitHub, then the process died
     // before the result was persisted. The row goes back to `pending` and the local
     // publication record does not exist.
-    await dispatcher.dispatchOnce(1);
-    const parentWorkItemId = fixture.workGraph.parent!.workItemId;
     expect(await publications.getIssueRef(parentWorkItemId)).not.toBeNull();
     await pool.query("delete from nightly_work_item_publications where work_item_id = $1", [parentWorkItemId]);
     await pool.query("update outbox set status = 'pending', claimed_at = null where produces_work_item_id = $1", [parentWorkItemId]);
