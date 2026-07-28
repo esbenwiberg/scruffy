@@ -1,6 +1,8 @@
 import type { Finding } from "../../domain/evidence/types.js";
 import type { AnalysisCoverage } from "../../domain/evidence/coverage.js";
 import type { NightlyPolicy } from "../../domain/policy/types.js";
+import { findingKey } from "../../domain/findings/identity.js";
+import type { FindingVisibilityReason } from "../../domain/findings/work-graph.js";
 
 /**
  * The nightly decision kernel: a pure function over immutable, already-validated
@@ -24,23 +26,32 @@ import type { NightlyPolicy } from "../../domain/policy/types.js";
  *     before it can earn a `propose_fix`.
  *  5. Coverage does NOT change any disposition here — nightly has no permissive
  *     outcome to withhold, so there is nothing to make conservative. It is
- *     carried so the report can say the sweep was partial. A quiet nightly after
- *     a blind run is otherwise indistinguishable from a quiet nightly after a
- *     clean one, and the whole point of nightly is that someone reads it.
+ *     carried through because it is authoritative ELSEWHERE: the durable report
+ *     renders it, and a required gap holds the complete-review watermark (see
+ *     `domain/findings/work-graph.ts`). A quiet nightly after a blind run is
+ *     otherwise indistinguishable from a quiet nightly after a clean one, and the
+ *     whole point of nightly is that someone reads it.
  */
 
 export type NightlyDispositionKind = "suppress" | "report" | "propose_fix";
 
-/** Stable reason codes. Part of the audit contract; never free-form. */
-export type NightlyReasonCode =
-  | "not_reportable_class"
-  | "refuted"
-  | "fixable_validated"
-  | "reportable_validated"
-  | "reportable_unvalidated"
-  | "fix_unavailable";
+/**
+ * Stable reason codes. Part of the audit contract; never free-form.
+ *
+ * Aliased to the domain's `FindingVisibilityReason` so the kernel and the durable
+ * report cannot drift into two vocabularies for the same fact.
+ */
+export type NightlyReasonCode = FindingVisibilityReason;
 
 export interface NightlyFindingDisposition {
+  /**
+   * Normalized identity of the finding this disposition is about (see
+   * `domain/findings/identity.ts`). Carried so downstream consumers pair a
+   * disposition with its finding EXACTLY: the (class, rule, path, startLine)
+   * fields below omit `endLine`, so two findings differing only in extent would
+   * otherwise alias and one would be silently attributed the other's disposition.
+   */
+  findingKey: string;
   ruleId: string;
   defectClass: string;
   region: { path: string; startLine: number };
@@ -113,6 +124,7 @@ export function evaluateNightly(
   const dispositions: NightlyFindingDisposition[] = findings.map((finding) => {
     const { disposition, reason } = classify(finding, policy);
     return {
+      findingKey: findingKey(finding),
       ruleId: finding.ruleId,
       defectClass: finding.defectClass,
       region: { path: finding.primaryRegion.path, startLine: finding.primaryRegion.startLine },

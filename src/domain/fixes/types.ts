@@ -27,6 +27,13 @@ export type ProposedEdit = z.infer<typeof ProposedEdit>;
 
 export const ProposedFix = z.object({
   subject: SubjectRevision,
+  /**
+   * Normalized identity of the finding this fix remediates (see
+   * `domain/findings/identity.ts`). Carried so a proposal can be bound to its
+   * finding occurrence EXACTLY — (defectClass, path) is lossy, and a proposal
+   * attributed to the wrong finding would close the wrong piece of work.
+   */
+  findingKey: z.string().min(1),
   /** Defect class and rule this fix remediates, for provenance in the PR. */
   defectClass: z.string().min(1),
   ruleId: z.string().min(1),

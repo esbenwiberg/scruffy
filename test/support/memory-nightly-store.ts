@@ -1,0 +1,195 @@
+import type { Clock, IdGenerator } from "../../src/platform/clock.js";
+import type { EvaluationRun, RunState } from "../../src/domain/evaluation/types.js";
+import type { SubjectRevision } from "../../src/domain/evidence/types.js";
+import type { NightlyReport, NightlyWorkItem } from "../../src/domain/findings/work-graph.js";
+import { isCompleteReview } from "../../src/domain/findings/work-graph.js";
+import type {
+  CommitNightlyDecisionParams,
+  NightlyRunStore,
+  OutboxEffect,
+  PersistedReportState,
+  ReviewWatermark,
+} from "../../src/persistence/runs.js";
+
+/**
+ * In-memory `NightlyRunStore` for harness tests.
+ *
+ * WHY A DOUBLE. The DB-backed suite (`test/persistence/nightly-work-graph.test.ts`)
+ * is the authority on the SQL: atomicity, upsert keys, guarded watermark advance.
+ * This double exists so the gate's BEHAVIOUR — what gets reported, what work is
+ * planned, when the complete watermark may move, whether a blind attempt can be
+ * retried — is provable on every `npm test` run, including on a machine with no
+ * Postgres, where the DB suites are skipped and would otherwise prove nothing.
+ *
+ * It deliberately re-implements the same GUARDS as `RunStore`, because those guards
+ * are what the harness tests are about:
+ *  - transitions are guarded on the expected `from` state and the fencing token;
+ *  - the complete watermark advances only for a `decided` run whose report reviewed
+ *    the whole range, and only when the watermark still points at that report's
+ *    base;
+ *  - reports, findings, work items, and proposals are keyed by their stable ids, so
+ *    committing the same report identity twice creates no second work item.
+ */
+export class MemoryNightlyStore implements NightlyRunStore {
+  readonly #runs = new Map<string, EvaluationRun>();
+  readonly #byIdentity = new Map<string, string>();
+  readonly #reports = new Map<string, NightlyReport>();
+  readonly #reportRun = new Map<string, string>();
+  readonly #workItems = new Map<string, NightlyWorkItem>();
+  readonly #complete = new Map<string, string>();
+  readonly #attempted = new Map<string, string>();
+  readonly transitions: { runId: string; from: RunState; to: RunState; reason: string }[] = [];
+  readonly effects: (OutboxEffect & { runId: string })[] = [];
+
+  constructor(
+    private readonly clock: Clock,
+    private readonly ids: IdGenerator,
+  ) {}
+
+  // ---- inspection helpers (tests only) --------------------------------------
+
+  reports(): NightlyReport[] {
+    return [...this.#reports.values()];
+  }
+
+  workItems(reportId?: string): NightlyWorkItem[] {
+    const all = [...this.#workItems.values()];
+    return reportId === undefined ? all : all.filter((item) => item.reportId === reportId);
+  }
+
+  checkTitles(): string[] {
+    return this.effects
+      .filter((effect) => effect.effectType === "check_run")
+      .map((effect) => (effect.payload as { title: string }).title);
+  }
+
+  // ---- NightlyRunStore ------------------------------------------------------
+
+  async getWatermark(repository: string, branch: string): Promise<ReviewWatermark | null> {
+    const head = this.#complete.get(`${repository}\u0000${branch}`);
+    return head === undefined ? null : { repository, branch, lastReviewedHead: head };
+  }
+
+  /** Audit view: the last head a terminal attempt was committed for. */
+  lastAttemptedHead(repository: string, branch: string): string | null {
+    return this.#attempted.get(`${repository}\u0000${branch}`) ?? null;
+  }
+
+  async ensureNightlyRun(
+    head: SubjectRevision,
+    branch: string,
+    baseSha: string | null,
+    policyVersion: string,
+  ): Promise<EvaluationRun> {
+    const key = `${head.repository}\u0000${head.commitSha}\u0000nightly`;
+    const existingId = this.#byIdentity.get(key);
+    if (existingId !== undefined) return this.#runs.get(existingId)!;
+
+    const now = this.clock.now();
+    const run: EvaluationRun = {
+      id: this.ids.next("run"),
+      kind: "nightly",
+      subject: head,
+      mergeGroupSha: null,
+      baseSha,
+      branch,
+      policyVersion,
+      state: "pending",
+      attempt: 0,
+      leaseId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#runs.set(run.id, run);
+    this.#byIdentity.set(key, run.id);
+    return run;
+  }
+
+  async getRun(id: string): Promise<EvaluationRun | null> {
+    return this.#runs.get(id) ?? null;
+  }
+
+  async transition(runId: string, from: RunState, to: RunState, reason: string): Promise<boolean> {
+    const run = this.#runs.get(runId);
+    if (!run || run.state !== from) return false;
+    this.#runs.set(runId, { ...run, state: to, leaseId: null, updatedAt: this.clock.now() });
+    this.transitions.push({ runId, from, to, reason });
+    return true;
+  }
+
+  async claimForAnalysis(runId: string, _owner: string, _leaseMs: number): Promise<string | null> {
+    const run = this.#runs.get(runId);
+    if (!run || run.state !== "pending") return null;
+    const leaseId = this.ids.next("lease");
+    this.#runs.set(runId, {
+      ...run,
+      state: "analyzing",
+      attempt: run.attempt + 1,
+      leaseId,
+      updatedAt: this.clock.now(),
+    });
+    this.transitions.push({ runId, from: "pending", to: "analyzing", reason: "claimed" });
+    return leaseId;
+  }
+
+  /** Fenced like the real store: a worker that lost its lease cannot renew it. */
+  async renewLease(runId: string, leaseId: string, _leaseMs: number): Promise<boolean> {
+    const run = this.#runs.get(runId);
+    return run?.state === "analyzing" && run.leaseId === leaseId;
+  }
+
+  async latestNightlyReportForRun(runId: string): Promise<PersistedReportState | null> {
+    for (const [reportId, report] of [...this.#reports.entries()].reverse()) {
+      if (this.#reportRun.get(reportId) !== runId) continue;
+      return {
+        reportId,
+        runId,
+        headSha: report.identity.headSha,
+        baseSha: report.identity.baseSha,
+        requiredCoverageComplete: report.requiredCoverageComplete,
+      };
+    }
+    return null;
+  }
+
+  async commitNightlyDecision(params: CommitNightlyDecisionParams): Promise<boolean> {
+    const run = this.#runs.get(params.runId);
+    if (!run || run.state !== params.from) return false;
+    if (params.fenceLease !== undefined && run.leaseId !== params.fenceLease) return false;
+
+    this.#runs.set(params.runId, { ...run, state: params.to, leaseId: null, updatedAt: this.clock.now() });
+    this.transitions.push({ runId: params.runId, from: params.from, to: params.to, reason: params.reason });
+
+    const report = params.report;
+    this.#reports.set(report.reportId, report);
+    this.#reportRun.set(report.reportId, params.runId);
+
+    const items = params.workGraph.parent === null ? [] : [params.workGraph.parent, ...params.workGraph.children];
+    const keep = new Set(items.map((item) => item.workItemId));
+    for (const item of items) {
+      const existing = this.#workItems.get(item.workItemId);
+      // Human-owned lifecycle state survives a re-commit; analysis-owned copy does not.
+      this.#workItems.set(item.workItemId, existing ? { ...item, resolution: existing.resolution } : item);
+    }
+    for (const [id, item] of this.#workItems) {
+      if (item.reportId === report.reportId && !keep.has(id) && item.resolution === "open") {
+        this.#workItems.set(id, { ...item, resolution: "resolved" });
+      }
+    }
+
+    for (const effect of params.effects) {
+      const already = this.effects.some((e) => e.runId === params.runId && e.externalId === effect.externalId);
+      if (!already) this.effects.push({ ...effect, runId: params.runId });
+    }
+
+    const key = `${report.identity.repository}\u0000${report.identity.branch}`;
+    this.#attempted.set(key, report.identity.headSha);
+    if (params.to === "decided" && isCompleteReview(report)) {
+      const current = this.#complete.get(key) ?? null;
+      // Guarded like the SQL: only advance if the watermark still points at the base
+      // this report reviewed, so an out-of-order head cannot clobber a newer one.
+      if (current === report.identity.baseSha) this.#complete.set(key, report.identity.headSha);
+    }
+    return true;
+  }
+}
