@@ -1,5 +1,9 @@
 # Scruffy
 
+<p align="center">
+  <img src="docs/assets/scruffy-the-janitor.png" alt="Scruffy the Janitor" width="160">
+</p>
+
 Scruffy is an experimental review service for GitHub repositories. It reviews
 changes at three points—pull request, nightly, and release—and applies a
 different decision policy at each point.
