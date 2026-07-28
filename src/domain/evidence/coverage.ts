@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /**
  * Analysis coverage — how much of the change we actually managed to look at.
  *
@@ -21,30 +23,41 @@
  * clean.
  */
 
-/** Stable gap codes. Part of the audit contract; never free-form. */
-export type CoverageGapCode =
+/**
+ * Stable gap codes. Part of the audit contract; never free-form.
+ *
+ * Runtime-schema-validated (not just a TS union) because coverage now round-trips
+ * through jsonb: a nightly report read back from the database is untrusted input
+ * at the boundary like every other persisted payload (ADR 0003), and a coverage
+ * value that fails to parse must be loud rather than silently read as complete.
+ */
+export const CoverageGapCode = z.enum([
   /** Could not reach the analyzer's backend at all (network, spawn, timeout). */
-  | "provider_unavailable"
+  "provider_unavailable",
   /** Reached it, but the response could not be parsed into findings. */
-  | "unparseable_output"
+  "unparseable_output",
   /** We deliberately did not show the analyzer the whole change. */
-  | "input_truncated"
+  "input_truncated",
   /** The analyzer produced more findings than we were willing to carry. */
-  | "output_capped";
+  "output_capped",
+]);
+export type CoverageGapCode = z.infer<typeof CoverageGapCode>;
 
-export interface CoverageGap {
+export const CoverageGap = z.object({
   /** Which analyzer was blind. */
-  analyzerId: string;
-  code: CoverageGapCode;
+  analyzerId: z.string().min(1),
+  code: CoverageGapCode,
   /** Human-readable specifics for the audit trail. Never parsed. */
-  detail: string;
-}
+  detail: z.string(),
+});
+export type CoverageGap = z.infer<typeof CoverageGap>;
 
-export interface AnalysisCoverage {
+export const AnalysisCoverage = z.object({
   /** True only when every analyzer reviewed the whole change successfully. */
-  complete: boolean;
-  gaps: readonly CoverageGap[];
-}
+  complete: z.boolean(),
+  gaps: z.array(CoverageGap).readonly(),
+});
+export type AnalysisCoverage = z.infer<typeof AnalysisCoverage>;
 
 /** The only coverage value that permits a permissive outcome. */
 export const COMPLETE_COVERAGE: AnalysisCoverage = Object.freeze({ complete: true, gaps: Object.freeze([]) });

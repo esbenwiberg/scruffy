@@ -4,17 +4,20 @@ import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { Fixer } from "../../providers/fixers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
-import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
+import type { NightlyRunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import type { PullRequestPayload } from "../../effects/pull-request.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runNightlyAnalysis } from "./analyze.js";
 import { generateFixes } from "./fix.js";
 import type { NightlyDecision } from "./decision.js";
+import { abstainedNightlyReport, buildNightlyReport } from "./report.js";
+import { planNightlyWorkGraph } from "../../domain/findings/work-graph.js";
+import { NIGHTLY_REPORT_SCHEMA_VERSION, type NightlyReportIdentity } from "../../domain/findings/work-identity.js";
 import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface NightlyServiceDeps {
-  runs: RunStore;
+  runs: NightlyRunStore;
   scm: ScmReader;
   analyzers: readonly Analyzer[];
   validator: Validator;
@@ -31,6 +34,14 @@ export interface NightlyServiceDeps {
 
 const DEFAULT_LEASE_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * Branch recorded when a nightly run somehow has none. The run is a data-invariant
+ * violation we abstain on loudly (see `#drive`); the report still needs a
+ * non-empty branch so the abstention is durable and visible rather than lost to a
+ * schema error on the way out.
+ */
+const UNKNOWN_BRANCH = "(unknown branch)";
 
 export interface ReviewInput {
   repository: string;
@@ -55,8 +66,11 @@ export type ReviewResult =
  * safe from either a scheduler trigger OR the reconciler.
  *
  * The nightly gate never blocks — it proposes. Its terminal states are `decided`
- * (produced dispositions; watermark advances) and `indeterminate` (analysis could
- * not run; watermark stays put so the range is re-reviewed later).
+ * (produced a report) and `indeterminate` (analysis could not run). Neither one
+ * advances the complete-review watermark by itself: the watermark means
+ * "completely reviewed through this head", so it moves only for a `decided` run
+ * whose report has no required coverage gap. A range reviewed blind stays owed,
+ * and a bounded successor attempt may re-review it from the last COMPLETE head.
  */
 export class NightlyService {
   readonly #leaseMs: number;
@@ -73,13 +87,19 @@ export class NightlyService {
     return this.#maxAttempts;
   }
 
-  /** Scheduler entry point: review (watermark, head] for a branch. */
+  /**
+   * Scheduler entry point: review (complete watermark, head] for a branch. The
+   * lower bound is the last head we COMPLETELY reviewed, so an attempt that ended
+   * blind never shrinks the next range.
+   */
   async review(input: ReviewInput): Promise<ReviewResult> {
     const { runs, policy } = this.deps;
     const base =
       input.base !== undefined ? input.base : ((await runs.getWatermark(input.repository, input.branch))?.lastReviewedHead ?? null);
 
-    // Nothing new since the last review — no run, no effect. Idempotent no-op.
+    // Nothing new since the last COMPLETE review — no run, no effect. Idempotent
+    // no-op. Note this is the complete watermark, so a head whose only attempt was
+    // incomplete does NOT short-circuit here; it is retried below.
     if (base === input.head) return { reviewed: false, reason: "up-to-date" };
 
     const run = await runs.ensureNightlyRun(
@@ -88,7 +108,34 @@ export class NightlyService {
       base,
       policy.version,
     );
-    return { reviewed: true, run: await this.#drive(run) };
+    return { reviewed: true, run: await this.#drive(await this.#reopenIfIncomplete(run)) };
+  }
+
+  /**
+   * Let a terminal run that did NOT completely review its range be re-reviewed.
+   *
+   * Without this, a single blind attempt is permanent: the run is terminal so
+   * `#drive` returns immediately, while the complete watermark never advanced — so
+   * the range would be owed forever and never re-attempted. Bounded by
+   * `maxAttempts` (the attempt counter is bumped on each claim), so a persistently
+   * failing range escalates to a durable, human-visible coverage gap instead of
+   * spinning. A run whose report WAS complete is left alone: re-reviewing a
+   * finished range would only re-emit the same effects.
+   */
+  async #reopenIfIncomplete(run: EvaluationRun): Promise<EvaluationRun> {
+    if (run.state !== "decided" && run.state !== "indeterminate") return run;
+    if (run.attempt >= this.#maxAttempts) return run;
+
+    const report = await this.deps.runs.latestNightlyReportForRun(run.id);
+    if (report !== null && report.requiredCoverageComplete) return run;
+
+    const moved = await this.deps.runs.transition(
+      run.id,
+      run.state,
+      "pending",
+      "retry: previous attempt did not completely review the range",
+    );
+    return moved ? ((await this.deps.runs.getRun(run.id)) ?? run) : run;
   }
 
   /** Reconciler entry point: re-drive a reclaimed nightly run against its frozen range. */
@@ -131,7 +178,13 @@ export class NightlyService {
       // patched are downgraded to report inside the returned decision.
       const { decision, fixes } = generateFixes(findings, rawDecision, this.deps.fixers);
 
-      const check = nightlyToCheck(decision);
+      // The durable report is built BEFORE any effect payload, so the check, the
+      // work graph, and the persisted row are all projections of one value rather
+      // than three independent renderings that can disagree.
+      const report = buildNightlyReport({ identity: this.#reportIdentity(run, branch), findings, decision, fixes });
+      const workGraph = planNightlyWorkGraph(report);
+
+      const check = nightlyToCheck(report);
       const checkPayload: CheckRunPayload = {
         subject: run.subject,
         externalId: this.#externalId(run),
@@ -163,11 +216,11 @@ export class NightlyService {
         runId: run.id,
         from: "analyzing",
         to: "decided",
-        reason: `nightly reviewed ${decision.summary.reported + decision.summary.proposedFixes} finding(s), ${fixes.length} fix PR(s)`,
-        repository: run.subject.repository,
-        branch,
-        baseSha: run.baseSha,
-        headSha: run.subject.commitSha,
+        reason:
+          `nightly ${report.requiredCoverageComplete ? "completely reviewed" : "PARTIALLY reviewed"} the range: ` +
+          `${report.summary.surfaced} surfaced finding(s), ${report.summary.requiredGaps} required coverage gap(s), ${fixes.length} fix PR(s)`,
+        report,
+        workGraph,
         decision,
         findings,
         effects,
@@ -202,6 +255,10 @@ export class NightlyService {
       summary: { reported: 0, proposedFixes: 0, suppressed: 0 },
       coverage: analysisFailed(message),
     };
+    // An abstention reviewed NOTHING, so its report carries the whole-analysis
+    // coverage gap and the planner turns that into durable, human-visible work.
+    // A night with no news is exactly the case that must not look like good news.
+    const report = abstainedNightlyReport(this.#reportIdentity(run, run.branch ?? UNKNOWN_BRANCH), empty);
     const payload: CheckRunPayload = {
       subject: run.subject,
       externalId: this.#externalId(run),
@@ -215,15 +272,31 @@ export class NightlyService {
       from: opts.from,
       to: "indeterminate",
       reason: "analysis failed",
-      repository: run.subject.repository,
-      branch: run.branch ?? "",
-      baseSha: run.baseSha,
-      headSha: run.subject.commitSha,
+      report,
+      workGraph: planNightlyWorkGraph(report),
       decision: empty,
       findings: [],
       effects: [{ effectType: "check_run", externalId: payload.externalId, payload }],
       ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
     });
+  }
+
+  /**
+   * The immutable identity of this run's report. Built from the run's FROZEN range
+   * (not from a watermark that may have moved) plus the policy version actually
+   * applied and the report schema version — so a re-drive of the same run under the
+   * same policy lands on the same report, and a policy change is honestly a
+   * different report rather than a silent redefinition of an existing one.
+   */
+  #reportIdentity(run: EvaluationRun, branch: string): NightlyReportIdentity {
+    return {
+      repository: run.subject.repository,
+      branch,
+      baseSha: run.baseSha,
+      headSha: run.subject.commitSha,
+      policyVersion: this.deps.policy.version,
+      schemaVersion: NIGHTLY_REPORT_SCHEMA_VERSION,
+    };
   }
 
   #externalId(run: EvaluationRun): string {
