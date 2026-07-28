@@ -144,6 +144,72 @@ describe("release report", () => {
     expect(computeReportId(content)).toBe(computeReportId(reordered));
   });
 
+  it("appends a release-risk-llm lane and carries model risks when an analyst is wired", () => {
+    const report = assembleReleaseReport(
+      baseInput({
+        releaseRisk: {
+          changeSummary: "adjusts pricing across two files",
+          risks: [
+            {
+              category: "cross-change-interaction",
+              scenario: "rate and its consumer diverge",
+              affectedSurface: "pricing",
+              impact: "wrong charges",
+              citations: [
+                { path: "src/rate.ts", line: 1 },
+                { path: "src/invoice.ts", line: 2 },
+              ],
+            },
+          ],
+          gaps: [],
+          reviewedLines: 3,
+          totalLines: 3,
+          analyzer: { id: "release-risk-analyst", version: "1.0.0" },
+          modelId: "fake-model",
+          promptVersion: "release-risk-v1",
+        },
+      }),
+    );
+
+    // Both lanes present, coverage-first order preserved (source, then llm).
+    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis", "release-risk-llm"]);
+    const llm = report.evidenceLanes.find((l) => l.laneId === "release-risk-llm")!;
+    expect(llm.status).toBe("complete");
+    expect(llm.subjectSha).toBe(CAND);
+
+    // The model's evidence is carried into the report boundary.
+    expect(report.changeSummary).toBe("adjusts pricing across two files");
+    expect(report.risks).toHaveLength(1);
+    expect(report.risks[0]!.category).toBe("cross-change-interaction");
+    expect(report.provenance.modelId).toBe("fake-model");
+    expect(report.provenance.promptVersion).toBe("release-risk-v1");
+
+    // Round-trips through the read boundary unchanged.
+    expect(() => parseReleaseReport(JSON.parse(JSON.stringify(report)))).not.toThrow();
+  });
+
+  it("marks the release-risk-llm lane failed when nothing was reviewed", () => {
+    const report = assembleReleaseReport(
+      baseInput({
+        releaseRisk: {
+          changeSummary: "",
+          risks: [],
+          gaps: [{ code: "provider_unavailable", detail: "provider down" }],
+          reviewedLines: 0,
+          totalLines: 5,
+          analyzer: { id: "release-risk-analyst", version: "1.0.0" },
+          promptVersion: "release-risk-v1",
+        },
+      }),
+    );
+    const llm = report.evidenceLanes.find((l) => l.laneId === "release-risk-llm")!;
+    expect(llm.status).toBe("failed");
+    expect(llm.gaps).toEqual(["provider_unavailable: provider down"]);
+    // No model reached → no modelId recorded, but the prompt version still is.
+    expect(report.provenance.modelId).toBeUndefined();
+    expect(report.provenance.promptVersion).toBe("release-risk-v1");
+  });
+
   it("assembles a schema-valid report with a single source-analysis lane", () => {
     const report = assembleReleaseReport(baseInput());
     // Round-trips through the read-boundary parser (never trust the blob).
