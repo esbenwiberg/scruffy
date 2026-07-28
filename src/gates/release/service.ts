@@ -1,3 +1,5 @@
+import type { Clock } from "../../platform/clock.js";
+import type { Finding } from "../../domain/evidence/types.js";
 import type { EvaluationRun, RunState } from "../../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
@@ -8,6 +10,7 @@ import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { ReleaseDecision } from "./decision.js";
+import { assembleReleaseReport, type ReleaseRiskReport } from "../../domain/release/report.js";
 import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface ReleaseServiceDeps {
@@ -16,6 +19,8 @@ export interface ReleaseServiceDeps {
   analyzers: readonly Analyzer[];
   validator: Validator;
   policy: EffectivePolicy;
+  /** Injected clock for the report's generatedAt stamp (excluded from identity). */
+  clock: Clock;
   /** Lease duration for an analysis claim. Default 60s. */
   leaseMs?: number;
   /** Attempts after which a run is abandoned to indeterminate. Default 3. */
@@ -108,7 +113,10 @@ export class ReleaseService {
         }),
       );
 
-      const check = releaseToCheck(decision);
+      // Assemble ONE report for this terminal analysis. The advisory check is
+      // rendered FROM the report, so decision/report/check cannot diverge.
+      const report = this.#assembleReport(run, findings, decision);
+      const check = releaseToCheck(report);
       const payload: CheckRunPayload = {
         subject: run.subject,
         externalId: this.#externalId(run),
@@ -125,6 +133,7 @@ export class ReleaseService {
         to: "decided",
         reason: `release ${decision.outcome}`,
         decision,
+        report,
         findings,
         effect,
         fenceLease: lease,
@@ -160,13 +169,18 @@ export class ReleaseService {
       summary: { stopped: 0, escalated: 0, cleared: 0, notRelevant: 0 },
       coverage: analysisFailed(message),
     };
+    // Even an abstention is a terminal analysis and gets ONE SHA-bound report — the
+    // check is rendered from it, so the advisory summary can never claim more than
+    // the report holds. The failed source lane makes the blindness explicit.
+    const report = this.#assembleReport(run, [], empty);
+    const check = releaseToCheck(report);
     const payload: CheckRunPayload = {
       subject: run.subject,
       externalId: this.#externalId(run),
       name: RELEASE_CHECK_NAME,
-      conclusion: "neutral",
-      title: "Release gate: abstained (analysis failed)",
-      summary: `Analysis could not complete: ${message}`,
+      conclusion: check.conclusion,
+      title: check.title,
+      summary: check.summary,
     };
     await this.deps.runs.commitReleaseDecision({
       runId: run.id,
@@ -174,9 +188,32 @@ export class ReleaseService {
       to: "indeterminate",
       reason: "analysis failed",
       decision: empty,
+      report,
       findings: [],
       effect: { effectType: "check_run", externalId: payload.externalId, payload },
       ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
+    });
+  }
+
+  /**
+   * Assemble the SHA-bound report for a terminal release analysis. The subject is
+   * frozen onto the run (candidate = subject.commitSha, previous release = baseSha),
+   * so the report binds the exact immutable range the run reconciles against. The
+   * generatedAt stamp is the only non-content value and is excluded from identity,
+   * so a reconciliation replay recomputes the SAME reportId.
+   */
+  #assembleReport(run: EvaluationRun, findings: Finding[], decision: ReleaseDecision): ReleaseRiskReport {
+    return assembleReleaseReport({
+      subject: {
+        repository: run.subject.repository,
+        previousReleaseSha: run.baseSha,
+        candidateSha: run.subject.commitSha,
+      },
+      policyVersion: run.policyVersion,
+      generatedAt: this.deps.clock.now().toISOString(),
+      provenance: { analyzers: this.deps.analyzers.map((a) => ({ id: a.id })) },
+      findings,
+      decision,
     });
   }
 

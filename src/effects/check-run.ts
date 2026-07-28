@@ -3,7 +3,7 @@ import { SubjectRevision } from "../domain/evidence/types.js";
 import type { CheckConclusion, CheckRunInput } from "../providers/scm/port.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
-import type { ReleaseDecision } from "../gates/release/decision.js";
+import type { ReleaseRiskReport } from "../domain/release/report.js";
 
 export const CHECK_NAME = "scruffy/poison";
 export const NIGHTLY_CHECK_NAME = "scruffy/nightly";
@@ -71,14 +71,22 @@ export function nightlyToCheck(decision: NightlyDecision): { conclusion: CheckCo
 }
 
 /**
- * Summarize a release decision for its check run. SHADOW-FIRST: the conclusion is
- * always `neutral` in the skeleton — the release check is advisory and NEVER
- * blocks publication yet. The true outcome (ship | sign-off-required | stop) is
- * recorded in the decision and made loud in the title, so nothing is hidden;
- * promoting `stop` -> `failure` and wiring the controlled draft-release protocol
- * is the authoritative-mode follow-up (deferred, ADR 0003 #1 spike territory).
+ * Summarize a release REPORT for its check run. The check is rendered FROM the
+ * persisted report — never from a separately-assembled decision — so the report,
+ * the durable decision, and the advisory summary cannot disagree.
+ *
+ * SHADOW-FIRST: the conclusion is always `neutral` in the skeleton — the release
+ * check is advisory and NEVER blocks publication yet. The true outcome
+ * (ship | sign-off-required | stop) is recorded in the report and made loud in the
+ * title, so nothing is hidden; promoting `stop` -> `failure` and wiring the
+ * controlled draft-release protocol is the authoritative-mode follow-up (deferred,
+ * ADR 0003 #1 spike territory).
+ *
+ * A concise summary intentionally omits bulky cleared evidence but preserves the
+ * candidate, report id, outcome, coverage state, and every holding finding/gap.
  */
-export function releaseToCheck(decision: ReleaseDecision): { conclusion: CheckConclusion; title: string; summary: string } {
+export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckConclusion; title: string; summary: string } {
+  const decision = report.decision;
   const { stopped, escalated, cleared, notRelevant } = decision.summary;
   const reviewed = stopped + escalated + cleared + notRelevant;
 
@@ -102,12 +110,25 @@ export function releaseToCheck(decision: ReleaseDecision): { conclusion: CheckCo
     }
   }
 
-  const lines = decision.dispositions
+  const findingLines = decision.dispositions
     .filter((d) => d.effect === "stops" || d.effect === "escalates")
     .map((d) => `- [${d.effect}] ${d.defectClass} at ${d.region.path}:${d.region.startLine} (${d.reason})`);
+  // Coverage BEFORE finding totals: a clean count over incomplete coverage is not
+  // a clean bill of health. Surface every lane's status and its explicit gaps.
+  const laneLines = report.evidenceLanes.flatMap((lane) => [
+    `- ${lane.laneId}: ${lane.status}${lane.required ? " (required)" : ""}`,
+    ...lane.gaps.map((g) => `    gap: ${g}`),
+  ]);
   const summary = [
-    `outcome: ${decision.outcome}. stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
-    ...(lines.length ? ["", ...lines] : []),
+    `candidate: ${report.subject.candidateSha}`,
+    `report: ${report.reportId} (v${report.reportVersion}, policy ${report.policyVersion})`,
+    `outcome: ${decision.outcome}.`,
+    "",
+    "coverage:",
+    ...laneLines,
+    "",
+    `findings — stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
+    ...(findingLines.length ? ["", ...findingLines] : []),
     "",
     "Shadow mode: this check is advisory and does not block publication.",
   ].join("\n");

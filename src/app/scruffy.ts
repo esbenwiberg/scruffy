@@ -75,6 +75,7 @@ export class Scruffy {
       analyzers: deps.analyzers,
       validator: deps.validator,
       policy: deps.policy,
+      clock: deps.clock,
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });

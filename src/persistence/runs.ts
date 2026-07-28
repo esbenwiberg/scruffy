@@ -4,6 +4,7 @@ import type { Finding, SubjectRevision } from "../domain/evidence/types.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
 import type { ReleaseDecision } from "../gates/release/decision.js";
+import type { ReleaseRiskReport } from "../domain/release/report.js";
 import { withTransaction, type Pool, type PoolClient } from "./db.js";
 
 /**
@@ -382,11 +383,16 @@ export class RunStore {
 
   /**
    * Atomically, for a release run: move analyzing -> terminal, record the
-   * decision and its findings, and enqueue the outbox effect. All-or-nothing —
-   * an external effect can never be recorded without its state change. Mirrors
-   * commitDecision (poison): one aggregate outcome, one advisory check effect.
-   * Release owns no watermark (it is triggered per candidate), so there is
-   * nothing to advance here.
+   * first-class report, the (denormalized) decision and its findings, and enqueue
+   * the outbox check effect — ALL in one transaction. An external effect can never
+   * be recorded without its state change, and a terminal report can never land
+   * without its effect (or vice versa). Mirrors commitDecision (poison): one
+   * aggregate outcome, one advisory check effect. Release owns no watermark (it is
+   * triggered per candidate), so there is nothing to advance here.
+   *
+   * Both the report (keyed by run_id) and the outbox row (keyed by
+   * run_id/external_id) dedupe with `on conflict ... do nothing`, so re-driving one
+   * idempotent run persists at most one report and one effect.
    */
   async commitReleaseDecision(params: {
     runId: string;
@@ -394,6 +400,7 @@ export class RunStore {
     to: RunState;
     reason: string;
     decision: ReleaseDecision;
+    report: ReleaseRiskReport;
     findings: Finding[];
     effect: OutboxEffect;
     /** Fencing token from the claim; the commit only lands if the lease still matches. */
@@ -404,6 +411,29 @@ export class RunStore {
       if (!applied) return false;
 
       const now = this.clock.now();
+      const report = params.report;
+      // Serialize the effect payload FIRST: a payload that cannot be serialized
+      // must abort the whole transaction (rolling back the transition/report/
+      // decision) rather than leaving a terminal report with no effect.
+      const effectPayload = JSON.stringify(params.effect.payload);
+      await client.query(
+        `insert into release_reports
+           (run_id, report_id, report_version, repository, previous_release_sha, candidate_sha, policy_version, report, generated_at, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         on conflict (run_id) do nothing`,
+        [
+          params.runId,
+          report.reportId,
+          report.reportVersion,
+          report.subject.repository,
+          report.subject.previousReleaseSha,
+          report.subject.candidateSha,
+          report.policyVersion,
+          JSON.stringify(report),
+          report.generatedAt,
+          now,
+        ],
+      );
       await client.query(
         `insert into release_decisions (run_id, outcome, reasons, dispositions, findings, summary, decided_at)
          values ($1, $2, $3, $4, $5, $6, $7)
@@ -427,7 +457,7 @@ export class RunStore {
           params.runId,
           params.effect.effectType,
           params.effect.externalId,
-          JSON.stringify(params.effect.payload),
+          effectPayload,
           now,
         ],
       );
