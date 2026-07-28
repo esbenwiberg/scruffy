@@ -111,8 +111,20 @@ export class EffectsDispatcher {
     return sent;
   }
 
-  /** Apply one effect. Never throws — a write failure is returned as a transient result. */
+  /** Apply one effect. Never throws — a failure is returned as a typed result. */
   async #apply(record: OutboxRecord): Promise<ApplyResult> {
+    try {
+      return await this.#dispatch(record);
+    } catch (err) {
+      // The issue handlers READ durable publication state before writing (a child
+      // needs its parent's number). A store blip on that read must be a retryable
+      // transient like any other, not an escape that strands the claim in
+      // `processing` until its lease expires.
+      return { kind: "transient", reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async #dispatch(record: OutboxRecord): Promise<ApplyResult> {
     switch (record.effectType) {
       case "check_run": {
         const parsed = CheckRunPayload.safeParse(record.payload);
