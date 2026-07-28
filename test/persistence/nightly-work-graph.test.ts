@@ -319,6 +319,71 @@ describeDb("nightly report/work graph durability", () => {
     expect((await runs.getWatermark(REPO, BRANCH))?.lastReviewedHead).toBe(HEAD);
   });
 
+  it("keeps the embedded proposal state in sync with nightly_fix_proposals across a retry", async () => {
+    // A fixable finding surfaces alongside a required coverage gap, so the run is
+    // legitimately retryable (incomplete coverage) even though the fixable finding
+    // itself is unaffected by that gap.
+    const input = commitInput([finding()], coverageFrom([{ analyzerId: "model-analyzer", code: "provider_unavailable", detail: "503" }]));
+    const run = await runs.ensureNightlyRun({ repository: REPO, commitSha: HEAD }, BRANCH, null, "policy-v1");
+    const lease = await runs.claimForAnalysis(run.id, "worker-a", 60_000);
+    await runs.commitNightlyDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "nightly decided (incomplete, fixable finding present)",
+      report: input.report,
+      workGraph: input.workGraph,
+      decision: input.decision,
+      findings: input.findings,
+      effects: [{ effectType: "check_run", externalId: "x", payload: {} }],
+      fenceLease: lease!,
+    });
+
+    const proposalId = (await pool.query<{ proposal_id: string }>("select proposal_id from nightly_fix_proposals")).rows[0]!.proposal_id;
+
+    // A later brief (PR publication + CI + merge) progresses the AUTHORITATIVE
+    // proposal row far past the fresh-report defaults of queued/unknown/open.
+    await pool.query(
+      `update nightly_fix_proposals set delivery = 'ready_open', ci = 'passed', merge_state = 'merged' where proposal_id = $1`,
+      [proposalId],
+    );
+
+    // A retry/successor attempt recomputes the SAME report identity from scratch —
+    // its domain-level proposal still carries the fresh queued/unknown/open
+    // defaults, because the analysis pipeline has no notion of PR lifecycle state.
+    const retryInput = commitInput([finding()], coverageFrom([{ analyzerId: "model-analyzer", code: "provider_unavailable", detail: "503" }]));
+    expect(retryInput.report.reportId).toBe(input.report.reportId);
+    await runs.transition(run.id, "decided", "pending", "retry");
+    const lease2 = await runs.claimForAnalysis(run.id, "worker-b", 60_000);
+    await runs.commitNightlyDecision({
+      runId: run.id,
+      from: "analyzing",
+      to: "decided",
+      reason: "retry",
+      report: retryInput.report,
+      workGraph: retryInput.workGraph,
+      decision: retryInput.decision,
+      findings: retryInput.findings,
+      effects: [{ effectType: "check_run", externalId: "x", payload: {} }],
+      fenceLease: lease2!,
+    });
+
+    // The authoritative row is untouched by the retry (already guaranteed by
+    // `on conflict do nothing`/no-op update).
+    const authoritative = await pool.query<{ delivery: string; ci: string; merge_state: string }>(
+      "select delivery, ci, merge_state from nightly_fix_proposals where proposal_id = $1",
+      [proposalId],
+    );
+    expect(authoritative.rows[0]).toEqual({ delivery: "ready_open", ci: "passed", merge_state: "merged" });
+
+    // The embedded copy in nightly_report_findings.remediation must agree with it —
+    // NOT revert to the fresh report's queued/unknown/open defaults.
+    const embedded = await pool.query<{ remediation: { proposal: { delivery: string; ci: string; merge: string } } }>(
+      "select remediation from nightly_report_findings where path = 'src/http.ts'",
+    );
+    expect(embedded.rows[0]!.remediation.proposal).toMatchObject({ delivery: "ready_open", ci: "passed", merge: "merged" });
+  });
+
   it("does not advance the complete watermark for an indeterminate run", async () => {
     const input = commitInput([], coverageFrom([{ analyzerId: "analysis", code: "provider_unavailable", detail: "scm down" }]));
     const run = await runs.ensureNightlyRun({ repository: REPO, commitSha: HEAD }, BRANCH, null, "policy-v1");

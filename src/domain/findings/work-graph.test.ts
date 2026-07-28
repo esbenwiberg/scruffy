@@ -4,6 +4,7 @@ import {
   NightlyReport,
   NightlyReportFinding,
   NightlyWorkGraph,
+  NightlyWorkItem,
   RemediationRecord,
   canTransitionCi,
   canTransitionDelivery,
@@ -221,6 +222,25 @@ describe("illegal states are unrepresentable", () => {
     expect(() => NightlyWorkGraph.parse({ parent: graph.parent, children: [graph.children[0]!, graph.children[0]!] })).toThrow(
       /duplicate child work item/,
     );
+  });
+
+  it("rejects a work item whose kind disagrees with its own occurrence/coverage-gap fields", () => {
+    const graph = planNightlyWorkGraph(reportOf([surfaced()]));
+    const parent = graph.parent!;
+    const findingChild = graph.children[0]!;
+
+    // A parent must carry no occurrence, coverage gap, or parent link of its own.
+    expect(() => NightlyWorkItem.parse({ ...parent, occurrenceId: "nfo_surfaced" })).toThrow(/must have no parent, occurrence/);
+    // A 'finding' item must carry an occurrence id and no coverage gap.
+    expect(() => NightlyWorkItem.parse({ ...findingChild, occurrenceId: null })).toThrow(/must have a parent and an occurrence id/);
+    expect(() =>
+      NightlyWorkItem.parse({ ...findingChild, coverageGap: { analyzerId: "a", code: "provider_unavailable" } }),
+    ).toThrow(/must not carry a coverage gap/);
+    // A 'coverage_gap' item must carry a coverage gap and no occurrence id.
+    const gapGraph = planNightlyWorkGraph(reportOf([], analysisFailed("model backend unreachable")));
+    const gapChild = gapGraph.children[0]!;
+    expect(() => NightlyWorkItem.parse({ ...gapChild, coverageGap: null })).toThrow(/must have a parent and a coverage gap/);
+    expect(() => NightlyWorkItem.parse({ ...gapChild, occurrenceId: "nfo_surfaced" })).toThrow(/must not carry an occurrence id/);
   });
 });
 

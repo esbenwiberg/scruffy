@@ -394,20 +394,57 @@ export type NightlyWorkItemKind = z.infer<typeof NightlyWorkItemKind>;
  * on purpose: brief 02 maps a parent to a GitHub issue and children to native
  * sub-issues, but the graph itself knows nothing about GitHub.
  */
-export const NightlyWorkItem = z.object({
-  workItemId: z.string().min(1),
-  reportId: z.string().min(1),
-  kind: NightlyWorkItemKind,
-  /** Null only for the parent. */
-  parentWorkItemId: z.string().min(1).nullable(),
-  /** Set for `finding` children. */
-  occurrenceId: z.string().min(1).nullable(),
-  /** Set for `coverage_gap` children. */
-  coverageGap: z.object({ analyzerId: z.string().min(1), code: z.string().min(1) }).nullable(),
-  title: z.string().min(1),
-  body: z.string().min(1),
-  resolution: FindingResolution,
-});
+export const NightlyWorkItem = z
+  .object({
+    workItemId: z.string().min(1),
+    reportId: z.string().min(1),
+    kind: NightlyWorkItemKind,
+    /** Null only for the parent. */
+    parentWorkItemId: z.string().min(1).nullable(),
+    /** Set for `finding` children. */
+    occurrenceId: z.string().min(1).nullable(),
+    /** Set for `coverage_gap` children. */
+    coverageGap: z.object({ analyzerId: z.string().min(1), code: z.string().min(1) }).nullable(),
+    title: z.string().min(1),
+    body: z.string().min(1),
+    resolution: FindingResolution,
+  })
+  .superRefine((item, ctx) => {
+    // Mirrors the SQL check constraints on `nightly_work_items` (migration 0008): a
+    // kind/field mismatch must fail here, at the domain boundary, not surface later
+    // as a DB constraint violation from a planner bug.
+    if (item.kind === "nightly_run") {
+      if (item.parentWorkItemId !== null || item.occurrenceId !== null || item.coverageGap !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["kind"],
+          message: "a 'nightly_run' item must have no parent, occurrence, or coverage gap",
+        });
+      }
+    } else if (item.kind === "finding") {
+      if (item.parentWorkItemId === null || item.occurrenceId === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["kind"],
+          message: "a 'finding' item must have a parent and an occurrence id",
+        });
+      }
+      if (item.coverageGap !== null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["coverageGap"], message: "a 'finding' item must not carry a coverage gap" });
+      }
+    } else {
+      if (item.parentWorkItemId === null || item.coverageGap === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["kind"],
+          message: "a 'coverage_gap' item must have a parent and a coverage gap",
+        });
+      }
+      if (item.occurrenceId !== null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["occurrenceId"], message: "a 'coverage_gap' item must not carry an occurrence id" });
+      }
+    }
+  });
 export type NightlyWorkItem = z.infer<typeof NightlyWorkItem>;
 
 export const NightlyWorkGraph = z
