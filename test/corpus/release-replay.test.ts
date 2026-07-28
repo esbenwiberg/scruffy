@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { defaultAnalyzers, defaultValidator, RELEASE_STOP_CLASSES, RELEASE_SIGNOFF_CLASSES } from "../../src/providers/registry.js";
+import {
+  defaultAnalyzers,
+  defaultValidator,
+  releaseOfflineEvidence,
+  RELEASE_STOP_CLASSES,
+  RELEASE_SIGNOFF_CLASSES,
+} from "../../src/providers/registry.js";
 import { ReleaseCorpus } from "../../src/corpus/release-types.js";
 import { replayReleaseCorpus } from "../../src/corpus/release-replay.js";
 import { summarizeRelease } from "../../src/corpus/release-run.js";
@@ -9,6 +15,7 @@ import type { ReleasePolicy } from "../../src/domain/policy/types.js";
 const POLICY: ReleasePolicy = {
   stopDefectClasses: [...RELEASE_STOP_CLASSES],
   signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
 };
 
 const deps = { analyzers: defaultAnalyzers(), validator: defaultValidator(), policy: POLICY };

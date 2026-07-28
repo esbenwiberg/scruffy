@@ -73,6 +73,9 @@ export async function replayReleaseCorpus(
     const scm: ScmReader = {
       getChangedFiles: async () => c.files,
       getChangedFilesInRange: async () => c.files,
+      // Offline replay marks candidate CI not-applicable, so this is never read;
+      // return an empty (CI-less), never-failed set to satisfy the port contract.
+      getCandidateCi: async (subject) => ({ sha: subject.commitSha, records: [] }),
     };
     const { decision } = await runReleaseAnalysis(c.range, {
       scm,

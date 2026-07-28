@@ -2,9 +2,10 @@ import { afterEach, expect, it } from "vitest";
 import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
-import type { ChangedFile } from "../../src/providers/scm/port.js";
+import type { CandidateCiEvidence, CandidateCiState, ChangedFile } from "../../src/providers/scm/port.js";
 import type { ReleaseOutcome } from "../../src/gates/release/decision.js";
 import { parseReleaseReport } from "../../src/domain/release/report.js";
+import { HARNESS_REQUIRED_CI_CONTEXTS } from "./boot.js";
 
 /**
  * End-to-end release gate over a seeded RANGE (prev-release, candidate]. Real
@@ -38,6 +39,30 @@ const CLEAN_FILE: ChangedFile = {
   path: "src/total.ts",
   patch: newFilePatch(["export const total = (xs: number[]): number => xs.reduce((a, b) => a + b, 0);"]),
 };
+
+const [CI_BUILD, CI_TESTS] = HARNESS_REQUIRED_CI_CONTEXTS;
+
+/** Candidate-CI evidence bound to a candidate SHA, one record per (context, state). */
+function ciEvidence(sha: string, entries: { context: string; state: CandidateCiState; updatedAt?: string }[]): CandidateCiEvidence {
+  return {
+    sha,
+    records: entries.map((e) => ({
+      context: e.context,
+      state: e.state,
+      sha,
+      source: "check-run" as const,
+      ...(e.updatedAt ? { updatedAt: e.updatedAt } : {}),
+    })),
+  };
+}
+
+/** Every required context passing for the candidate — the only clean candidate-CI state. */
+function passingCi(sha: string): CandidateCiEvidence {
+  return ciEvidence(
+    sha,
+    HARNESS_REQUIRED_CI_CONTEXTS.map((context) => ({ context, state: "success" as CandidateCiState })),
+  );
+}
 
 let h: Harness;
 
@@ -107,12 +132,95 @@ describeDb("release gate over a seeded range", () => {
   it("SHIPS a clean range", async () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [CLEAN_FILE]);
+    // A required candidate-CI lane must be complete to ship: seed every named
+    // context passing for the exact candidate. Without this, ship is impossible.
+    h.scm.seedCandidateCi({ repository: REPO, commitSha: CAND }, passingCi(CAND));
 
     await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
     await h.scruffy.flushEffects();
 
     expect((await decisionOf(CAND))?.outcome).toBe("ship");
     expect(releaseChecks(CAND)[0]!.input.title).toMatch(/ship/);
+  });
+
+  it("missing or non-success required CI forces sign-off", async () => {
+    h = await bootHarness();
+
+    // Distinct candidate SHAs so each scenario is an independent release run under
+    // one boot. Every range is otherwise CLEAN — only candidate CI can hold it, so
+    // any non-ship outcome is attributable to the CI lane alone.
+    const candFor = (i: number): string => i.toString(16).padStart(2, "0").repeat(20);
+
+    // Every listed unsafe state on a required context (ci/build), with ci/tests
+    // passing, must PREVENT ship. `unknown` stands in for malformed CI evidence.
+    const unsafeStates: CandidateCiState[] = [
+      "pending",
+      "failure",
+      "cancelled",
+      "timed-out",
+      "neutral",
+      "action-required",
+      "error",
+      "unknown",
+    ];
+
+    let i = 0;
+    for (const state of unsafeStates) {
+      const cand = candFor(i++);
+      h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: cand }, [CLEAN_FILE]);
+      h.scm.seedCandidateCi(
+        { repository: REPO, commitSha: cand },
+        ciEvidence(cand, [
+          { context: CI_BUILD!, state },
+          { context: CI_TESTS!, state: "success" },
+        ]),
+      );
+      await h.scruffy.runRelease({ repository: REPO, candidate: cand, prevRelease: PREV });
+      expect((await decisionOf(cand))?.outcome, `CI state ${state} must not ship`).toBe("sign-off-required");
+    }
+
+    // A MISSING required context (only the other one present) cannot ship.
+    const missing = candFor(i++);
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: missing }, [CLEAN_FILE]);
+    h.scm.seedCandidateCi({ repository: REPO, commitSha: missing }, ciEvidence(missing, [{ context: CI_TESTS!, state: "success" }]));
+    await h.scruffy.runRelease({ repository: REPO, candidate: missing, prevRelease: PREV });
+    expect((await decisionOf(missing))?.outcome).toBe("sign-off-required");
+
+    // EXTRA unrelated successful contexts cannot substitute for a required one:
+    // ci/tests passes, ci/build is absent, an unrelated context passes -> sign-off.
+    const extra = candFor(i++);
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: extra }, [CLEAN_FILE]);
+    h.scm.seedCandidateCi(
+      { repository: REPO, commitSha: extra },
+      ciEvidence(extra, [
+        { context: CI_TESTS!, state: "success" },
+        { context: "unrelated/thing", state: "success" },
+      ]),
+    );
+    await h.scruffy.runRelease({ repository: REPO, candidate: extra, prevRelease: PREV });
+    expect((await decisionOf(extra))?.outcome).toBe("sign-off-required");
+
+    // A DUPLICATE-AMBIGUOUS required context (two records, differing states, no clear
+    // latest) is not clean -> sign-off, even with the other context passing.
+    const ambiguous = candFor(i++);
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: ambiguous }, [CLEAN_FILE]);
+    h.scm.seedCandidateCi(
+      { repository: REPO, commitSha: ambiguous },
+      ciEvidence(ambiguous, [
+        { context: CI_BUILD!, state: "success" },
+        { context: CI_BUILD!, state: "failure" },
+        { context: CI_TESTS!, state: "success" },
+      ]),
+    );
+    await h.scruffy.runRelease({ repository: REPO, candidate: ambiguous, prevRelease: PREV });
+    expect((await decisionOf(ambiguous))?.outcome).toBe("sign-off-required");
+
+    // Control: EVERY required context passing for the exact candidate ships.
+    const clean = candFor(i++);
+    h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: clean }, [CLEAN_FILE]);
+    h.scm.seedCandidateCi({ repository: REPO, commitSha: clean }, passingCi(clean));
+    await h.scruffy.runRelease({ repository: REPO, candidate: clean, prevRelease: PREV });
+    expect((await decisionOf(clean))?.outcome).toBe("ship");
   });
 
   it("reviews a first-ever release (null prev-release) as the candidate's own change set", async () => {
@@ -145,6 +253,7 @@ describeDb("release gate over a seeded range", () => {
   it("atomically persists a SHA-bound release report", async () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [CLEAN_FILE]);
+    h.scm.seedCandidateCi({ repository: REPO, commitSha: CAND }, passingCi(CAND));
 
     const run = await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
     expect(run.state).toBe("decided");
@@ -158,8 +267,12 @@ describeDb("release gate over a seeded range", () => {
     expect(report.subject.candidateSha).toBe(CAND);
     expect(report.subject.previousReleaseSha).toBe(PREV);
     expect(candidateShaColumn).toBe(CAND); // denormalized column agrees with the blob
-    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis"]);
-    expect(report.evidenceLanes[0]!.subjectSha).toBe(CAND);
+    // Every policy-declared lane appears; the candidate-CI lane binds the exact SHA.
+    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis", "candidate-ci"]);
+    expect(report.evidenceLanes.every((l) => l.subjectSha === CAND)).toBe(true);
+    const ciLane = report.evidenceLanes.find((l) => l.laneId === "candidate-ci")!;
+    expect(ciLane.status).toBe("complete");
+    expect(ciLane.required).toBe(true);
 
     // Report, durable decision, and posted check all agree.
     const decision = await decisionOf(CAND);

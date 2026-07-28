@@ -10,6 +10,7 @@ import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
+import type { CandidateCiEvaluation } from "./candidate-ci.js";
 import type { ReleaseDecision } from "./decision.js";
 import { assembleReleaseReport, type ReleaseRiskReport, type ReleaseRiskLaneInput } from "../../domain/release/report.js";
 import { analysisFailed } from "../../domain/evidence/coverage.js";
@@ -111,7 +112,7 @@ export class ReleaseService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision, releaseRisk } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+      const { findings, decision, releaseRisk, candidateCi } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
         runReleaseAnalysis(range, {
           scm: this.deps.scm,
           analyzers: this.deps.analyzers,
@@ -123,7 +124,7 @@ export class ReleaseService {
 
       // Assemble ONE report for this terminal analysis. The advisory check is
       // rendered FROM the report, so decision/report/check cannot diverge.
-      const report = this.#assembleReport(run, findings, decision, releaseRisk);
+      const report = this.#assembleReport(run, findings, decision, releaseRisk, candidateCi);
       const check = releaseToCheck(report);
       const payload: CheckRunPayload = {
         subject: run.subject,
@@ -215,6 +216,7 @@ export class ReleaseService {
     findings: Finding[],
     decision: ReleaseDecision,
     releaseRisk?: ReleaseRiskAssessment,
+    candidateCi?: CandidateCiEvaluation,
   ): ReleaseRiskReport {
     return assembleReleaseReport({
       subject: {
@@ -227,7 +229,21 @@ export class ReleaseService {
       provenance: { analyzers: this.deps.analyzers.map((a) => ({ id: a.id })) },
       findings,
       decision,
+      // Lane required/applicable booleans come from service-owned policy, not an
+      // assumption — every policy-declared lane appears with its true posture.
+      laneDeclarations: this.deps.policy.release.evidence,
       ...(releaseRisk ? { releaseRisk: this.#releaseRiskLane(releaseRisk, this.deps.releaseRisk!) } : {}),
+      ...(candidateCi
+        ? {
+            candidateCi: {
+              required: candidateCi.required,
+              applicable: candidateCi.applicable,
+              status: candidateCi.status,
+              observations: candidateCi.observations,
+              gaps: candidateCi.gaps,
+            },
+          }
+        : {}),
     });
   }
 

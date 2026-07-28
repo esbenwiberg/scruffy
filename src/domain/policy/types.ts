@@ -79,12 +79,121 @@ export type NightlyPolicy = z.infer<typeof NightlyPolicy>;
  * rather than accepting an ambiguous version. The kernel's `stop`-wins guard for
  * an overlap is then unreachable defence-in-depth, not the authoritative resolver.
  */
+/**
+ * The `scruffy/release` check is THIS gate's own advisory status. A release
+ * policy that named it as a required candidate-CI context would make the gate
+ * depend on itself (a deadlock/false-signal), so it is rejected at the boundary.
+ */
+export const RELEASE_SELF_CONTEXT = "scruffy/release";
+
+/**
+ * Service-owned evidence-lane declarations for the release gate (design.md). Every
+ * lane the policy governs is declared here EXPLICITLY — there is no permissive
+ * fallback that silently makes a new lane optional. "No finding" is not proof of
+ * coverage, so a lane's completeness is decided from its declared applicability and
+ * requirement, never from the mere absence of findings.
+ *
+ *  - `applicable`: whether the lane applies to this policy at all. A lane may be
+ *    non-applicable ONLY through this explicit declaration (e.g. candidate CI in
+ *    deterministic offline corpus replay).
+ *  - `required`: whether a complete/not-applicable lane is a precondition for
+ *    `ship`. A required lane MUST be applicable (a required-but-not-applicable
+ *    lane is contradictory and rejected).
+ */
+const EvidenceLaneDeclaration = z
+  .object({
+    applicable: z.boolean(),
+    required: z.boolean(),
+  })
+  .superRefine((lane, ctx) => {
+    if (lane.required && !lane.applicable) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "a required evidence lane must be applicable",
+      });
+    }
+  });
+
+/**
+ * The candidate-CI lane additionally names the EXACT GitHub check-run / commit-status
+ * contexts that must pass for the candidate SHA. Extra invariants beyond the base
+ * lane rules, all rejected at the boundary:
+ *  - an applicable lane must name at least one required context (an applicable CI
+ *    lane with no required contexts would be trivially clean — a false green);
+ *  - a non-applicable lane must name none (a contradiction otherwise);
+ *  - required contexts must be unique (a duplicate is a mis-authored version);
+ *  - `scruffy/release` can never be a required context (self-dependency).
+ */
+const CandidateCiLaneDeclaration = z
+  .object({
+    applicable: z.boolean(),
+    required: z.boolean(),
+    /** Exact GitHub check-run/commit-status contexts that must pass for the candidate. */
+    requiredContexts: z.array(z.string().min(1)).readonly(),
+  })
+  .superRefine((lane, ctx) => {
+    if (lane.required && !lane.applicable) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a required evidence lane must be applicable" });
+    }
+    if (lane.applicable && lane.requiredContexts.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredContexts"],
+        message: "an applicable candidate-ci lane must name at least one required context",
+      });
+    }
+    if (!lane.applicable && lane.requiredContexts.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredContexts"],
+        message: "a non-applicable candidate-ci lane must not name required contexts",
+      });
+    }
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const context of lane.requiredContexts) {
+      if (seen.has(context)) dups.add(context);
+      seen.add(context);
+    }
+    if (dups.size > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredContexts"],
+        message: `duplicate required CI contexts: ${[...dups].join(", ")}`,
+      });
+    }
+    if (lane.requiredContexts.includes(RELEASE_SELF_CONTEXT)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredContexts"],
+        message: `candidate CI cannot require the '${RELEASE_SELF_CONTEXT}' context (self-dependency)`,
+      });
+    }
+  });
+
+/**
+ * The full evidence manifest a release policy must declare. `.strict()` rejects an
+ * UNKNOWN lane id rather than silently ignoring it, and every known lane key is
+ * required, so a MISSING lane declaration fails parsing rather than weakening a
+ * release by omission.
+ */
+export const ReleaseEvidencePolicy = z
+  .object({
+    "source-analysis": EvidenceLaneDeclaration,
+    "release-risk-llm": EvidenceLaneDeclaration,
+    "candidate-ci": CandidateCiLaneDeclaration,
+  })
+  .strict();
+export type ReleaseEvidencePolicy = z.infer<typeof ReleaseEvidencePolicy>;
+
 export const ReleasePolicy = z
   .object({
     /** Confirmed finding of one of these hard-stops the release (irreversible harm). */
     stopDefectClasses: z.array(z.string().min(1)).readonly(),
     /** A surfaced finding of one of these forces human sign-off before release. */
     signoffDefectClasses: z.array(z.string().min(1)).readonly(),
+    /** Which evidence lanes are required/applicable, and the exact CI contexts. */
+    evidence: ReleaseEvidencePolicy,
   })
   .superRefine((policy, ctx) => {
     // Invariant: stopDefectClasses and signoffDefectClasses are disjoint. Overlap

@@ -23,6 +23,9 @@ import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
  * code in the middle, deterministic edges.
  */
 
+/** Exact non-Scruffy CI contexts the harness release policy requires. */
+export const HARNESS_REQUIRED_CI_CONTEXTS = ["ci/build", "ci/tests"] as const;
+
 export const HARNESS_POLICY: EffectivePolicy = {
   version: "policy-v1",
   poison: {
@@ -36,6 +39,14 @@ export const HARNESS_POLICY: EffectivePolicy = {
   release: {
     stopDefectClasses: [...RELEASE_STOP_CLASSES],
     signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+    // The harness runs no model backend, so the release-risk-llm lane is explicitly
+    // not applicable (honest, not a permissive skip). Source analysis and candidate
+    // CI are required; the harness seeds honest fake CI evidence to exercise them.
+    evidence: {
+      "source-analysis": { applicable: true, required: true },
+      "release-risk-llm": { applicable: false, required: false },
+      "candidate-ci": { applicable: true, required: true, requiredContexts: [...HARNESS_REQUIRED_CI_CONTEXTS] },
+    },
   },
 };
 

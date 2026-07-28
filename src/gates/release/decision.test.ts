@@ -9,6 +9,11 @@ const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
 const POLICY: ReleasePolicy = {
   stopDefectClasses: ["leaked-credential", "destructive-schema-change"],
   signoffDefectClasses: ["disabled-tls-verification", "sql-injection"],
+  evidence: {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: true, required: true },
+    "candidate-ci": { applicable: true, required: true, requiredContexts: ["ci/build"] },
+  },
 };
 
 /** A confirmed leaked credential (validated + deterministic + complete). */
@@ -137,6 +142,60 @@ describe("evaluateRelease", () => {
     expect(stopWins.outcome).toBe("stop");
     expect(stopWins.reasons).toContain("stop_class_confirmed");
     expect(stopWins.reasons).not.toContain("model_risk_present");
+  });
+
+  it("incomplete required candidate-CI lane escalates to sign-off", () => {
+    // A required candidate-CI lane that did not cleanly pass every context is blind,
+    // and blind is not clean: escalate to a human, never a silent ship.
+    const d = evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, { required: true, complete: false });
+    expect(d.outcome).toBe("sign-off-required");
+    expect(d.reasons).toContain("ci_lane_incomplete");
+
+    // A complete required CI lane over an otherwise clean range ships.
+    const clean = evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, { required: true, complete: true });
+    expect(clean.outcome).toBe("ship");
+
+    // A NON-required (e.g. not-applicable) incomplete lane never holds a release.
+    const notRequired = evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, { required: false, complete: false });
+    expect(notRequired.outcome).toBe("ship");
+  });
+
+  it("confirmed stop wins over incomplete required lanes", () => {
+    // A confirmed deterministic stop must remain `stop` even when other required
+    // evidence lanes are incomplete — a failed LLM lane AND a failed/missing CI
+    // lane cannot soften a confirmed catastrophe, and neither lane manufactures one.
+    const withFailedLlm = evaluateRelease(
+      [secret()],
+      POLICY,
+      COMPLETE_COVERAGE,
+      { retainedRiskCount: 2, complete: false }, // LLM lane has risk AND is incomplete
+      { required: true, complete: true },
+    );
+    expect(withFailedLlm.outcome).toBe("stop");
+    expect(withFailedLlm.reasons).toContain("stop_class_confirmed");
+    expect(withFailedLlm.reasons).not.toContain("model_risk_present");
+    expect(withFailedLlm.reasons).not.toContain("llm_lane_incomplete");
+
+    const withFailedCi = evaluateRelease(
+      [secret()],
+      POLICY,
+      COMPLETE_COVERAGE,
+      undefined,
+      { required: true, complete: false }, // required CI lane incomplete
+    );
+    expect(withFailedCi.outcome).toBe("stop");
+    expect(withFailedCi.reasons).toContain("stop_class_confirmed");
+    expect(withFailedCi.reasons).not.toContain("ci_lane_incomplete");
+
+    // Both LLM and CI lanes incomplete at once: still `stop`.
+    const bothIncomplete = evaluateRelease(
+      [secret()],
+      POLICY,
+      COMPLETE_COVERAGE,
+      { retainedRiskCount: 1, complete: false },
+      { required: true, complete: false },
+    );
+    expect(bothIncomplete.outcome).toBe("stop");
   });
 
   it("is order-independent: shuffled input yields the same ranked output and outcome", () => {

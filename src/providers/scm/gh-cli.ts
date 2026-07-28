@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
 import type {
+  CandidateCiEvidence,
+  CandidateCiRecord,
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
@@ -10,6 +12,7 @@ import type {
   ScmReader,
   ScmWriter,
 } from "./port.js";
+import { normalizeCheckRunConclusion, normalizeCommitStatusState } from "./candidate-ci.js";
 
 /**
  * GitHub SCM adapter that shells out to the authenticated `gh` CLI — reusing the
@@ -199,6 +202,48 @@ export class GhCliScm implements ScmReader, ScmWriter {
     return typeof base === "string" && /^[0-9a-f]{40}$/.test(base) ? base : null;
   }
 
+  /**
+   * Normalized candidate-CI evidence for the EXACT candidate SHA. Reads BOTH GitHub
+   * check runs and commit statuses for the commit and normalizes each into one
+   * record set. Every `gh` failure REJECTS (never []): a fault must not read as
+   * "no required checks" and false-green the release lane. `per_page=100` keeps the
+   * common few-context case single-page; a context beyond that reads as missing
+   * (incomplete -> sign-off), which errs safe rather than false-clean.
+   */
+  async getCandidateCi(subject: SubjectRevision): Promise<CandidateCiEvidence> {
+    const { repository, commitSha } = subject;
+    const records: CandidateCiRecord[] = [];
+
+    const checkRunsRaw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}/check-runs?per_page=100`]);
+    const checkRuns = this.#parseCheckRuns((this.#parseJson(checkRunsRaw) as { check_runs?: unknown } | null)?.check_runs);
+    for (const run of checkRuns) {
+      records.push({
+        context: run.name,
+        state: normalizeCheckRunConclusion(run.status, run.conclusion ?? null),
+        // A check run carries its own head_sha; keep it so wrong-SHA evidence is
+        // detectable downstream rather than assumed to match the candidate.
+        sha: typeof run.head_sha === "string" ? run.head_sha : commitSha,
+        source: "check-run",
+        ...(run.completed_at ?? run.started_at ? { updatedAt: (run.completed_at ?? run.started_at)! } : {}),
+      });
+    }
+
+    const statusesRaw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}/statuses?per_page=100`]);
+    const statuses = this.#parseStatuses(this.#parseJson(statusesRaw));
+    for (const status of statuses) {
+      // The statuses endpoint is per-sha, so each record binds to the requested candidate.
+      records.push({
+        context: status.context,
+        state: normalizeCommitStatusState(status.state),
+        sha: commitSha,
+        source: "commit-status",
+        ...(status.updated_at ? { updatedAt: status.updated_at } : {}),
+      });
+    }
+
+    return { sha: commitSha, records };
+  }
+
   // ── Writer (check-run effect -> commit status) ───────────────────────────────
 
   async upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult> {
@@ -254,6 +299,45 @@ export class GhCliScm implements ScmReader, ScmWriter {
     if (!Array.isArray(files)) throw new Error("gh response: `files` is not an array");
     return files as GhFile[];
   }
+
+  #parseCheckRuns(runs: unknown): GhCheckRun[] {
+    if (runs === undefined || runs === null) return [];
+    if (!Array.isArray(runs)) throw new Error("gh response: `check_runs` is not an array");
+    for (const run of runs) {
+      if (typeof run?.name !== "string" || typeof run?.status !== "string") {
+        throw new Error("gh response: a check run is missing `name`/`status`");
+      }
+    }
+    return runs as GhCheckRun[];
+  }
+
+  #parseStatuses(statuses: unknown): GhStatus[] {
+    if (statuses === undefined || statuses === null) return [];
+    if (!Array.isArray(statuses)) throw new Error("gh response: `statuses` is not an array");
+    for (const status of statuses) {
+      if (typeof status?.context !== "string" || typeof status?.state !== "string") {
+        throw new Error("gh response: a commit status is missing `context`/`state`");
+      }
+    }
+    return statuses as GhStatus[];
+  }
+}
+
+/** A GitHub check-run entry (candidate-CI read). Only the fields we normalize. */
+interface GhCheckRun {
+  name: string;
+  status: string;
+  conclusion?: string | null;
+  head_sha?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+/** A GitHub commit-status entry (candidate-CI read). */
+interface GhStatus {
+  context: string;
+  state: string;
+  updated_at?: string;
 }
 
 /** Poison/gate conclusion -> commit-status state. Statuses have no `neutral`; an

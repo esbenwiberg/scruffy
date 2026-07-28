@@ -60,6 +60,45 @@ export const RELEASE_STOP_CLASSES = ["leaked-credential", "destructive-schema-ch
 export const RELEASE_SIGNOFF_CLASSES = ["disabled-tls-verification", ...MODEL_DEFECT_CLASSES] as const;
 
 /**
+ * The exact GitHub check/status contexts a controlled candidate must pass for the
+ * candidate-CI lane. Deliberately NON-Scruffy — the gate never depends on its own
+ * `scruffy/release` context (that self-dependency is rejected at policy parsing).
+ * These are the honest defaults for the controlled shadow repository; a real
+ * deployment overrides them with the repo's actual required contexts.
+ */
+export const RELEASE_REQUIRED_CI_CONTEXTS = ["ci/build", "ci/test"] as const;
+
+/**
+ * Service-owned evidence-lane declarations for the default/shadow release policy.
+ * Source analysis and candidate CI are REQUIRED — a controlled candidate cannot
+ * ship without full deterministic review and every named CI context passing for the
+ * exact SHA. The range-level LLM lane is applicable but not a ship precondition here
+ * (a model backend is optional in the base wiring); when an analyst IS wired its
+ * retained risks still force sign-off. Nothing is silently optional: every lane is
+ * declared explicitly, and there is no permissive fallback.
+ */
+export const RELEASE_EVIDENCE_POLICY = {
+  "source-analysis": { applicable: true, required: true },
+  "release-risk-llm": { applicable: true, required: false },
+  "candidate-ci": { applicable: true, required: true, requiredContexts: [...RELEASE_REQUIRED_CI_CONTEXTS] },
+} as const;
+
+/**
+ * Evidence declarations for deterministic OFFLINE corpus replay: source analysis is
+ * still required (the corpus scores real deterministic review), but the model and
+ * candidate-CI lanes are EXPLICITLY not applicable — there is no model backend and
+ * no live GitHub to read CI from. This is an explicit, honest declaration, NOT a
+ * permissive fallback: the schema still parses it and rejects contradictions.
+ */
+export function releaseOfflineEvidence() {
+  return {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: false, required: false },
+    "candidate-ci": { applicable: false, required: false, requiredContexts: [] as string[] },
+  };
+}
+
+/**
  * The production policy derived from the registry's class lists — the single
  * place the class↔gate bindings become an EffectivePolicy, so entrypoints
  * (server, scripts) cannot drift from each other. The harness keeps its own
@@ -70,7 +109,18 @@ export function defaultPolicy(version = "policy-v1"): EffectivePolicy {
     version,
     poison: { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true },
     nightly: { reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES], fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES] },
-    release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
+    release: {
+      stopDefectClasses: [...RELEASE_STOP_CLASSES],
+      signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+      evidence: {
+        "source-analysis": { ...RELEASE_EVIDENCE_POLICY["source-analysis"] },
+        "release-risk-llm": { ...RELEASE_EVIDENCE_POLICY["release-risk-llm"] },
+        "candidate-ci": {
+          ...RELEASE_EVIDENCE_POLICY["candidate-ci"],
+          requiredContexts: [...RELEASE_EVIDENCE_POLICY["candidate-ci"].requiredContexts],
+        },
+      },
+    },
   };
 }
 

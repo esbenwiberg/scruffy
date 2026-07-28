@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Finding } from "../evidence/types.js";
 import { WHOLE_ANALYSIS, type AnalysisCoverage } from "../evidence/coverage.js";
 import type { ReleaseDecision } from "../../gates/release/decision.js";
+import type { ReleaseEvidencePolicy } from "../policy/types.js";
 
 /**
  * The versioned, schema-validated ReleaseRiskReport — the first-class, inspectable
@@ -132,6 +133,7 @@ const ReleaseReasonCode = z.enum([
   "analysis_incomplete",
   "model_risk_present",
   "llm_lane_incomplete",
+  "ci_lane_incomplete",
 ]);
 const ReleaseEffect = z.enum(["stops", "escalates", "cleared", "not_relevant"]);
 const ReleaseFindingDisposition = z.object({
@@ -249,6 +251,20 @@ export interface ReleaseRiskLaneInput {
   promptVersion: string;
 }
 
+/**
+ * The candidate-CI lane's contribution to a report, evaluated by the release gate
+ * from service-owned policy plus normalized CI evidence. The report packages it into
+ * an EvidenceLane; it never re-derives the status. Present whenever policy declares
+ * the lane (03+); a not-applicable lane still appears, with `applicable: false`.
+ */
+export interface CandidateCiLaneInput {
+  required: boolean;
+  applicable: boolean;
+  status: LaneStatus;
+  observations: string[];
+  gaps: string[];
+}
+
 export interface AssembleReleaseReportInput {
   subject: ReleaseReportSubject;
   policyVersion: string;
@@ -263,6 +279,15 @@ export interface AssembleReleaseReportInput {
   risks?: ReleaseRisk[];
   /** The range-level LLM lane, when a release-risk analyst is wired (02+). */
   releaseRisk?: ReleaseRiskLaneInput;
+  /** The candidate-CI lane, when policy declares it (03+). */
+  candidateCi?: CandidateCiLaneInput;
+  /**
+   * Service-owned lane declarations. When present, each lane's required/applicable
+   * booleans are read from policy rather than assumed. Absent for the slice-01
+   * callers/tests that predate policy-declared lanes: source-analysis and any
+   * release-risk-llm lane then default to required+applicable, as before.
+   */
+  laneDeclarations?: ReleaseEvidencePolicy;
 }
 
 /**
@@ -276,6 +301,7 @@ function sourceAnalysisLane(
   candidateSha: string,
   coverage: AnalysisCoverage,
   analyzers: readonly LaneAnalyzerProvenance[],
+  declaration: { required: boolean; applicable: boolean },
 ): EvidenceLane {
   const status: LaneStatus = coverage.complete
     ? "complete"
@@ -284,8 +310,8 @@ function sourceAnalysisLane(
       : "partial";
   return {
     laneId: "source-analysis",
-    required: true,
-    applicable: true,
+    required: declaration.required,
+    applicable: declaration.applicable,
     status,
     subjectSha: candidateSha,
     provenance: analyzers.map((a) => ({ ...a })),
@@ -302,13 +328,17 @@ function sourceAnalysisLane(
  * nothing reviewed at all → `failed`; some review with a remaining gap → `partial`.
  * A gap can never be read as clean — the status makes the blindness explicit.
  */
-function releaseRiskLane(candidateSha: string, input: ReleaseRiskLaneInput): EvidenceLane {
+function releaseRiskLane(
+  candidateSha: string,
+  input: ReleaseRiskLaneInput,
+  declaration: { required: boolean; applicable: boolean },
+): EvidenceLane {
   const status: LaneStatus =
     input.gaps.length === 0 ? "complete" : input.reviewedLines === 0 ? "failed" : "partial";
   return {
     laneId: "release-risk-llm",
-    required: true,
-    applicable: true,
+    required: declaration.required,
+    applicable: declaration.applicable,
     status,
     subjectSha: candidateSha,
     provenance: [{ ...input.analyzer }],
@@ -328,11 +358,40 @@ function releaseRiskLane(candidateSha: string, input: ReleaseRiskLaneInput): Evi
  * value and is excluded from identity). Parses the result through the schema so an
  * assembled report is always schema-valid at the seam, not only at the read boundary.
  */
+/**
+ * Build the candidate-CI evidence lane from the release gate's pre-computed
+ * evaluation. The report NEVER re-derives CI status from raw records — that is the
+ * gate's job (see gates/release/candidate-ci.ts); here it is only packaged with the
+ * lane's provenance and the immutable subject SHA.
+ */
+function candidateCiLane(candidateSha: string, input: CandidateCiLaneInput): EvidenceLane {
+  return {
+    laneId: "candidate-ci",
+    required: input.required,
+    applicable: input.applicable,
+    status: input.status,
+    subjectSha: candidateSha,
+    provenance: [{ id: "candidate-ci" }],
+    observations: input.observations,
+    gaps: input.gaps,
+  };
+}
+
+/** Default lane declaration for callers that predate policy-declared lanes. */
+const IMPLICIT_LANE: { required: boolean; applicable: boolean } = { required: true, applicable: true };
+
 export function assembleReleaseReport(input: AssembleReleaseReportInput): ReleaseRiskReport {
   const llm = input.releaseRisk;
+  const decls = input.laneDeclarations;
   const evidenceLanes: EvidenceLane[] = [
-    sourceAnalysisLane(input.subject.candidateSha, input.decision.coverage, input.provenance.analyzers),
-    ...(llm ? [releaseRiskLane(input.subject.candidateSha, llm)] : []),
+    sourceAnalysisLane(
+      input.subject.candidateSha,
+      input.decision.coverage,
+      input.provenance.analyzers,
+      decls?.["source-analysis"] ?? IMPLICIT_LANE,
+    ),
+    ...(llm ? [releaseRiskLane(input.subject.candidateSha, llm, decls?.["release-risk-llm"] ?? IMPLICIT_LANE)] : []),
+    ...(input.candidateCi ? [candidateCiLane(input.subject.candidateSha, input.candidateCi)] : []),
   ];
   const content: ReleaseReportContent = {
     reportVersion: RELEASE_REPORT_VERSION,

@@ -3,6 +3,7 @@ import {
   defaultValidator,
   defaultFixers,
   modelAnalyzers,
+  releaseOfflineEvidence,
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
@@ -43,7 +44,11 @@ const NIGHTLY_POLICY: NightlyPolicy = {
   reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
   fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
 };
-const RELEASE_POLICY: ReleasePolicy = { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] };
+const RELEASE_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
+};
 
 const det = () => ({ analyzers: defaultAnalyzers(), validator: defaultValidator() });
 const modelBacked = () => ({ analyzers: [...defaultAnalyzers(), ...modelAnalyzers(groundedModel())], validator: defaultValidator() });

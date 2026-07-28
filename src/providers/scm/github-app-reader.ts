@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
-import type { ChangedFile, RevisionRange, ScmReader } from "./port.js";
+import type { CandidateCiEvidence, CandidateCiRecord, ChangedFile, RevisionRange, ScmReader } from "./port.js";
 import type { GhApi } from "./github-app.js";
+import { normalizeCheckRunConclusion, normalizeCommitStatusState } from "./candidate-ci.js";
 
 /**
  * GitHub App-backed READER — the App-authenticated counterpart to the gh-cli
@@ -47,6 +48,29 @@ const CommitPulls = z.array(
   z.object({
     state: z.string(),
     base: z.object({ sha: z.string() }),
+  }),
+);
+
+const CheckRunsCi = z.object({
+  check_runs: z
+    .array(
+      z.object({
+        name: z.string(),
+        status: z.string(),
+        conclusion: z.string().nullable().optional(),
+        head_sha: z.string().optional(),
+        started_at: z.string().nullable().optional(),
+        completed_at: z.string().nullable().optional(),
+      }),
+    )
+    .optional(),
+});
+
+const CommitStatusesCi = z.array(
+  z.object({
+    context: z.string(),
+    state: z.string(),
+    updated_at: z.string().optional(),
   }),
 );
 
@@ -135,6 +159,45 @@ export class GithubAppScmReader implements ScmReader {
     const open = pulls.find((p) => p.state === "open");
     if (!open) return null;
     return /^[0-9a-f]{40}$/.test(open.base.sha) ? open.base.sha : null;
+  }
+
+  /**
+   * Normalized candidate-CI evidence for the EXACT candidate SHA — the App-auth
+   * counterpart to the gh-cli reader. Reads both check runs and commit statuses
+   * and normalizes them identically. Every API failure throws (the `#api` transport
+   * rejects on non-2xx) and every unexpected shape throws (`#parse`); an empty
+   * successful list is reserved for a genuinely CI-less candidate, so a fault can
+   * never masquerade as "no required checks".
+   */
+  async getCandidateCi(subject: SubjectRevision): Promise<CandidateCiEvidence> {
+    const { repository, commitSha } = subject;
+    const records: CandidateCiRecord[] = [];
+
+    const checkRunsRes = await this.#api(`GET /repos/${repository}/commits/${commitSha}/check-runs`, { per_page: PER_PAGE });
+    const checkRuns = this.#parse(CheckRunsCi, checkRunsRes.data, `check-runs for ${commitSha}`).check_runs ?? [];
+    for (const run of checkRuns) {
+      records.push({
+        context: run.name,
+        state: normalizeCheckRunConclusion(run.status, run.conclusion ?? null),
+        sha: run.head_sha ?? commitSha,
+        source: "check-run",
+        ...(run.completed_at ?? run.started_at ? { updatedAt: (run.completed_at ?? run.started_at)! } : {}),
+      });
+    }
+
+    const statusesRes = await this.#api(`GET /repos/${repository}/commits/${commitSha}/statuses`, { per_page: PER_PAGE });
+    const statuses = this.#parse(CommitStatusesCi, statusesRes.data, `statuses for ${commitSha}`);
+    for (const status of statuses) {
+      records.push({
+        context: status.context,
+        state: normalizeCommitStatusState(status.state),
+        sha: commitSha,
+        source: "commit-status",
+        ...(status.updated_at ? { updatedAt: status.updated_at } : {}),
+      });
+    }
+
+    return { sha: commitSha, records };
   }
 
   #parse<T>(schema: z.ZodType<T>, data: unknown, what: string): T {

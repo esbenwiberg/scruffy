@@ -25,6 +25,9 @@ const scm: ScmReader = {
   async getChangedFilesInRange(_range: RevisionRange): Promise<ChangedFile[]> {
     return [];
   },
+  async getCandidateCi() {
+    throw new Error("candidate CI read not used in poison analyze tests");
+  },
 };
 
 function tlsFinding(overrides: Partial<Finding> = {}): Finding {

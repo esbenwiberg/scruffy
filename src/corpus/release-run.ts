@@ -1,4 +1,10 @@
-import { defaultAnalyzers, defaultValidator, RELEASE_STOP_CLASSES, RELEASE_SIGNOFF_CLASSES } from "../providers/registry.js";
+import {
+  defaultAnalyzers,
+  defaultValidator,
+  releaseOfflineEvidence,
+  RELEASE_STOP_CLASSES,
+  RELEASE_SIGNOFF_CLASSES,
+} from "../providers/registry.js";
 import type { ReleasePolicy } from "../domain/policy/types.js";
 import { pathToFileURL } from "node:url";
 import { replayReleaseCorpus, type ReleaseReplayReport } from "./release-replay.js";
@@ -14,6 +20,7 @@ import { SEEDED_RELEASE_CORPUS } from "./release-corpus.js";
 const POLICY: ReleasePolicy = {
   stopDefectClasses: [...RELEASE_STOP_CLASSES],
   signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
 };
 
 function pct(n: number | null): string {

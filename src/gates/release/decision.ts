@@ -56,7 +56,11 @@ export type ReleaseReasonCode =
   // The release-risk LLM lane did not review the whole range (provider failure,
   // unparseable output, truncation, or an output cap). An incomplete required
   // lane escalates — the same "blind is not clean" rule the coverage gap applies.
-  | "llm_lane_incomplete";
+  | "llm_lane_incomplete"
+  // A required candidate-CI lane is incomplete: a policy-named check/status context
+  // was missing, non-success, wrong-SHA, or ambiguous for the exact candidate. An
+  // incomplete required lane escalates — never a silent ship, never a fabricated stop.
+  | "ci_lane_incomplete";
 
 /** How a single finding affected the release outcome. */
 export type ReleaseEffect = "stops" | "escalates" | "cleared" | "not_relevant";
@@ -160,6 +164,22 @@ export interface ReleaseLlmLane {
   complete: boolean;
 }
 
+/**
+ * The candidate-CI lane's contribution to the decision. Also deliberately narrow:
+ * the kernel never reads raw check/status records, only two policy-derived facts:
+ *  - `required`: whether the lane is a `ship` precondition for this policy;
+ *  - `complete`: whether every policy-named required context passed unambiguously
+ *    for the exact candidate (a `not-applicable` lane is complete and never holds).
+ *
+ * A required, incomplete lane escalates to `sign-off-required` — a missing or
+ * non-success required check is blind, and blind is not clean. Like every other
+ * gap it can NEVER soften a confirmed deterministic stop.
+ */
+export interface ReleaseCiLane {
+  required: boolean;
+  complete: boolean;
+}
+
 /** `coverage` is required for the same reason it is on evaluatePoison — a
  * defaulted argument would make a blind run look like a clean one. */
 export function evaluateRelease(
@@ -167,6 +187,7 @@ export function evaluateRelease(
   policy: ReleasePolicy,
   coverage: AnalysisCoverage,
   llm?: ReleaseLlmLane,
+  ci?: ReleaseCiLane,
 ): ReleaseDecision {
   const dispositions: ReleaseFindingDisposition[] = findings.map((finding) => {
     const { effect, reason } = classify(finding, policy);
@@ -199,22 +220,25 @@ export function evaluateRelease(
 
   const stops = dispositions.filter((d) => d.effect === "stops");
   if (stops.length > 0) {
-    // A coverage gap — deterministic OR the LLM lane's risk/incompleteness —
-    // cannot soften a confirmed deterministic stop. Stop wins, full stop.
+    // A coverage gap — deterministic, the LLM lane's risk/incompleteness, OR an
+    // incomplete required candidate-CI lane — cannot soften a confirmed
+    // deterministic stop. Stop wins, full stop.
     return { outcome: "stop", reasons: dedupe(stops.map((d) => d.reason)), dispositions, summary, coverage };
   }
 
   const modelRisk = (llm?.retainedRiskCount ?? 0) > 0;
   const llmIncomplete = llm !== undefined && !llm.complete;
+  const ciIncomplete = ci !== undefined && ci.required && !ci.complete;
   const escalations = dispositions.filter((d) => d.effect === "escalates");
-  if (escalations.length > 0 || !coverage.complete || modelRisk || llmIncomplete) {
-    // An incomplete analysis, OR a retained model risk, escalates on its own:
-    // shipping code we never fully reviewed — or that a model flagged — is a
-    // human's call to make, not ours. A model risk escalates but never stops.
+  if (escalations.length > 0 || !coverage.complete || modelRisk || llmIncomplete || ciIncomplete) {
+    // An incomplete analysis, a retained model risk, OR an incomplete required
+    // evidence lane escalates on its own: shipping code we never fully reviewed —
+    // or whose required CI is missing/failing — is a human's call, not ours.
     const reasons = dedupe(escalations.map((d) => d.reason));
     if (!coverage.complete) reasons.push("analysis_incomplete");
     if (modelRisk) reasons.push("model_risk_present");
     if (llmIncomplete) reasons.push("llm_lane_incomplete");
+    if (ciIncomplete) reasons.push("ci_lane_incomplete");
     return { outcome: "sign-off-required", reasons, dispositions, summary, coverage };
   }
 

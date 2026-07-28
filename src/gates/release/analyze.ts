@@ -3,10 +3,11 @@ import { coverageFrom, type CoverageGap } from "../../domain/evidence/coverage.j
 import type { ReleasePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
-import type { ScmReader, RevisionRange, ChangedFile } from "../../providers/scm/port.js";
+import type { ScmReader, RevisionRange, ChangedFile, CandidateCiEvidence } from "../../providers/scm/port.js";
 import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
 import { dedupeFindings } from "../../domain/findings/identity.js";
-import { evaluateRelease, type ReleaseDecision, type ReleaseLlmLane } from "./decision.js";
+import { evaluateRelease, type ReleaseDecision, type ReleaseLlmLane, type ReleaseCiLane } from "./decision.js";
+import { evaluateCandidateCi, type CandidateCiEvaluation } from "./candidate-ci.js";
 
 /**
  * Release analysis orchestration: read the (prev-release, candidate] range's
@@ -35,7 +36,12 @@ export async function runReleaseAnalysis(
      */
     releaseRisk?: ReleaseRiskAnalyst;
   },
-): Promise<{ findings: Finding[]; decision: ReleaseDecision; releaseRisk?: ReleaseRiskAssessment }> {
+): Promise<{
+  findings: Finding[];
+  decision: ReleaseDecision;
+  releaseRisk?: ReleaseRiskAssessment;
+  candidateCi: CandidateCiEvaluation;
+}> {
   const files = await deps.scm.getChangedFilesInRange(range);
   const subject = { repository: range.repository, commitSha: range.headSha };
 
@@ -80,11 +86,43 @@ export async function runReleaseAnalysis(
     ? { retainedRiskCount: releaseRisk.risks.length, complete: releaseRisk.gaps.length === 0 }
     : undefined;
 
+  // Candidate-CI lane: normalized check/status evidence for the EXACT candidate SHA,
+  // evaluated against the policy-named required contexts. A read failure becomes a
+  // FAILED lane (never an empty success), and a required incomplete lane escalates.
+  const candidateCi = await assessCandidateCi(deps.scm, deps.policy, subject.commitSha, subject);
+  const ci: ReleaseCiLane = { required: candidateCi.required, complete: candidateCi.complete };
+
   return {
     findings,
-    decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps), llm),
+    decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps), llm, ci),
+    candidateCi,
     ...(releaseRisk ? { releaseRisk } : {}),
   };
+}
+
+/**
+ * Read and evaluate the candidate-CI lane. The read is bound to the exact candidate
+ * SHA. A thrown read is caught and turned into a FAILED lane — never an empty
+ * successful set — so an API/schema fault escalates rather than false-greening. A
+ * non-applicable lane skips the read entirely.
+ */
+async function assessCandidateCi(
+  scm: ScmReader,
+  policy: ReleasePolicy,
+  candidateSha: string,
+  subject: { repository: string; commitSha: string },
+): Promise<CandidateCiEvaluation> {
+  const ci = policy.evidence["candidate-ci"];
+  if (!ci.applicable) return evaluateCandidateCi(candidateSha, ci, null, null);
+
+  let evidence: CandidateCiEvidence | null = null;
+  let readError: string | null = null;
+  try {
+    evidence = await scm.getCandidateCi(subject);
+  } catch (error) {
+    readError = error instanceof Error ? error.message : "candidate CI read failed";
+  }
+  return evaluateCandidateCi(candidateSha, ci, evidence, readError);
 }
 
 /**
