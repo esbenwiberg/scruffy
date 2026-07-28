@@ -11,6 +11,7 @@ import type { EvaluationRun } from "../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../domain/policy/types.js";
 import { SubjectRevision } from "../domain/evidence/types.js";
 import type { Analyzer } from "../providers/analyzers/port.js";
+import type { ReleaseRiskAnalyst } from "../providers/release-risk/port.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "../providers/fixers/port.js";
 import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
@@ -32,6 +33,12 @@ export interface ScruffyDeps {
   validator: Validator;
   /** Fixers indexed by defect class, for nightly fix-PR generation. */
   fixers: Record<string, Fixer>;
+  /**
+   * Optional range-level LLM release-risk analyst. Wired only when a model
+   * backend is configured; kept out of the deterministic default so tests and
+   * corpus replay never make a model call.
+   */
+  releaseRisk?: ReleaseRiskAnalyst;
   webhookSecret: string;
   /** Optional overrides for the poison analysis lease and retry bound. */
   leaseMs?: number;
@@ -76,6 +83,7 @@ export class Scruffy {
       validator: deps.validator,
       policy: deps.policy,
       clock: deps.clock,
+      ...(deps.releaseRisk ? { releaseRisk: deps.releaseRisk } : {}),
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });

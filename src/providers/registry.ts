@@ -3,10 +3,12 @@ import type { EffectivePolicy } from "../domain/policy/types.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "./fixers/port.js";
 import type { ModelProvider } from "./models/port.js";
+import type { ReleaseRiskAnalyst } from "./release-risk/port.js";
 import { SecretScanAnalyzer } from "./analyzers/secret-scan.js";
 import { DestructiveMigrationAnalyzer } from "./analyzers/destructive-migration.js";
 import { DisabledTlsAnalyzer } from "./analyzers/disabled-tls.js";
 import { ModelAnalyzer, MODEL_DEFECT_CLASSES } from "./analyzers/model-analyzer.js";
+import { ModelReleaseRiskAnalyst } from "./release-risk/model-release-risk.js";
 import { SecretValidator } from "./validation/secret-validator.js";
 import { MigrationValidator } from "./validation/migration-validator.js";
 import { TlsValidator } from "./validation/tls-validator.js";
@@ -84,6 +86,17 @@ export function defaultAnalyzers(): Analyzer[] {
  */
 export function modelAnalyzers(model: ModelProvider): Analyzer[] {
   return [new ModelAnalyzer(model)];
+}
+
+/**
+ * The range-level LLM release-risk analyst, wired only when a model backend is
+ * configured. Deliberately SEPARATE from the line-level analyzers: it feeds the
+ * release report's release-risk-llm lane (a change summary + cited, model-asserted
+ * risks over the whole range), not the poison/nightly finding pipeline. Kept out
+ * of the deterministic default so tests and corpus replay never make a model call.
+ */
+export function releaseRiskAnalyst(model: ModelProvider): ReleaseRiskAnalyst {
+  return new ModelReleaseRiskAnalyst(model);
 }
 
 export function defaultValidator(): Validator {

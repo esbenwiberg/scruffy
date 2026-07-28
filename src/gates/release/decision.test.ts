@@ -118,6 +118,27 @@ describe("evaluateRelease", () => {
     expect(d.summary).toEqual({ stopped: 1, escalated: 1, cleared: 0, notRelevant: 0 });
   });
 
+  it("model risk escalates but never stops", () => {
+    // A retained range-level model risk is unresolved and model-asserted, so it
+    // forces human sign-off — never a silent ship, never a fabricated stop.
+    const withRisk = evaluateRelease([], POLICY, COMPLETE_COVERAGE, { retainedRiskCount: 1, complete: true });
+    expect(withRisk.outcome).toBe("sign-off-required");
+    expect(withRisk.reasons).toContain("model_risk_present");
+
+    // An incomplete LLM lane (no retained risk) also escalates — blind is not clean.
+    const incompleteLane = evaluateRelease([], POLICY, COMPLETE_COVERAGE, { retainedRiskCount: 0, complete: false });
+    expect(incompleteLane.outcome).toBe("sign-off-required");
+    expect(incompleteLane.reasons).toContain("llm_lane_incomplete");
+
+    // A separately CONFIRMED deterministic stop still produces `stop`, even when
+    // the LLM lane also has retained risk AND is incomplete. Deterministic stop
+    // wins; a model risk can never soften it, and never manufactures a stop.
+    const stopWins = evaluateRelease([secret()], POLICY, COMPLETE_COVERAGE, { retainedRiskCount: 3, complete: false });
+    expect(stopWins.outcome).toBe("stop");
+    expect(stopWins.reasons).toContain("stop_class_confirmed");
+    expect(stopWins.reasons).not.toContain("model_risk_present");
+  });
+
   it("is order-independent: shuffled input yields the same ranked output and outcome", () => {
     const a = tls({ ruleId: "TLS.A", primaryRegion: { path: "src/a.ts", startLine: 1, endLine: 1, snippet: "x" } });
     const b = secret({ ruleId: "SECRET.B", primaryRegion: { path: "src/b.ts", startLine: 2, endLine: 2, snippet: "y" } });

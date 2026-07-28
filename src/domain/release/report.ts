@@ -130,6 +130,8 @@ const ReleaseReasonCode = z.enum([
   "finding_refuted",
   "not_release_relevant",
   "analysis_incomplete",
+  "model_risk_present",
+  "llm_lane_incomplete",
 ]);
 const ReleaseEffect = z.enum(["stops", "escalates", "cleared", "not_relevant"]);
 const ReleaseFindingDisposition = z.object({
@@ -226,6 +228,27 @@ export function computeReportId(content: ReleaseReportContent): string {
   return `rr_${digest}`;
 }
 
+/**
+ * The range-level LLM analyst's contribution to a report, when one is wired. When
+ * absent, no `release-risk-llm` lane is added and the report keeps the single
+ * `source-analysis` lane (the slice-01 shape). Slice 03 owns declaring the lane
+ * REQUIRED in policy; this shape only carries its evidence into the report.
+ */
+export interface ReleaseRiskLaneInput {
+  changeSummary: string;
+  risks: ReleaseRisk[];
+  /** Explicit coverage gaps. Empty ⇔ the analyst reviewed the whole bounded range. */
+  gaps: { code: string; detail: string }[];
+  /** Added lines actually reviewed, and the total added across the range. */
+  reviewedLines: number;
+  totalLines: number;
+  /** Provenance of the analyst itself (id + version). */
+  analyzer: LaneAnalyzerProvenance;
+  /** The model that produced the assessment; omitted when never reached. */
+  modelId?: string;
+  promptVersion: string;
+}
+
 export interface AssembleReleaseReportInput {
   subject: ReleaseReportSubject;
   policyVersion: string;
@@ -234,10 +257,12 @@ export interface AssembleReleaseReportInput {
   provenance: ReleaseReportProvenance;
   findings: Finding[];
   decision: ReleaseDecision;
-  /** Empty this slice; populated by the range-level LLM analyst (02). */
+  /** Overridden by `releaseRisk.changeSummary` when a release-risk lane is present. */
   changeSummary?: string;
-  /** Empty this slice; populated by later slices. */
+  /** Overridden by `releaseRisk.risks` when a release-risk lane is present. */
   risks?: ReleaseRisk[];
+  /** The range-level LLM lane, when a release-risk analyst is wired (02+). */
+  releaseRisk?: ReleaseRiskLaneInput;
 }
 
 /**
@@ -272,20 +297,56 @@ function sourceAnalysisLane(
 }
 
 /**
+ * Build the release-risk-llm evidence lane from the analyst's assessment. Status
+ * is derived from coverage, never from the model: no gaps → `complete`; gaps but
+ * nothing reviewed at all → `failed`; some review with a remaining gap → `partial`.
+ * A gap can never be read as clean — the status makes the blindness explicit.
+ */
+function releaseRiskLane(candidateSha: string, input: ReleaseRiskLaneInput): EvidenceLane {
+  const status: LaneStatus =
+    input.gaps.length === 0 ? "complete" : input.reviewedLines === 0 ? "failed" : "partial";
+  return {
+    laneId: "release-risk-llm",
+    required: true,
+    applicable: true,
+    status,
+    subjectSha: candidateSha,
+    provenance: [{ ...input.analyzer }],
+    observations: [
+      input.gaps.length === 0
+        ? `Range-level model review covered ${input.reviewedLines} added line(s).`
+        : `Range-level model review covered ${input.reviewedLines} of ${input.totalLines} added line(s).`,
+      `Retained ${input.risks.length} model-asserted release risk(s).`,
+    ],
+    gaps: input.gaps.map((g) => `${g.code}: ${g.detail}`),
+  };
+}
+
+/**
  * Assemble ONE report for a terminal release analysis and stamp its content-bound
  * identity. Pure over its inputs (the injected `generatedAt` is the only non-content
  * value and is excluded from identity). Parses the result through the schema so an
  * assembled report is always schema-valid at the seam, not only at the read boundary.
  */
 export function assembleReleaseReport(input: AssembleReleaseReportInput): ReleaseRiskReport {
+  const llm = input.releaseRisk;
+  const evidenceLanes: EvidenceLane[] = [
+    sourceAnalysisLane(input.subject.candidateSha, input.decision.coverage, input.provenance.analyzers),
+    ...(llm ? [releaseRiskLane(input.subject.candidateSha, llm)] : []),
+  ];
   const content: ReleaseReportContent = {
     reportVersion: RELEASE_REPORT_VERSION,
     subject: input.subject,
     policyVersion: input.policyVersion,
-    provenance: input.provenance,
-    changeSummary: input.changeSummary ?? "",
-    evidenceLanes: [sourceAnalysisLane(input.subject.candidateSha, input.decision.coverage, input.provenance.analyzers)],
-    risks: input.risks ?? [],
+    provenance: {
+      analyzers: input.provenance.analyzers,
+      // Model provenance is carried at the report level only when an analyst ran.
+      ...(llm?.modelId !== undefined ? { modelId: llm.modelId } : input.provenance.modelId !== undefined ? { modelId: input.provenance.modelId } : {}),
+      ...(llm ? { promptVersion: llm.promptVersion } : input.provenance.promptVersion !== undefined ? { promptVersion: input.provenance.promptVersion } : {}),
+    },
+    changeSummary: llm?.changeSummary ?? input.changeSummary ?? "",
+    evidenceLanes,
+    risks: llm?.risks ?? input.risks ?? [],
     findings: input.findings,
     decision: input.decision,
   };

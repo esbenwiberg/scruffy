@@ -90,14 +90,21 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
   const { stopped, escalated, cleared, notRelevant } = decision.summary;
   const reviewed = stopped + escalated + cleared + notRelevant;
 
+  // Retained model risks escalate but are NOT dispositions, so they are not in
+  // `escalated`. Count them alongside findings so a sign-off driven purely by a
+  // model risk is never rendered as "0 findings need human review".
+  const riskCount = report.risks.length;
+
   let title: string;
   switch (decision.outcome) {
     case "stop":
       title = `Release gate: STOP (${stopped} confirmed blocker${stopped === 1 ? "" : "s"})`;
       break;
-    case "sign-off-required":
-      title = `Release gate: sign-off required (${escalated} finding${escalated === 1 ? "" : "s"} need human review)`;
+    case "sign-off-required": {
+      const riskClause = riskCount > 0 ? `, ${riskCount} model risk${riskCount === 1 ? "" : "s"}` : "";
+      title = `Release gate: sign-off required (${escalated} finding${escalated === 1 ? "" : "s"}${riskClause} need human review)`;
       break;
+    }
     case "ship":
       title = reviewed === 0 ? "Release gate: ship (clean)" : `Release gate: ship (${reviewed} finding${reviewed === 1 ? "" : "s"} reviewed, none holding)`;
       break;
@@ -119,6 +126,12 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
     `- ${lane.laneId}: ${lane.status}${lane.required ? " (required)" : ""}`,
     ...lane.gaps.map((g) => `    gap: ${g}`),
   ]);
+  // A concise summary omits bulky cleared evidence but must preserve every
+  // HOLDING model risk — a retained model risk is unresolved and forced sign-off,
+  // so it can never be silently dropped from the advisory summary.
+  const riskLines = report.risks.map(
+    (r) => `- [risk] ${r.category}: ${r.scenario} (${r.citations.map((c) => `${c.path}:${c.line}`).join(", ")})`,
+  );
   const summary = [
     `candidate: ${report.subject.candidateSha}`,
     `report: ${report.reportId} (v${report.reportVersion}, policy ${report.policyVersion})`,
@@ -129,6 +142,7 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
     "",
     `findings — stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
     ...(findingLines.length ? ["", ...findingLines] : []),
+    ...(riskLines.length ? ["", `model risks — ${riskCount} unresolved:`, ...riskLines] : []),
     "",
     "Shadow mode: this check is advisory and does not block publication.",
   ].join("\n");

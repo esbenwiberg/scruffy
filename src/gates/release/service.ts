@@ -5,12 +5,14 @@ import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
+import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
+import { RELEASE_RISK_ANALYZER_VERSION } from "../../providers/release-risk/model-release-risk.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
 import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { ReleaseDecision } from "./decision.js";
-import { assembleReleaseReport, type ReleaseRiskReport } from "../../domain/release/report.js";
+import { assembleReleaseReport, type ReleaseRiskReport, type ReleaseRiskLaneInput } from "../../domain/release/report.js";
 import { analysisFailed } from "../../domain/evidence/coverage.js";
 
 export interface ReleaseServiceDeps {
@@ -19,6 +21,12 @@ export interface ReleaseServiceDeps {
   analyzers: readonly Analyzer[];
   validator: Validator;
   policy: EffectivePolicy;
+  /**
+   * Optional range-level LLM release-risk analyst. When wired, the report gains a
+   * release-risk-llm lane and its retained risks escalate the decision. When
+   * absent the release path is source-analysis only (the slice-01 behavior).
+   */
+  releaseRisk?: ReleaseRiskAnalyst;
   /** Injected clock for the report's generatedAt stamp (excluded from identity). */
   clock: Clock;
   /** Lease duration for an analysis claim. Default 60s. */
@@ -104,18 +112,19 @@ export class ReleaseService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+      const { findings, decision, releaseRisk } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
         runReleaseAnalysis(range, {
           scm: this.deps.scm,
           analyzers: this.deps.analyzers,
           validator: this.deps.validator,
           policy: this.deps.policy.release,
+          ...(this.deps.releaseRisk ? { releaseRisk: this.deps.releaseRisk } : {}),
         }),
       );
 
       // Assemble ONE report for this terminal analysis. The advisory check is
       // rendered FROM the report, so decision/report/check cannot diverge.
-      const report = this.#assembleReport(run, findings, decision);
+      const report = this.#assembleReport(run, findings, decision, releaseRisk);
       const check = releaseToCheck(report);
       const payload: CheckRunPayload = {
         subject: run.subject,
@@ -202,7 +211,12 @@ export class ReleaseService {
    * generatedAt stamp is the only non-content value and is excluded from identity,
    * so a reconciliation replay recomputes the SAME reportId.
    */
-  #assembleReport(run: EvaluationRun, findings: Finding[], decision: ReleaseDecision): ReleaseRiskReport {
+  #assembleReport(
+    run: EvaluationRun,
+    findings: Finding[],
+    decision: ReleaseDecision,
+    releaseRisk?: ReleaseRiskAssessment,
+  ): ReleaseRiskReport {
     return assembleReleaseReport({
       subject: {
         repository: run.subject.repository,
@@ -214,7 +228,22 @@ export class ReleaseService {
       provenance: { analyzers: this.deps.analyzers.map((a) => ({ id: a.id })) },
       findings,
       decision,
+      ...(releaseRisk ? { releaseRisk: this.#releaseRiskLane(releaseRisk) } : {}),
     });
+  }
+
+  /** Map the analyst's assessment onto the report's release-risk lane input. */
+  #releaseRiskLane(assessment: ReleaseRiskAssessment): ReleaseRiskLaneInput {
+    return {
+      changeSummary: assessment.changeSummary,
+      risks: assessment.risks,
+      gaps: assessment.gaps.map((g) => ({ code: g.code, detail: g.detail })),
+      reviewedLines: assessment.reviewedLines,
+      totalLines: assessment.totalLines,
+      analyzer: { id: this.deps.releaseRisk?.id ?? "release-risk-analyst", version: RELEASE_RISK_ANALYZER_VERSION },
+      ...(assessment.provenance.modelId !== null ? { modelId: assessment.provenance.modelId } : {}),
+      promptVersion: assessment.provenance.promptVersion,
+    };
   }
 
   #externalId(run: EvaluationRun): string {

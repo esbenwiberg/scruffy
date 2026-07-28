@@ -49,7 +49,14 @@ export type ReleaseReasonCode =
   | "signoff_class_unconfirmed"
   | "finding_refuted"
   | "not_release_relevant"
-  | "analysis_incomplete";
+  | "analysis_incomplete"
+  // A retained range-level model risk. Every model risk is unresolved and
+  // model-asserted, so it ESCALATES to human sign-off and can never stop.
+  | "model_risk_present"
+  // The release-risk LLM lane did not review the whole range (provider failure,
+  // unparseable output, truncation, or an output cap). An incomplete required
+  // lane escalates — the same "blind is not clean" rule the coverage gap applies.
+  | "llm_lane_incomplete";
 
 /** How a single finding affected the release outcome. */
 export type ReleaseEffect = "stops" | "escalates" | "cleared" | "not_relevant";
@@ -132,12 +139,34 @@ const EFFECT_PRIORITY: Record<ReleaseEffect, number> = {
   not_relevant: 3,
 };
 
+/**
+ * The range-level LLM lane's contribution to the decision, when a release-risk
+ * analyst is wired. Deliberately NARROW — the kernel never reads a model's prose,
+ * only two facts derived from it upstream:
+ *  - `retainedRiskCount`: how many citation-anchored, model-asserted risks
+ *    survived. Each is unresolved, so any of them forces `sign-off-required`. A
+ *    model risk NEVER manufactures `stop` (there is no LLM stop path).
+ *  - `complete`: whether the analyst reviewed the whole bounded range. An
+ *    incomplete lane escalates, exactly like an incomplete deterministic
+ *    analysis — blind is not clean.
+ *
+ * Absent (undefined) means no analyst was wired for this run; the kernel then
+ * behaves exactly as before (source-analysis coverage only). Slice 03 owns
+ * declaring the lane REQUIRED in policy; this slice only lets its evidence
+ * escalate when present.
+ */
+export interface ReleaseLlmLane {
+  retainedRiskCount: number;
+  complete: boolean;
+}
+
 /** `coverage` is required for the same reason it is on evaluatePoison — a
  * defaulted argument would make a blind run look like a clean one. */
 export function evaluateRelease(
   findings: readonly Finding[],
   policy: ReleasePolicy,
   coverage: AnalysisCoverage,
+  llm?: ReleaseLlmLane,
 ): ReleaseDecision {
   const dispositions: ReleaseFindingDisposition[] = findings.map((finding) => {
     const { effect, reason } = classify(finding, policy);
@@ -170,16 +199,22 @@ export function evaluateRelease(
 
   const stops = dispositions.filter((d) => d.effect === "stops");
   if (stops.length > 0) {
-    // A coverage gap cannot soften a confirmed stop.
+    // A coverage gap — deterministic OR the LLM lane's risk/incompleteness —
+    // cannot soften a confirmed deterministic stop. Stop wins, full stop.
     return { outcome: "stop", reasons: dedupe(stops.map((d) => d.reason)), dispositions, summary, coverage };
   }
 
+  const modelRisk = (llm?.retainedRiskCount ?? 0) > 0;
+  const llmIncomplete = llm !== undefined && !llm.complete;
   const escalations = dispositions.filter((d) => d.effect === "escalates");
-  if (escalations.length > 0 || !coverage.complete) {
-    // An incomplete analysis escalates on its own: shipping code we never
-    // reviewed is a human's call to make, not ours.
+  if (escalations.length > 0 || !coverage.complete || modelRisk || llmIncomplete) {
+    // An incomplete analysis, OR a retained model risk, escalates on its own:
+    // shipping code we never fully reviewed — or that a model flagged — is a
+    // human's call to make, not ours. A model risk escalates but never stops.
     const reasons = dedupe(escalations.map((d) => d.reason));
     if (!coverage.complete) reasons.push("analysis_incomplete");
+    if (modelRisk) reasons.push("model_risk_present");
+    if (llmIncomplete) reasons.push("llm_lane_incomplete");
     return { outcome: "sign-off-required", reasons, dispositions, summary, coverage };
   }
 
