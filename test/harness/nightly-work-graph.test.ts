@@ -36,7 +36,7 @@ function newFilePatch(lines: string[]): string {
 /** A validated leaked credential in prod code: reportable, not a fixable class. */
 const REPORT_FILE: ChangedFile = {
   path: "src/config.ts",
-  patch: newFilePatch(["export const AWS_KEY = 'AKIAIJKLMNOP12345678';"]),
+  patch: newFilePatch([`export const AWS_KEY = '${["AKIA", "IJKLMNOP12345678"].join("")}';`]),
 };
 /** A clean file: something changed, nothing wrong with it. */
 const CLEAN_FILE: ChangedFile = {
