@@ -72,7 +72,12 @@ const FileContents = z.object({
  */
 const IssueResponse = z.object({
   number: z.number().int().positive(),
-  id: z.number(),
+  /**
+   * The issue DATABASE id — a different value from `number`, and the one the
+   * native sub-issue endpoint takes. Constrained here rather than only at the
+   * attach call so a nonsense id fails at the boundary that produced it.
+   */
+  id: z.number().int().positive(),
   html_url: z.string().min(1),
   body: z.string().nullable().optional(),
   pull_request: z.unknown().optional(),
@@ -81,7 +86,7 @@ type IssueResponse = z.infer<typeof IssueResponse>;
 
 const IssueList = z.array(IssueResponse);
 
-const SubIssueList = z.array(z.object({ id: z.number(), number: z.number().int().positive() }));
+const SubIssueList = z.array(z.object({ id: z.number().int().positive(), number: z.number().int().positive() }));
 
 /** Page size for issue/sub-issue listings. GitHub's maximum. */
 const ISSUE_PAGE_SIZE = 100;
@@ -206,30 +211,41 @@ export class GithubAppScmWriter implements ScmWriter {
    * Idempotent on (repository, marker). GitHub issues carry no `external_id`, so
    * the marker embedded in the body IS the key:
    *
-   *  1. list this repository's Scruffy-labelled issues newest-first and look for
-   *     the marker in a body. Deliberately NOT the search API: `GET /search/issues`
-   *     is index-backed and lags a write by seconds to minutes, which is exactly
-   *     the window a crash-resume lands in — it would report "no match" for an
-   *     issue GitHub had already created and we would open a duplicate. The
-   *     `/issues` list endpoint reads the primary store and is immediately
-   *     consistent. The title is never consulted either: titles carry counts and
-   *     line numbers that change between attempts;
-   *  2. a match is UPDATED in place (title/body refreshed, `created: false`) —
-   *     this is what makes the crash-after-create retry recover instead of
+   *  0. `input.knownRef` — a reference the caller already persisted — short-circuits
+   *     straight to the update. This is the common path (every re-dispatch, every
+   *     body reconciliation) and skipping the lookup is what keeps publication from
+   *     costing a walk of the repository's whole label-scoped issue history each
+   *     time. It is an optimisation only: identity is still the marker, which is
+   *     what step 1 falls back to;
+   *  1. otherwise list this repository's Scruffy-labelled issues newest-first and
+   *     look for the marker in a body. Deliberately NOT the search API:
+   *     `GET /search/issues` is index-backed and lags a write by seconds to minutes,
+   *     which is exactly the window a crash-resume lands in — it would report "no
+   *     match" for an issue GitHub had already created and we would open a
+   *     duplicate. The `/issues` list endpoint reads the primary store and is
+   *     immediately consistent. The title is never consulted either: titles carry
+   *     counts and line numbers that change between attempts;
+   *  2. a match is UPDATED in place (title/body/labels refreshed, `created: false`)
+   *     — this is what makes the crash-after-create retry recover instead of
    *     duplicate;
    *  3. no match creates the issue with the marker appended and the labels applied.
    *
    * The marker is appended here rather than trusted from the caller's body, so the
-   * lookup key and the published text cannot drift apart.
+   * lookup key and the published text cannot drift apart. Labels are re-sent on
+   * every update for the same reason: the lookup is label-scoped, so a human who
+   * removed one would otherwise make the label part of the identity and the next
+   * publication would open a second issue carrying the same marker.
    */
   async upsertIssue(input: IssueUpsertInput): Promise<IssueUpsertResult> {
     const body = withIssueMarker(input.body, input.marker);
-    const existing = await this.#findIssueByMarker(input.repository, input.marker, input.labels);
+    const existing =
+      input.knownRef ?? (await this.#findIssueByMarker(input.repository, input.marker, input.labels));
 
     if (existing !== null) {
       const patched = await this.#api(`PATCH /repos/${input.repository}/issues/${existing.number}`, {
         title: input.title,
         body,
+        labels: [...input.labels],
       });
       // Re-parse the PATCH response rather than reusing the listed row: the update
       // is the authoritative post-write view of the issue.
@@ -251,18 +267,23 @@ export class GithubAppScmWriter implements ScmWriter {
    * the child's database id rather than its number. Idempotent: an already-attached
    * child is detected by listing first, and a concurrent attach that loses the race
    * surfaces as a 422 which we resolve by re-listing.
+   *
+   * GitHub caps a parent at 100 sub-issues. Exceeding it is rejected, so the attach
+   * fails, is retried, and dead-letters with the provider's reason against the
+   * child's work item — visible on the parent body and the check. Loud and honest,
+   * but it does mean a run surfacing more than 100 items cannot fully attach.
    */
   async linkChildIssue(input: IssueLinkInput): Promise<IssueLinkResult> {
-    if (await this.#hasSubIssue(input.repository, input.parent.number, input.child.number)) {
-      return { alreadyLinked: true };
-    }
-
     const childId = Number(input.child.id);
     if (!Number.isSafeInteger(childId) || childId <= 0) {
       // The native endpoint takes an integer database id. A non-numeric handle means
       // the stored reference came from a different provider or a bad parse; refuse
       // rather than POST something GitHub will misinterpret.
       throw new Error(`github-app: child issue id '${input.child.id}' is not a GitHub issue database id`);
+    }
+
+    if (await this.#hasSubIssue(input.repository, input.parent.number, childId)) {
+      return { alreadyLinked: true };
     }
 
     try {
@@ -274,7 +295,7 @@ export class GithubAppScmWriter implements ScmWriter {
       // 422 covers "already a sub-issue" and a lost concurrent-attach race. Re-list
       // to distinguish it from a genuine rejection (e.g. a cycle), which must throw.
       if (statusOf(err) !== 422) throw err;
-      if (await this.#hasSubIssue(input.repository, input.parent.number, input.child.number)) {
+      if (await this.#hasSubIssue(input.repository, input.parent.number, childId)) {
         return { alreadyLinked: true };
       }
       throw err;
@@ -285,6 +306,13 @@ export class GithubAppScmWriter implements ScmWriter {
    * The Scruffy-labelled issue carrying `marker`, or null. Walks pages newest-first
    * and stops at the first short page; exhausting `ISSUE_LOOKUP_MAX_PAGES` throws
    * rather than reporting a false "not found" that would open a duplicate.
+   *
+   * The walk is O(label-scoped history) in the not-found case, because `labels` is
+   * an AND filter and `state=all` means closed issues never age out. Callers that
+   * hold a durable reference pass `knownRef` and never reach here, so this runs on a
+   * work item's FIRST publication and on crash-resume only. A repository that
+   * accumulates more than `ISSUE_LOOKUP_MAX_PAGES` * 100 Scruffy issues of one kind
+   * will start failing loudly here; that is the deliberate direction to fail in.
    */
   async #findIssueByMarker(repository: string, marker: string, labels: readonly string[]): Promise<IssueResponse | null> {
     for (let page = 1; page <= ISSUE_LOOKUP_MAX_PAGES; page += 1) {
@@ -308,15 +336,23 @@ export class GithubAppScmWriter implements ScmWriter {
     );
   }
 
-  /** Is `childNumber` already a native sub-issue of `parentNumber`? */
-  async #hasSubIssue(repository: string, parentNumber: number, childNumber: number): Promise<boolean> {
+  /**
+   * Is the issue with database id `childId` already a native sub-issue of
+   * `parentNumber`?
+   *
+   * Matched on `id`, not `number`, because sub-issues may live in ANOTHER
+   * repository: a parent whose list contains `other/repo#11` would make a
+   * number-based check claim our own `#11` was attached when it was not, and the
+   * parent body would then report a child as attached that no one can find.
+   */
+  async #hasSubIssue(repository: string, parentNumber: number, childId: number): Promise<boolean> {
     for (let page = 1; page <= ISSUE_LOOKUP_MAX_PAGES; page += 1) {
       const listed = await this.#api(`GET /repos/${repository}/issues/${parentNumber}/sub_issues`, {
         per_page: ISSUE_PAGE_SIZE,
         page,
       });
       const subs = this.#parse(SubIssueList, listed.data, "sub-issues list");
-      if (subs.some((sub) => sub.number === childNumber)) return true;
+      if (subs.some((sub) => sub.id === childId)) return true;
       if (subs.length < ISSUE_PAGE_SIZE) return false;
     }
     throw new Error(

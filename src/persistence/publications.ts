@@ -49,8 +49,14 @@ export interface NightlyPublicationPort {
   getIssueRef(workItemId: string): Promise<IssueExternalRef | null>;
   /** Record a successful publication. Clears any earlier terminal failure. */
   recordIssue(workItemId: string, marker: string, ref: IssueExternalRef): Promise<void>;
-  /** Record a TERMINAL publication failure (the effect was dead-lettered). */
-  recordPublicationFailure(workItemId: string, reason: string): Promise<void>;
+  /**
+   * Record a TERMINAL publication failure (the effect was dead-lettered).
+   *
+   * Returns FALSE when the failure was refused because the work item is in fact
+   * published. Callers must honour that: a caller that cascades "this reference will
+   * never exist" on a `false` would orphan children of a parent issue that exists.
+   */
+  recordPublicationFailure(workItemId: string, reason: string): Promise<boolean>;
   /** Record that a child is attached under its parent in the provider hierarchy. */
   recordAttachment(workItemId: string): Promise<void>;
   /** Record a TERMINAL attachment failure. */
@@ -113,10 +119,18 @@ export class PublicationStore implements NightlyPublicationPort {
    * WAS published must never be downgraded to "could not be filed" by a later
    * failing effect — the issue exists, and telling a human otherwise sends them
    * looking for something that is right there.
+   *
+   * Returns whether the failure was actually recorded. FALSE means the guard fired
+   * (the item is published), and the caller must NOT treat the reference as
+   * unobtainable: cascading from a published parent would dead-letter every child
+   * effect and withhold the whole night's findings from humans, with a recorded
+   * reason that is untrue. That state is reachable — a `recordIssue` that succeeded
+   * followed by a `markSent` that threw leaves the row claimed, and the redundant
+   * re-write GitHub then refuses eventually exhausts the retry budget.
    */
-  async recordPublicationFailure(workItemId: string, reason: string): Promise<void> {
+  async recordPublicationFailure(workItemId: string, reason: string): Promise<boolean> {
     const now = this.clock.now();
-    await this.pool.query(
+    const result = await this.pool.query(
       `insert into nightly_work_item_publications
          (work_item_id, provider, marker, publication_error, created_at, updated_at)
        values ($1, 'github', $2, $3, $4, $4)
@@ -126,6 +140,7 @@ export class PublicationStore implements NightlyPublicationPort {
          where nightly_work_item_publications.external_id is null`,
       [workItemId, workItemIssueMarker(workItemId), reason.slice(0, 2000), now],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async recordAttachment(workItemId: string): Promise<void> {
@@ -141,13 +156,24 @@ export class PublicationStore implements NightlyPublicationPort {
     );
   }
 
+  /**
+   * A terminal attachment failure. An UPSERT rather than a bare update, because the
+   * commonest way to reach here is a child that was never published at all — a
+   * cascade from a failed parent — and that child may have no publication row yet.
+   * A bare update would silently store nothing and lose the reason. Guarded on
+   * `attached_to_parent = false` so an attached child is never told otherwise.
+   */
   async recordAttachmentFailure(workItemId: string, reason: string): Promise<void> {
     const now = this.clock.now();
     await this.pool.query(
-      `update nightly_work_item_publications
-          set attachment_error = $3, updated_at = $2
-        where work_item_id = $1 and attached_to_parent = false`,
-      [workItemId, now, reason.slice(0, 2000)],
+      `insert into nightly_work_item_publications
+         (work_item_id, provider, marker, attachment_error, created_at, updated_at)
+       values ($1, 'github', $2, $3, $4, $4)
+       on conflict (work_item_id) do update
+         set attachment_error = $3,
+             updated_at       = $4
+         where nightly_work_item_publications.attached_to_parent = false`,
+      [workItemId, workItemIssueMarker(workItemId), reason.slice(0, 2000), now],
     );
   }
 

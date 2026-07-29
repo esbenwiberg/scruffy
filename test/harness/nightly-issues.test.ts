@@ -275,7 +275,10 @@ describeDb("nightly issue publication (Postgres)", () => {
     for (const item of [state.parent!, ...state.children]) {
       expect(item.issue).not.toBeNull();
       expect(item.issue!.number).toBeGreaterThan(0);
-      expect(item.issue!.externalId).toMatch(/^issue_\d+$/);
+      // The stored handle is the issue DATABASE id — numeric and distinct from the
+      // number — because that is the value the native sub-issue endpoint takes.
+      expect(item.issue!.externalId).toMatch(/^\d+$/);
+      expect(item.issue!.externalId).not.toBe(String(item.issue!.number));
       expect(item.issue!.url).toContain(`/${FIXTURE_REPO}/issues/`);
       expect(item.publicationError).toBeNull();
     }

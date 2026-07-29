@@ -123,16 +123,30 @@ export interface IssueRef {
  *
  * `labels` narrows the lookup server-side. It is an efficiency contract, not an
  * identity one: an adapter may only match on the marker, but it may restrict
- * WHERE it looks to issues carrying these labels.
+ * WHERE it looks to issues carrying these labels. An adapter that scopes its
+ * lookup by label MUST re-apply the labels on update, or a human who removed one
+ * would turn a label into part of the identity and the next publication would
+ * open a duplicate.
  */
 export interface IssueUpsertInput {
   repository: string;
   /** Stable hidden Scruffy marker. See `workItemIssueMarker`. */
   marker: string;
-  /** Labels applied on create and used to scope the marker lookup. */
+  /** Labels applied on create AND re-applied on update; also scope the lookup. */
   labels: readonly string[];
   title: string;
   body: string;
+  /**
+   * A reference the CALLER already holds from a previous successful publication.
+   *
+   * An optimisation, never an identity: when it is present the adapter may update
+   * that issue directly and skip the marker lookup entirely, which is the
+   * difference between one request and a walk of the repository's whole
+   * label-scoped issue history on every re-dispatch. When it is absent — the
+   * crash-between-create-and-persist case — the marker lookup is the only thing
+   * standing between a retry and a duplicate, so it still runs.
+   */
+  knownRef?: IssueRef;
 }
 
 export interface IssueUpsertResult extends IssueRef {

@@ -92,9 +92,18 @@ export const NightlyCheckRefreshPayload = z.object({
 });
 export type NightlyCheckRefreshPayload = z.infer<typeof NightlyCheckRefreshPayload>;
 
+/**
+ * `knownRef` is the reference ALREADY persisted for this work item, when there is
+ * one. Passing it lets the adapter update that issue directly instead of walking the
+ * repository's issue history to rediscover what we already know — which is every
+ * re-dispatch and every body reconciliation. Omitting it (no local reference: the
+ * crash-between-create-and-persist case) is what puts the marker lookup back in
+ * play, so identity is unchanged.
+ */
 export function toIssueUpsertInput(
   payload: Pick<NightlyIssuePayload, "repository" | "marker" | "labels" | "title" | "body">,
   body = payload.body,
+  knownRef?: IssueExternalRef | null,
 ): IssueUpsertInput {
   return {
     repository: payload.repository,
@@ -102,6 +111,7 @@ export function toIssueUpsertInput(
     labels: payload.labels,
     title: payload.title,
     body,
+    ...(knownRef ? { knownRef: { number: knownRef.number, id: knownRef.externalId, url: knownRef.url } } : {}),
   };
 }
 

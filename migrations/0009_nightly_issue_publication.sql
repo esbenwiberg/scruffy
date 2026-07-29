@@ -62,8 +62,14 @@ comment on table nightly_work_item_publications is
 --
 -- Nullable because check_run/pull_request effects produce nothing another effect
 -- waits on; only the issue effects do.
+-- `on delete cascade`, not the default NO ACTION: `nightly_reports` cascades to
+-- `nightly_work_items`, so a NO ACTION reference from `outbox` would make deleting a
+-- report fail outright and take every retention/purge path with it. An effect whose
+-- work item no longer exists has nothing to publish, so removing the row is also the
+-- correct answer on its own terms. Cascading the whole row (rather than nulling the
+-- column) is what keeps `outbox_produces_pairing` satisfiable.
 alter table outbox
-  add column produces_work_item_id text references nightly_work_items(work_item_id),
+  add column produces_work_item_id text references nightly_work_items(work_item_id) on delete cascade,
   add column produces              text check (produces in ('issue_reference', 'attachment'));
 
 alter table outbox

@@ -184,11 +184,13 @@ export class MemoryPublications implements NightlyPublicationPort {
     existing.publicationError = null;
   }
 
-  async recordPublicationFailure(workItemId: string, reason: string): Promise<void> {
+  async recordPublicationFailure(workItemId: string, reason: string): Promise<boolean> {
     const existing = this.#upsert(workItemId, workItemIssueMarker(workItemId));
-    // Guarded like the SQL: a published item is never downgraded to "could not be filed".
-    if (existing.issue !== null) return;
+    // Guarded like the SQL: a published item is never downgraded to "could not be
+    // filed", and the refusal is REPORTED so the caller does not cascade from it.
+    if (existing.issue !== null) return false;
     existing.publicationError = reason;
+    return true;
   }
 
   async recordAttachment(workItemId: string): Promise<void> {
@@ -199,8 +201,9 @@ export class MemoryPublications implements NightlyPublicationPort {
   }
 
   async recordAttachmentFailure(workItemId: string, reason: string): Promise<void> {
-    const existing = this.#records.get(workItemId);
-    if (!existing || existing.attachedToParent) return;
+    // Upserts like the SQL: a child cascaded from a failed parent may have no record.
+    const existing = this.#upsert(workItemId, workItemIssueMarker(workItemId));
+    if (existing.attachedToParent) return;
     existing.attachmentError = reason;
   }
 

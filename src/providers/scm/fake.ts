@@ -13,6 +13,14 @@ import type {
   ScmReader,
   ScmWriter,
 } from "./port.js";
+import { withIssueMarker } from "../../domain/findings/work-publication.js";
+
+/** One published issue as the fake holds it; `input.body` carries the marker. */
+export interface FakeIssue {
+  repository: string;
+  ref: IssueUpsertResult;
+  input: IssueUpsertInput;
+}
 
 /**
  * Deterministic in-memory SCM double for tests and the harness.
@@ -30,8 +38,9 @@ export class FakeScm implements ScmReader, ScmWriter {
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, { number: number; input: PullRequestInput }>();
-  readonly #issues = new Map<string, { ref: IssueUpsertResult; input: IssueUpsertInput }>();
-  readonly #subIssues = new Map<number, Set<number>>();
+  readonly #issues: FakeIssue[] = [];
+  /** `repository#parentNumber` -> child database id -> child number. */
+  readonly #subIssues = new Map<string, Map<number, number>>();
   #idSeq = 0;
   #prSeq = 0;
   #issueSeq = 0;
@@ -82,31 +91,60 @@ export class FakeScm implements ScmReader, ScmWriter {
   /**
    * Idempotent on (repository, marker) exactly like the GitHub adapter, so the
    * harness can assert that a re-dispatched publication converges on ONE issue.
+   *
+   * It mirrors the real MECHANISM rather than shortcutting it: the marker is embedded
+   * in the stored BODY and rediscovered by scanning bodies, because that is what the
+   * GitHub adapter does and what a crash-resume depends on. A double that keyed a map
+   * on the marker directly would keep passing after the adapter stopped embedding it.
+   * `knownRef` short-circuits to the update, again like the adapter.
    */
   async upsertIssue(input: IssueUpsertInput): Promise<IssueUpsertResult> {
-    const key = `${input.repository}#${input.marker}`;
-    const existing = this.#issues.get(key);
+    const body = withIssueMarker(input.body, input.marker);
+    const existing =
+      (input.knownRef ? this.#issueByNumber(input.repository, input.knownRef.number) : undefined) ??
+      this.#issueByMarker(input.repository, input.marker);
     if (existing) {
-      this.#issues.set(key, { ref: existing.ref, input });
+      existing.input = { ...input, body };
       return { ...existing.ref, created: false };
     }
     this.#issueSeq += 1;
     const ref: IssueUpsertResult = {
       number: this.#issueSeq,
-      id: `issue_${this.#issueSeq}`,
+      // Shaped like a GitHub issue DATABASE id — numeric text, unrelated to the
+      // number — because that is what the real adapter returns and what the native
+      // sub-issue endpoint requires. An `issue_1`-style handle would let a test pass
+      // against an id production refuses.
+      id: String(500_000 + this.#issueSeq),
       url: `https://github.com/${input.repository}/issues/${this.#issueSeq}`,
       created: true,
     };
-    this.#issues.set(key, { ref, input });
+    this.#issues.push({ repository: input.repository, ref, input: { ...input, body } });
     return ref;
   }
 
+  /**
+   * Keyed on the child's DATABASE id, like the native endpoint — a fake that keyed on
+   * the number would not notice a caller that passed the wrong field.
+   */
   async linkChildIssue(input: IssueLinkInput): Promise<IssueLinkResult> {
-    const children = this.#subIssues.get(input.parent.number) ?? new Set<number>();
-    const alreadyLinked = children.has(input.child.number);
-    children.add(input.child.number);
-    this.#subIssues.set(input.parent.number, children);
+    const childId = Number(input.child.id);
+    if (!Number.isSafeInteger(childId) || childId <= 0) {
+      throw new Error(`fake-scm: child issue id '${input.child.id}' is not an issue database id`);
+    }
+    const key = `${input.repository}#${input.parent.number}`;
+    const children = this.#subIssues.get(key) ?? new Map<number, number>();
+    const alreadyLinked = children.has(childId);
+    children.set(childId, input.child.number);
+    this.#subIssues.set(key, children);
     return { alreadyLinked };
+  }
+
+  #issueByMarker(repository: string, marker: string): FakeIssue | undefined {
+    return this.#issues.find((issue) => issue.repository === repository && issue.input.body.includes(marker));
+  }
+
+  #issueByNumber(repository: string, number: number): FakeIssue | undefined {
+    return this.#issues.find((issue) => issue.repository === repository && issue.ref.number === number);
   }
 
   /** Test/harness introspection. */
@@ -118,13 +156,23 @@ export class FakeScm implements ScmReader, ScmWriter {
     return [...this.#pullRequests.values()];
   }
 
-  recordedIssues(): { ref: IssueUpsertResult; input: IssueUpsertInput }[] {
-    return [...this.#issues.values()];
+  recordedIssues(): FakeIssue[] {
+    return [...this.#issues];
   }
 
-  /** Parent issue number -> attached child issue numbers. */
+  /**
+   * Parent issue number -> attached child issue NUMBERS (the readable handle), even
+   * though attachment is stored by database id. Issue numbers are unique across
+   * repositories in the fake, so collapsing the repository out of the key here cannot
+   * merge two parents.
+   */
   recordedSubIssues(): Map<number, number[]> {
-    return new Map([...this.#subIssues].map(([parent, children]) => [parent, [...children].sort((a, b) => a - b)]));
+    return new Map(
+      [...this.#subIssues].map(([key, children]) => [
+        Number(key.split("#").pop()),
+        [...children.values()].sort((a, b) => a - b),
+      ]),
+    );
   }
 
   #subjectKey(subject: SubjectRevision): string {

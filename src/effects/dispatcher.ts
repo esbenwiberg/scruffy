@@ -1,3 +1,4 @@
+import type { EffectProduction } from "../domain/findings/work-publication.js";
 import type { OutboxPort, OutboxRecord } from "../persistence/outbox.js";
 import type { NightlyPublicationPort } from "../persistence/publications.js";
 import type { ScmWriter } from "../providers/scm/port.js";
@@ -187,8 +188,16 @@ export class EffectsDispatcher {
       }
     }
 
+    // What we already know about THIS work item's issue. Present on every
+    // re-dispatch, absent on the first attempt and after the crash the marker
+    // lookup exists to recover from — which is exactly when the adapter needs to go
+    // looking rather than trust us.
+    const knownRef = await publications.getIssueRef(payload.workItemId);
+
     return this.#write(async () => {
-      const result = await this.scm.upsertIssue(toIssueUpsertInput(payload, withParentLink(payload.body, parentRef)));
+      const result = await this.scm.upsertIssue(
+        toIssueUpsertInput(payload, withParentLink(payload.body, parentRef), knownRef),
+      );
       await publications.recordIssue(payload.workItemId, payload.marker, {
         provider: "github",
         number: result.number,
@@ -238,8 +247,27 @@ export class EffectsDispatcher {
       // retry can bring them back.
       return { kind: "permanent", reason: `no work graph on record for report ${payload.reportId}` };
     }
+    const parentRef = state.parent.issue;
+    if (parentRef === null) {
+      // The claim query withholds this effect until the parent reference exists, so
+      // reaching here means the record vanished under us. "Not yet" is the honest
+      // answer; creating a second parent from the reconciliation effect is not.
+      return { kind: "transient", reason: `parent work item ${payload.parentWorkItemId} has no issue reference yet` };
+    }
+
     const body = `${payload.body}\n\n${publicationSection(state)}`;
-    return this.#write(() => this.scm.upsertIssue(toIssueUpsertInput(payload, body)));
+    return this.#write(async () => {
+      const result = await this.scm.upsertIssue(toIssueUpsertInput(payload, body, parentRef));
+      // The write result is recorded rather than discarded: the reconciliation is
+      // still a publication, and re-recording it keeps the durable reference in step
+      // with the provider's authoritative answer instead of quietly diverging.
+      await publications.recordIssue(payload.parentWorkItemId, payload.marker, {
+        provider: "github",
+        number: result.number,
+        externalId: result.id,
+        url: result.url,
+      });
+    });
   }
 
   /**
@@ -279,8 +307,19 @@ export class EffectsDispatcher {
     if (produces === null || !this.publications) return;
     try {
       if (produces.kind === "issue_reference") {
-        await this.publications.recordPublicationFailure(produces.workItemId, reason);
-        await this.#cascadeUnobtainableReference(produces.workItemId, reason);
+        // Only cascade when the failure was actually recorded. The store refuses it
+        // when the item IS published — a `recordIssue` that succeeded and a
+        // `markSent` that then threw reaches exactly that state — and cascading from
+        // a published parent would dead-letter every child effect, withholding the
+        // whole night's findings from humans for a reason that is not true.
+        const recorded = await this.publications.recordPublicationFailure(produces.workItemId, reason);
+        if (recorded) {
+          await this.#cascadeUnobtainableReference(produces.workItemId, reason);
+        } else {
+          console.error(
+            `outbox ${record.id}: ${produces.workItemId} is already published — recording no publication failure and not cascading`,
+          );
+        }
       } else {
         await this.publications.recordAttachmentFailure(produces.workItemId, reason);
       }
@@ -316,13 +355,19 @@ export class EffectsDispatcher {
       seen.add(current);
 
       const orphaned = await this.outbox.failDependentsAwaitingReference(current, reason);
-      for (const production of orphaned) {
+      // `issue_reference` productions first, deliberately: a child's publication row
+      // is what its attachment failure is recorded against, and `update ... returning`
+      // has no defined order, so relying on the store's row order would make the
+      // recorded reason scan-dependent.
+      for (const production of [...orphaned].sort((a, b) => rank(a.kind) - rank(b.kind))) {
         if (production.kind === "issue_reference") {
-          await publications.recordPublicationFailure(
+          const recorded = await publications.recordPublicationFailure(
             production.workItemId,
             `not published: ${current} could not be published (${reason})`,
           );
-          queue.push(production.workItemId);
+          // A dependent that turns out to be published already is not orphaned, so the
+          // walk stops there rather than failing its own descendants.
+          if (recorded) queue.push(production.workItemId);
         } else {
           await publications.recordAttachmentFailure(
             production.workItemId,
@@ -341,6 +386,11 @@ export class EffectsDispatcher {
       return { kind: "transient", reason: err instanceof Error ? err.message : String(err) };
     }
   }
+}
+
+/** Cascade order: a work item's publication row before anything keyed off it. */
+function rank(kind: EffectProduction["kind"]): number {
+  return kind === "issue_reference" ? 0 : 1;
 }
 
 /**
