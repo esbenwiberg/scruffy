@@ -3,13 +3,14 @@ import {
   defaultAnalyzers,
   defaultValidator,
   releaseOfflineEvidence,
+  releaseCampaignEvidence,
   RELEASE_STOP_CLASSES,
   RELEASE_SIGNOFF_CLASSES,
 } from "../../src/providers/registry.js";
 import { ReleaseCorpus } from "../../src/corpus/release-types.js";
 import { replayReleaseCorpus } from "../../src/corpus/release-replay.js";
 import { summarizeRelease } from "../../src/corpus/release-run.js";
-import { SEEDED_RELEASE_CORPUS } from "../../src/corpus/release-corpus.js";
+import { SEEDED_RELEASE_CORPUS, CAMPAIGN_RELEASE_CORPUS } from "../../src/corpus/release-corpus.js";
 import type { ReleasePolicy } from "../../src/domain/policy/types.js";
 
 const POLICY: ReleasePolicy = {
@@ -18,7 +19,14 @@ const POLICY: ReleasePolicy = {
   evidence: releaseOfflineEvidence(),
 };
 
+const CAMPAIGN_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseCampaignEvidence(),
+};
+
 const deps = { analyzers: defaultAnalyzers(), validator: defaultValidator(), policy: POLICY };
+const campaignDeps = { ...deps, campaignPolicy: CAMPAIGN_POLICY };
 
 describe("release corpus replay (pure aggregate-outcome measurement)", () => {
   it("the seeded release corpus conforms to the schema", () => {
@@ -86,6 +94,54 @@ describe("release corpus replay (pure aggregate-outcome measurement)", () => {
     );
     const r = await replayReleaseCorpus(tampered, deps);
     expect(r.regressions.map((x) => x.id)).toContain("release-stop-secret");
+  });
+
+  describe("campaign pressure cases (all lanes required)", () => {
+    it("the campaign corpus conforms to the schema and carries explicit fake evidence", () => {
+      expect(() => ReleaseCorpus.parse(CAMPAIGN_RELEASE_CORPUS)).not.toThrow();
+      // Every campaign case carries a campaign block — none is a bypassed lane.
+      expect(CAMPAIGN_RELEASE_CORPUS.every((c) => c.campaign !== undefined)).toBe(true);
+    });
+
+    it("never ships an incomplete campaign release case", async () => {
+      const r = await replayReleaseCorpus(CAMPAIGN_RELEASE_CORPUS, campaignDeps);
+      const byId = new Map(r.cases.map((c) => [c.id, c]));
+
+      // Every documented incompleteness — model risk, model failure, truncation,
+      // missing CI, non-success CI, and unsupported required evidence — must AVOID ship.
+      const incomplete = [
+        "release-campaign-model-risk",
+        "release-campaign-model-failure",
+        "release-campaign-truncation",
+        "release-campaign-ci-missing",
+        "release-campaign-ci-failure",
+        "release-campaign-llm-unsupported",
+      ];
+      for (const id of incomplete) {
+        expect(byId.get(id)!.outcome, `${id} must not ship`).not.toBe("ship");
+        expect(byId.get(id)!.outcome, `${id} escalates, never fabricates a stop`).toBe("sign-off-required");
+      }
+
+      // The safety instrument holds: nothing incomplete was shipped.
+      expect(r.metrics.unsafeShips).toBe(0);
+      // And a machinery abstain never masquerades as a pass.
+      expect(r.metrics.indeterminates).toBe(0);
+    });
+
+    it("ships only a complete clean campaign release case", async () => {
+      const r = await replayReleaseCorpus(CAMPAIGN_RELEASE_CORPUS, campaignDeps);
+      const shipped = r.cases.filter((c) => c.outcome === "ship").map((c) => c.id);
+      // Exactly the all-lanes-complete case ships; nothing incomplete does.
+      expect(shipped).toEqual(["release-campaign-clean"]);
+      const clean = r.cases.find((c) => c.id === "release-campaign-clean")!;
+      expect(clean.outcome).toBe("ship");
+      expect(clean.truthOutcome).toBe("ship");
+      expect(clean.correct).toBe(true);
+    });
+
+    it("throws when a campaign case is replayed without a campaign policy", async () => {
+      await expect(replayReleaseCorpus(CAMPAIGN_RELEASE_CORPUS, deps)).rejects.toThrow(/campaignPolicy/);
+    });
   });
 
   describe("summarizeRelease (pure PASS/FAIL emission)", () => {

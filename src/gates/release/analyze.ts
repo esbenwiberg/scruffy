@@ -82,9 +82,19 @@ export async function runReleaseAnalysis(
   // Range-level model risk assessment (a separate lane from the line-level
   // analyzers). Its risks/coverage escalate the decision but never stop it.
   const releaseRisk = await assessReleaseRisk(deps.releaseRisk, range, files);
-  const llm: ReleaseLlmLane | undefined = releaseRisk
-    ? { retainedRiskCount: releaseRisk.risks.length, complete: releaseRisk.gaps.length === 0 }
-    : undefined;
+  const llmDecl = deps.policy.evidence["release-risk-llm"];
+  const llmRequired = llmDecl.applicable && llmDecl.required;
+  let llm: ReleaseLlmLane | undefined;
+  if (releaseRisk) {
+    llm = { retainedRiskCount: releaseRisk.risks.length, complete: releaseRisk.gaps.length === 0 };
+  } else if (llmRequired) {
+    // Policy REQUIRES a range-level LLM assessment but none was produced (no analyst
+    // wired for this run). Unsupported required evidence is blind, and blind is not
+    // clean — escalate exactly like a missing required CI lane. It never stops.
+    llm = { retainedRiskCount: 0, complete: false };
+  }
+  // else: the lane is not required and no analyst ran — undefined, unchanged (the
+  // source-analysis-only behavior for a model-less run).
 
   // Candidate-CI lane: normalized check/status evidence for the EXACT candidate SHA,
   // evaluated against the policy-named required contexts. A read failure becomes a

@@ -99,6 +99,21 @@ export function releaseOfflineEvidence() {
 }
 
 /**
+ * Evidence declarations for the CONTROLLED CAMPAIGN corpus lane: all three lanes
+ * are applicable AND required — the honest posture the controlled first shadow
+ * integration demands. Campaign cases inject explicit fake LLM + candidate-CI
+ * evidence for these lanes; this is NOT a permissive default, and it deliberately
+ * does not mark any lane not-applicable to dodge coverage.
+ */
+export function releaseCampaignEvidence() {
+  return {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: true, required: true },
+    "candidate-ci": { applicable: true, required: true, requiredContexts: [...RELEASE_REQUIRED_CI_CONTEXTS] },
+  };
+}
+
+/**
  * The production policy derived from the registry's class lists — the single
  * place the class↔gate bindings become an EffectivePolicy, so entrypoints
  * (server, scripts) cannot drift from each other. The harness keeps its own
