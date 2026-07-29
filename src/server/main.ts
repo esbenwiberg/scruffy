@@ -18,6 +18,7 @@ import {
   defaultPolicy,
   defaultValidator,
 } from "../providers/registry.js";
+import { createModelProvider, resolveBackend } from "../providers/models/factory.js";
 import { createWebhookServer } from "./http.js";
 
 /**
@@ -37,6 +38,7 @@ import { createWebhookServer } from "./http.js";
  *   DATABASE_URL                    — Postgres (persistence default otherwise)
  *   SCRUFFY_SCM_READER              — gh-cli (default) | github-app (+ its env)
  *   SCRUFFY_SCM_WRITER              — gh-cli (default) | github-app (+ its env)
+ *   SCRUFFY_MODEL_BACKEND           — fake (default) | claude-cli | anthropic | azure (+ its env)
  *
  * Reads and writes are selected INDEPENDENTLY through the factory (ADR-0001:
  * separate credentials). The default stays gh-cli for both — a developer's own
@@ -85,6 +87,13 @@ async function main(): Promise<void> {
   // than mid-run. With both set to github-app the server runs fully
   // App-authenticated — no gh login or GH_TOKEN required.
   const { scmReader, scmWriter, readerBackend, writerBackend } = createScmBackends();
+  // Only wire a REAL model into remediation when SCRUFFY_MODEL_BACKEND explicitly
+  // asks for one. Leaving `model` undefined (the "fake"/unset default) makes the
+  // remediation boundary report an honest, explicit "unavailable" for any
+  // non-deterministic finding rather than silently routing production findings
+  // through the deterministic fake's canned non-answers.
+  const modelBackend = resolveBackend();
+  const model = modelBackend === "fake" ? undefined : await createModelProvider(modelBackend);
 
   const pool = createPool();
   await migrate(pool);
@@ -99,6 +108,7 @@ async function main(): Promise<void> {
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     fixers: defaultFixers(),
+    ...(model !== undefined ? { model } : {}),
     webhookSecret: secret,
   });
 
@@ -130,7 +140,7 @@ async function main(): Promise<void> {
 
   server.listen(port, () => {
     console.error(
-      `scruffy listening on :${port} (reader: ${readerBackend}, writer: ${writerBackend}, reconcile every ${reconcileIntervalMs}ms)`,
+      `scruffy listening on :${port} (reader: ${readerBackend}, writer: ${writerBackend}, model: ${modelBackend}, reconcile every ${reconcileIntervalMs}ms)`,
     );
   });
 

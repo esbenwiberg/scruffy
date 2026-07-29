@@ -6,6 +6,7 @@ import { PublicationStore } from "../persistence/publications.js";
 import { EffectsDispatcher } from "../effects/dispatcher.js";
 import { PoisonService } from "../gates/poison/service.js";
 import { NightlyService, type ReviewResult } from "../gates/nightly/service.js";
+import type { RemediationDeps } from "../gates/nightly/remediation.js";
 import { ReleaseService } from "../gates/release/service.js";
 import { Reconciler } from "./reconciler.js";
 import type { EvaluationRun } from "../domain/evaluation/types.js";
@@ -14,6 +15,7 @@ import { SubjectRevision } from "../domain/evidence/types.js";
 import type { Analyzer } from "../providers/analyzers/port.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "../providers/fixers/port.js";
+import type { ModelProvider } from "../providers/models/port.js";
 import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
 import { verifyAndParseWebhook } from "../ingest/webhook.js";
 
@@ -33,6 +35,15 @@ export interface ScruffyDeps {
   validator: Validator;
   /** Fixers indexed by defect class, for nightly fix-PR generation. */
   fixers: Record<string, Fixer>;
+  /**
+   * Absent = no LLM backend configured (`SCRUFFY_MODEL_BACKEND` unset/`fake`
+   * upstream of this constructor). Kept OUT of the nightly drive loop in this
+   * brief — it is exposed here so a later brief can wire
+   * `gates/nightly/remediation.ts`'s `attemptRemediations` into the nightly
+   * pipeline via `remediationDeps()` below without touching this interface
+   * again.
+   */
+  model?: ModelProvider;
   webhookSecret: string;
   /** Optional overrides for the poison analysis lease and retry bound. */
   leaseMs?: number;
@@ -88,6 +99,23 @@ export class Scruffy {
   /** One reconciliation pass; returns runs acted on. */
   async reconcile(limit = 50): Promise<number> {
     return this.reconciler.reconcileOnce(limit);
+  }
+
+  /**
+   * Assembles `gates/nightly/remediation.ts`'s `RemediationDeps` from this
+   * instance's own wiring, so a caller (a later brief's service code, or a
+   * script) never has to re-derive fixers/model/scmReader/policy by hand.
+   * `model` is undefined whenever no LLM backend was configured — the
+   * remediation boundary treats that as "unavailable", never a silent
+   * "no fix needed" (see `attemptRemediation`'s `no_fixer_no_model` reason).
+   */
+  remediationDeps(): RemediationDeps {
+    return {
+      fixers: this.deps.fixers,
+      ...(this.deps.model !== undefined ? { model: this.deps.model } : {}),
+      scmReader: this.deps.scmReader,
+      policy: this.deps.policy.remediation,
+    };
   }
 
   /**
