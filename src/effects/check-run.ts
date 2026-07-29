@@ -95,18 +95,42 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
   // model risk is never rendered as "0 findings need human review".
   const riskCount = report.risks.length;
 
+  // A lane holds the release when it is applicable but not clean. `complete` and
+  // `not-applicable` are the only clean states; `partial`/`failed` are gaps. These
+  // are what turns a zero-finding sign-off into an HONEST title — the actual reason
+  // is missing/incomplete evidence, never "0 findings need human review".
+  const incompleteLanes = report.evidenceLanes.filter(
+    (lane) => lane.applicable && lane.status !== "complete" && lane.status !== "not-applicable",
+  );
+  // Coverage is clean only when EVERY applicable lane is complete. A ship over an
+  // incomplete lane must never be titled "clean" (defence-in-depth: the decision
+  // kernel already blocks ship on an incomplete required lane).
+  const coverageClean = incompleteLanes.length === 0;
+
   let title: string;
   switch (decision.outcome) {
     case "stop":
       title = `Release gate: STOP (${stopped} confirmed blocker${stopped === 1 ? "" : "s"})`;
       break;
     case "sign-off-required": {
-      const riskClause = riskCount > 0 ? `, ${riskCount} model risk${riskCount === 1 ? "" : "s"}` : "";
-      title = `Release gate: sign-off required (${escalated} finding${escalated === 1 ? "" : "s"}${riskClause} need human review)`;
+      // Name EVERY holding reason — findings, model risks, AND incomplete lanes —
+      // so a coverage gap with zero findings shows the gap, not "0 findings".
+      const holds: string[] = [];
+      if (escalated > 0) holds.push(`${escalated} finding${escalated === 1 ? "" : "s"}`);
+      if (riskCount > 0) holds.push(`${riskCount} model risk${riskCount === 1 ? "" : "s"}`);
+      for (const lane of incompleteLanes) holds.push(`${lane.laneId} ${lane.status}`);
+      const detail = holds.length > 0 ? holds.join(", ") : "incomplete evidence";
+      title = `Release gate: sign-off required (${detail} — human review)`;
       break;
     }
     case "ship":
-      title = reviewed === 0 ? "Release gate: ship (clean)" : `Release gate: ship (${reviewed} finding${reviewed === 1 ? "" : "s"} reviewed, none holding)`;
+      // Only call it clean when coverage is actually clean. A reviewed-but-cleared
+      // range says how many were reviewed; incomplete coverage is never "clean".
+      title = coverageClean
+        ? reviewed === 0
+          ? "Release gate: ship (clean)"
+          : `Release gate: ship (${reviewed} finding${reviewed === 1 ? "" : "s"} reviewed, none holding)`
+        : `Release gate: ship (coverage incomplete)`;
       break;
     case "indeterminate":
       title = "Release gate: abstained (analysis failed)";
@@ -123,7 +147,8 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
   // Coverage BEFORE finding totals: a clean count over incomplete coverage is not
   // a clean bill of health. Surface every lane's status and its explicit gaps.
   const laneLines = report.evidenceLanes.flatMap((lane) => [
-    `- ${lane.laneId}: ${lane.status}${lane.required ? " (required)" : ""}`,
+    `- ${lane.laneId}: ${lane.status}` +
+      (lane.required ? " (required)" : lane.applicable ? "" : " (not applicable)"),
     ...lane.gaps.map((g) => `    gap: ${g}`),
   ]);
   // A concise summary omits bulky cleared evidence but must preserve every
@@ -132,13 +157,18 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
   const riskLines = report.risks.map(
     (r) => `- [risk] ${r.category}: ${r.scenario} (${r.citations.map((c) => `${c.path}:${c.line}`).join(", ")})`,
   );
+  const reasons = decision.reasons.length > 0 ? decision.reasons.join(", ") : "(none)";
   const summary = [
     `candidate: ${report.subject.candidateSha}`,
+    `previous release: ${report.subject.previousReleaseSha ?? "(first release)"}`,
     `report: ${report.reportId} (v${report.reportVersion}, policy ${report.policyVersion})`,
-    `outcome: ${decision.outcome}.`,
+    `outcome: ${decision.outcome} — reasons: ${reasons}.`,
     "",
+    // Coverage FIRST — before any finding total — so incomplete evidence can never
+    // hide behind a clean-looking finding count.
     "coverage:",
     ...laneLines,
+    ...(incompleteLanes.length ? ["", `holding gaps: ${incompleteLanes.map((l) => l.laneId).join(", ")} not complete.`] : []),
     "",
     `findings — stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
     ...(findingLines.length ? ["", ...findingLines] : []),
