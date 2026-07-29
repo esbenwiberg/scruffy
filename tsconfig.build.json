@@ -1,0 +1,12 @@
+{
+  // Build/emit config. Compiles only `src` into a flat `dist/` — `rootDir: "src"`
+  // avoids `dist/src/**` nesting, and the src-only include keeps `test/` and
+  // `scripts/` out of the published artifact. Typecheck deliberately uses the
+  // broad `tsconfig.json` instead, so test and script sources stay covered.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "test", "scripts"]
+}
