@@ -66,22 +66,6 @@ export const NightlyPolicy = z
 export type NightlyPolicy = z.infer<typeof NightlyPolicy>;
 
 /**
- * Release-gate policy. The release gate is the LAST gate before publication —
- * it has no deeper gate to escalate to, only a human. Its decision over the whole
- * (prev-release, candidate] range is one aggregate outcome:
- * `ship | sign-off-required | stop`. Policy carves the finding space by
- * REVERSIBILITY:
- *  - `stopDefectClasses`: irreversible catastrophes (a burned secret, lost data).
- *    A CONFIRMED one hard-stops the release. Unconfirmed → human sign-off, never a
- *    fabricated stop.
- *  - `signoffDefectClasses`: serious but human-adjudicable regressions. Any
- *    surfaced (non-refuted) one forces sign-off-required.
- * A class in neither list is release-irrelevant. The lists MUST be disjoint: a
- * class in both is a mis-authored policy, so the schema rejects it at the boundary
- * rather than accepting an ambiguous version. The kernel's `stop`-wins guard for
- * an overlap is then unreachable defence-in-depth, not the authoritative resolver.
- */
-/**
  * The `scruffy/release` check is THIS gate's own advisory status. A release
  * policy that named it as a required candidate-CI context would make the gate
  * depend on itself (a deadlock/false-signal), so it is rejected at the boundary.
@@ -188,6 +172,22 @@ export const ReleaseEvidencePolicy = z
   .strict();
 export type ReleaseEvidencePolicy = z.infer<typeof ReleaseEvidencePolicy>;
 
+/**
+ * Release-gate policy. The release gate is the LAST gate before publication —
+ * it has no deeper gate to escalate to, only a human. Its decision over the whole
+ * (prev-release, candidate] range is one aggregate outcome:
+ * `ship | sign-off-required | stop`. Policy carves the finding space by
+ * REVERSIBILITY:
+ *  - `stopDefectClasses`: irreversible catastrophes (a burned secret, lost data).
+ *    A CONFIRMED one hard-stops the release. Unconfirmed → human sign-off, never a
+ *    fabricated stop.
+ *  - `signoffDefectClasses`: serious but human-adjudicable regressions. Any
+ *    surfaced (non-refuted) one forces sign-off-required.
+ * A class in neither list is release-irrelevant. The lists MUST be disjoint: a
+ * class in both is a mis-authored policy, so the schema rejects it at the boundary
+ * rather than accepting an ambiguous version. The kernel's `stop`-wins guard for
+ * an overlap is then unreachable defence-in-depth, not the authoritative resolver.
+ */
 export const ReleasePolicy = z
   .object({
     /** Confirmed finding of one of these hard-stops the release (irreversible harm). */
