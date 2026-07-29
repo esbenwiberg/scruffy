@@ -388,10 +388,8 @@ const CLEAN_ANALYST: ReleaseRiskAnalyst = {
 };
 
 describeDb("release report/check congruence over all required lanes", () => {
-  afterEach(async () => {
-    await h.pool.end();
-  });
-
+  // NOTE: the file-level `afterEach` already closes `h.pool`; a second one here
+  // would end the same pool twice.
   it("keeps report decision and advisory check congruent", async () => {
     h = await bootHarness({ policy: ALL_LANES_REQUIRED_POLICY, releaseRisk: CLEAN_ANALYST });
 
