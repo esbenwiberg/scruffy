@@ -13,6 +13,8 @@ import {
 import { defaultAnalyzers, defaultValidator, defaultFixers, defaultPolicy } from "../src/providers/registry.js";
 import { withPool } from "./review-pr.js";
 import { isSafeRef, resolveBranchHead } from "./nightly-review.js";
+import { parseReleaseReport, type ReleaseRiskReport } from "../src/domain/release/report.js";
+import { CheckRunPayload } from "../src/effects/check-run.js";
 
 /**
  * `npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]` —
@@ -69,6 +71,118 @@ function usage(): never {
   process.exit(2);
 }
 
+/** The applicable lanes that are NOT in a clean state — the operator's holding gaps. */
+function incompleteLanes(report: ReleaseRiskReport) {
+  return report.evidenceLanes.filter(
+    (lane) => lane.applicable && lane.status !== "complete" && lane.status !== "not-applicable",
+  );
+}
+
+/**
+ * Render the COMPLETE persisted report for a human operator. Pure over the parsed
+ * report so it is unit-testable without a database (mirrors summarizeRelease). This
+ * is the single rendering source — it reads the persisted `ReleaseRiskReport`, never
+ * a reconstructed decision summary — so what the operator sees is exactly what was
+ * committed and (via the same report) posted to GitHub. Coverage is printed BEFORE
+ * finding totals so incomplete evidence can never hide behind a clean finding count.
+ */
+export function formatReleaseReport(report: ReleaseRiskReport): string[] {
+  const d = report.decision;
+  const lines: string[] = [];
+  lines.push("Release risk report");
+  lines.push(`  report    : ${report.reportId} (v${report.reportVersion})`);
+  lines.push(`  policy    : ${report.policyVersion}`);
+  lines.push(`  repository: ${report.subject.repository}`);
+  lines.push(`  candidate : ${report.subject.candidateSha}`);
+  lines.push(`  previous  : ${report.subject.previousReleaseSha ?? "(first release — candidate's own changes)"}`);
+  lines.push(`  generated : ${report.generatedAt}`);
+  lines.push(`  outcome   : ${d.outcome}${d.reasons.length ? `  (${d.reasons.join(", ")})` : ""}`);
+
+  // Coverage FIRST — every declared lane with its status, required/applicable
+  // posture, immutable subject SHA, observations and explicit gaps.
+  lines.push("");
+  lines.push("Coverage (evidence lanes):");
+  for (const lane of report.evidenceLanes) {
+    const posture = lane.required ? "required" : lane.applicable ? "optional" : "not-applicable";
+    lines.push(`  - ${lane.laneId}: ${lane.status} [${posture}] @ ${lane.subjectSha}`);
+    for (const obs of lane.observations) lines.push(`      · ${obs}`);
+    for (const gap of lane.gaps) lines.push(`      gap: ${gap}`);
+  }
+  const missing = incompleteLanes(report);
+  if (missing.length > 0) {
+    lines.push(`  MISSING EVIDENCE: ${missing.map((l) => `${l.laneId} (${l.status})`).join(", ")}`);
+  }
+
+  lines.push("");
+  lines.push(`Change summary: ${report.changeSummary || "(none provided)"}`);
+
+  // Unresolved model risks — every one, with real citations (never dropped).
+  lines.push("");
+  if (report.risks.length === 0) {
+    lines.push("Unresolved model risks: none");
+  } else {
+    lines.push(`Unresolved model risks (${report.risks.length}):`);
+    for (const r of report.risks) {
+      lines.push(`  - [${r.category}] ${r.scenario}`);
+      lines.push(`      surface: ${r.affectedSurface} — impact: ${r.impact}`);
+      lines.push(`      cites: ${r.citations.map((c) => `${c.path}:${c.line}`).join(", ")}`);
+    }
+  }
+
+  // Deterministic findings — stopping/escalating dispositions before cleared counts.
+  lines.push("");
+  const { stopped, escalated, cleared, notRelevant } = d.summary;
+  lines.push(`Findings — stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}`);
+  for (const x of d.dispositions.filter((x) => x.effect === "stops" || x.effect === "escalates")) {
+    lines.push(`  - [${x.effect}] ${x.defectClass} at ${x.region.path}:${x.region.startLine} (${x.reason})`);
+  }
+
+  lines.push("");
+  lines.push("Shadow mode: the scruffy/release check is advisory and never blocks publication.");
+  return lines;
+}
+
+/**
+ * Verify the persisted report and the recorded advisory check AGREE, and make any
+ * mismatch loud for the operator. The check is rendered from the report, so a
+ * mismatch means an integrity fault, not a policy call — surface it, never hide it.
+ */
+export function checkReportCongruence(report: ReleaseRiskReport, check: CheckRunPayload): { agree: boolean; lines: string[] } {
+  const problems: string[] = [];
+  if (!check.summary.includes(report.reportId)) problems.push("advisory check is missing the report id");
+  if (!check.summary.includes(report.subject.candidateSha)) problems.push("advisory check is missing the candidate SHA");
+  if (!check.summary.includes(report.decision.outcome)) problems.push(`advisory check is missing the outcome '${report.decision.outcome}'`);
+  for (const lane of report.evidenceLanes) {
+    if (!check.summary.includes(`${lane.laneId}: ${lane.status}`)) {
+      problems.push(`advisory check is missing coverage for ${lane.laneId} (${lane.status})`);
+    }
+  }
+  if (problems.length === 0) {
+    return { agree: true, lines: ["Report/check agreement: OK — candidate, report id, coverage and outcome congruent."] };
+  }
+  return { agree: false, lines: ["Report/check agreement: MISMATCH", ...problems.map((p) => `  ! ${p}`)] };
+}
+
+/**
+ * Operator runbook for a controlled live GitHub shadow run. This command posts an
+ * ADVISORY, non-required check only — it never publishes a release, never adds a
+ * required status, and never blocks. A live shadow run requires operator GitHub
+ * credentials against a controlled opted-in repository and is NOT executed from CI
+ * or a pod; it is a deliberate operator action.
+ */
+export const SHADOW_RUNBOOK: string[] = [
+  "",
+  "── Operator runbook: controlled live GitHub shadow run ─────────────────────",
+  "  1. Ensure local Postgres is up:            npm run db:up",
+  "  2. Authenticate gh against the controlled opted-in repo (read + write scope).",
+  "  3. Post the advisory (shadow) release check for a candidate:",
+  "       npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]",
+  "     (App-native check-run: SCRUFFY_SCM_WRITER=github-app; else a commit status.)",
+  "  This is ADVISORY only: no release is published, no required check is added, and",
+  "  the scruffy/release check never blocks. Run it by hand against the controlled",
+  "  repository — it is not wired into CI or triggered automatically.",
+];
+
 async function main(): Promise<void> {
   const parsed = parseReleaseArgs(process.argv.slice(2));
   if (!parsed) usage();
@@ -108,30 +222,42 @@ async function main(): Promise<void> {
     const run = await scruffy.runRelease({ repository: repo, candidate: candidateSha, prevRelease: prevSha });
     const flushed = await scruffy.flushEffects();
 
-    const { rows } = await pool.query<{ outcome: string; reasons: unknown; dispositions: unknown; summary: unknown }>(
-      "select outcome, reasons, dispositions, summary from release_decisions where run_id = $1",
+    console.log("");
+    console.log(`Run state : ${run.state}`);
+
+    // Parse the ONE persisted report and print it in full — never reconstruct a
+    // decision summary from release_decisions. The report is the single rendering
+    // source, so what the operator reads is exactly what was committed and posted.
+    const { rows: reportRows } = await pool.query<{ report: unknown }>(
+      "select report from release_reports where run_id = $1",
       [run.id],
     );
-    const decision = rows[0];
-    const summary = decision?.summary as
-      | { stopped?: number; escalated?: number; cleared?: number; notRelevant?: number }
-      | undefined;
+    const rawReport = reportRows[0]?.report;
+    if (rawReport === undefined) {
+      console.log("No persisted report for this run — analysis did not reach a terminal report.");
+    } else {
+      // Never trust the blob: re-validate the stored report through the schema.
+      const report = parseReleaseReport(rawReport);
+      console.log("");
+      for (const line of formatReleaseReport(report)) console.log(line);
+
+      // Report/check agreement, from the persisted outbox effect (what was posted).
+      const { rows: obxRows } = await pool.query<{ payload: unknown }>(
+        "select payload from outbox where run_id = $1 and effect_type = 'check_run'",
+        [run.id],
+      );
+      const rawPayload = obxRows[0]?.payload;
+      console.log("");
+      if (rawPayload === undefined) {
+        console.log("Report/check agreement: no advisory check effect recorded for this run.");
+      } else {
+        const { agree, lines } = checkReportCongruence(report, CheckRunPayload.parse(rawPayload));
+        for (const line of lines) console.log(line);
+        if (!agree) process.exitCode = 1; // a mismatch is an integrity fault, not advisory
+      }
+    }
 
     console.log("");
-    console.log(`Range     : ${prevSha ? prevSha.slice(0, 12) : "(first release)"} … ${candidateSha.slice(0, 12)}`);
-    console.log(`Run state : ${run.state}`);
-    if (decision) {
-      const reasons = Array.isArray(decision.reasons) ? decision.reasons.join(", ") : "";
-      console.log(`Outcome   : ${decision.outcome}${reasons ? `  (${reasons})` : ""}`);
-      if (summary) {
-        console.log(
-          `Findings  : stopped ${summary.stopped ?? 0}, escalated ${summary.escalated ?? 0}, ` +
-            `cleared ${summary.cleared ?? 0}, not-relevant ${summary.notRelevant ?? 0}`,
-        );
-      }
-    } else if (run.state === "indeterminate") {
-      console.log("Outcome   : indeterminate — analysis could not run (abstained, no fabricated ship/stop).");
-    }
     console.log(`Effects   : ${flushed} dispatched to GitHub (writer: ${writerBackend})`);
 
     // Read the shadow check back so we print exactly what landed on the candidate.
@@ -160,6 +286,8 @@ async function main(): Promise<void> {
       console.error("\nWARNING: no effect was dispatched — the shadow check may not have been posted. Check writer access.");
       process.exitCode = 1;
     }
+
+    for (const line of SHADOW_RUNBOOK) console.log(line);
   });
 }
 
