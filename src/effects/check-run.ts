@@ -2,7 +2,7 @@ import { z } from "zod";
 import { SubjectRevision } from "../domain/evidence/types.js";
 import type { CheckConclusion, CheckRunInput } from "../providers/scm/port.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
-import type { NightlyDecision } from "../gates/nightly/decision.js";
+import { requiredCoverageGaps, type NightlyReport } from "../domain/findings/work-graph.js";
 import type { ReleaseRiskReport } from "../domain/release/report.js";
 
 export const CHECK_NAME = "scruffy/poison";
@@ -45,26 +45,49 @@ export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckCo
 }
 
 /**
- * Summarize a nightly decision for its check run. Nightly NEVER blocks, so the
- * conclusion is always `neutral` — it is a report, not a required gate. The
- * title/summary make the disposition counts visible without opening the run.
+ * Summarize a nightly REPORT for its check run. Nightly NEVER blocks, so the
+ * conclusion is always `neutral` — it is a report, not a required gate.
+ *
+ * The one thing this function must never do is call a run clean that was not
+ * completely reviewed. A quiet analyzer that could not look produces the same
+ * empty finding list as a genuinely clean range, so the title is driven by
+ * coverage FIRST and finding counts second; the gaps are then named in the body.
+ * Rendering from the durable report (rather than the in-flight decision) keeps the
+ * check and the persisted truth in agreement by construction.
  */
-export function nightlyToCheck(decision: NightlyDecision): { conclusion: CheckConclusion; title: string; summary: string } {
-  const { reported, proposedFixes, suppressed } = decision.summary;
-  const surfaced = reported + proposedFixes;
-  const title =
-    surfaced === 0
-      ? "Nightly review: clean"
-      : `Nightly review: ${surfaced} finding${surfaced === 1 ? "" : "s"}` +
-        (proposedFixes > 0 ? ` (${proposedFixes} fix${proposedFixes === 1 ? "" : "es"} proposed)` : "");
+export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
+  const { surfaced, suppressed, proposals } = report.summary;
+  const gaps = requiredCoverageGaps(report.coverage);
+  const fixes = proposals > 0 ? ` (${proposals} fix${proposals === 1 ? "" : "es"} proposed)` : "";
 
-  const lines = decision.dispositions
-    .filter((d) => d.disposition !== "suppress")
-    .map((d) => `- [${d.disposition}] ${d.defectClass} at ${d.region.path}:${d.region.startLine} (${d.reason})`);
+  const title = !report.requiredCoverageComplete
+    ? `Nightly review: INCOMPLETE — ${gaps.length} coverage gap${gaps.length === 1 ? "" : "s"}, ` +
+      `${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`
+    : surfaced === 0
+      ? "Nightly review: clean"
+      : `Nightly review: ${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`;
+
+  const findingLines = report.findings
+    .filter((f) => f.visibility === "surfaced")
+    .map(
+      (f) =>
+        `- [${f.remediation?.state ?? "none"}] ${f.defectClass} at ${f.region.path}:${f.region.startLine} (${f.visibilityReason})`,
+    );
+  const gapLines = gaps.map((g) => `- [coverage] ${g.analyzerId}: ${g.code} — ${g.detail || "no detail reported"}`);
+
   const summary = [
-    `reported: ${reported}, proposed fixes: ${proposedFixes}, suppressed: ${suppressed}.`,
-    ...(lines.length ? ["", ...lines] : []),
-    ...(proposedFixes > 0 ? ["", "Fix PR generation is a later slice; fixes are recorded, not yet opened."] : []),
+    `surfaced: ${surfaced}, proposed fixes: ${proposals}, suppressed (audit only): ${suppressed}, required coverage gaps: ${gaps.length}.`,
+    ...(findingLines.length ? ["", ...findingLines] : []),
+    ...(gapLines.length
+      ? [
+          "",
+          "Coverage was INCOMPLETE — this is not a clean bill of health, and the reviewed range is held open until every gap is closed:",
+          ...gapLines,
+        ]
+      : []),
+    ...(proposals > 0
+      ? ["", "Proposed fixes open as pull requests for human review and are never auto-merged; a green CI run is not proof of correctness."]
+      : []),
   ].join("\n");
 
   return { conclusion: "neutral", title, summary };

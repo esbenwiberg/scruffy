@@ -40,7 +40,9 @@ export const NIGHTLY_REPORTABLE_CLASSES = [...POISON_BLOCKABLE_CLASSES, ...MODEL
 /**
  * Subset eligible for an automated fix PR once validated + deterministically
  * supported. Kept narrow: a disabled TLS-verification flag is a mechanical,
- * low-ambiguity revert. Fix *generation* is a later slice.
+ * low-ambiguity revert. A finding outside this list still earns a remediation
+ * ATTEMPT — the nightly report records one for every surfaced finding — it just
+ * has no deterministic fixer to serve it.
  */
 export const NIGHTLY_FIXABLE_CLASSES = ["disabled-tls-verification"] as const;
 

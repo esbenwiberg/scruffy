@@ -5,6 +5,16 @@ import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
 import type { ReleaseDecision } from "../gates/release/decision.js";
 import type { ReleaseRiskReport } from "../domain/release/report.js";
+import { findingKey } from "../domain/findings/identity.js";
+import {
+  isCompleteReview,
+  type NightlyReport,
+  type NightlyWorkGraph,
+  type NightlyWorkItem,
+  type ProposalCiState,
+  type ProposalDelivery,
+  type ProposalMergeState,
+} from "../domain/findings/work-graph.js";
 import { withTransaction, type Pool, type PoolClient } from "./db.js";
 
 /**
@@ -52,11 +62,34 @@ function toRun(row: RunRow): EvaluationRun {
   };
 }
 
-/** The durable review watermark for a (repository, branch). */
+/**
+ * The durable COMPLETE-review watermark for a (repository, branch): the last head
+ * whose range was reviewed with no required coverage gap. Absent (null) when the
+ * branch has never been completely reviewed, even if terminal attempts exist.
+ */
 export interface ReviewWatermark {
   repository: string;
   branch: string;
   lastReviewedHead: string;
+}
+
+/** Both heads on record for a branch. `lastAttemptedHead` is audit only. */
+export interface ReviewProgress {
+  repository: string;
+  branch: string;
+  /** Last COMPLETELY reviewed head, or null if there has never been one. */
+  lastCompleteHead: string | null;
+  /** Last head a terminal attempt was committed for, or null. */
+  lastAttemptedHead: string | null;
+}
+
+/** What a persisted nightly report says about its own completeness. */
+export interface PersistedReportState {
+  reportId: string;
+  runId: string;
+  headSha: string;
+  baseSha: string | null;
+  requiredCoverageComplete: boolean;
 }
 
 export interface OutboxEffect {
@@ -65,7 +98,46 @@ export interface OutboxEffect {
   payload: unknown;
 }
 
-export class RunStore {
+/**
+ * Everything the nightly gate needs from durable storage. Extracted as a port so
+ * the gate is testable against an in-memory double without a database, while
+ * `RunStore` remains the single production implementation (ADR 0003 keeps
+ * Postgres authoritative — this interface adds no second source of truth).
+ */
+export interface NightlyRunStore {
+  getWatermark(repository: string, branch: string): Promise<ReviewWatermark | null>;
+  ensureNightlyRun(
+    head: SubjectRevision,
+    branch: string,
+    baseSha: string | null,
+    policyVersion: string,
+  ): Promise<EvaluationRun>;
+  getRun(id: string): Promise<EvaluationRun | null>;
+  transition(runId: string, from: RunState, to: RunState, reason: string): Promise<boolean>;
+  claimForAnalysis(runId: string, owner: string, leaseMs: number): Promise<string | null>;
+  renewLease(runId: string, leaseId: string, leaseMs: number): Promise<boolean>;
+  latestNightlyReportForRun(runId: string): Promise<PersistedReportState | null>;
+  commitNightlyDecision(params: CommitNightlyDecisionParams): Promise<boolean>;
+}
+
+export interface CommitNightlyDecisionParams {
+  runId: string;
+  from: RunState;
+  to: RunState;
+  reason: string;
+  /** The durable report: identity, coverage, and the whole finding graph. */
+  report: NightlyReport;
+  /** The intended human-visible work. Parent null for a complete, clean run. */
+  workGraph: NightlyWorkGraph;
+  decision: NightlyDecision;
+  findings: Finding[];
+  /** Summary check plus any fix-PR effects; enqueued in the same transaction. */
+  effects: OutboxEffect[];
+  /** Fencing token from the claim; the commit only lands if the lease still matches. */
+  fenceLease?: string;
+}
+
+export class RunStore implements NightlyRunStore {
   constructor(
     private readonly pool: Pool,
     private readonly clock: Clock,
@@ -147,14 +219,107 @@ export class RunStore {
     return toRun(result.rows[0]!);
   }
 
-  /** The current review watermark for a (repository, branch), or null if never reviewed. */
+  /**
+   * The COMPLETE-review watermark for a (repository, branch), or null when the
+   * branch has never been completely reviewed. A branch with attempts but no
+   * complete review reads as null here on purpose: the next range must start from
+   * the last head we actually finished reviewing, never from one we merely tried.
+   */
   async getWatermark(repository: string, branch: string): Promise<ReviewWatermark | null> {
-    const result = await this.pool.query<{ repository: string; branch: string; last_reviewed_head: string }>(
+    const result = await this.pool.query<{ repository: string; branch: string; last_reviewed_head: string | null }>(
       `select repository, branch, last_reviewed_head from review_watermarks where repository = $1 and branch = $2`,
       [repository, branch],
     );
     const row = result.rows[0];
-    return row ? { repository: row.repository, branch: row.branch, lastReviewedHead: row.last_reviewed_head } : null;
+    if (!row || row.last_reviewed_head === null) return null;
+    return { repository: row.repository, branch: row.branch, lastReviewedHead: row.last_reviewed_head };
+  }
+
+  /** Both the complete and the attempted head for a branch, for audit/ops views. */
+  async getReviewProgress(repository: string, branch: string): Promise<ReviewProgress | null> {
+    const result = await this.pool.query<{
+      repository: string;
+      branch: string;
+      last_reviewed_head: string | null;
+      last_attempted_head: string | null;
+    }>(
+      `select repository, branch, last_reviewed_head, last_attempted_head
+         from review_watermarks where repository = $1 and branch = $2`,
+      [repository, branch],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      repository: row.repository,
+      branch: row.branch,
+      lastCompleteHead: row.last_reviewed_head,
+      lastAttemptedHead: row.last_attempted_head,
+    };
+  }
+
+  /**
+   * The most recent persisted report for a run. Used to decide whether a terminal
+   * run may be retried: a run whose report did not completely review its range is
+   * still owed a review, and a bounded successor attempt is legitimate.
+   */
+  async latestNightlyReportForRun(runId: string): Promise<PersistedReportState | null> {
+    const result = await this.pool.query<{
+      report_id: string;
+      run_id: string;
+      head_sha: string;
+      base_sha: string | null;
+      required_coverage_complete: boolean;
+    }>(
+      `select report_id, run_id, head_sha, base_sha, required_coverage_complete
+         from nightly_reports where run_id = $1 order by created_at desc, report_id limit 1`,
+      [runId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      reportId: row.report_id,
+      runId: row.run_id,
+      headSha: row.head_sha,
+      baseSha: row.base_sha,
+      requiredCoverageComplete: row.required_coverage_complete,
+    };
+  }
+
+  /** The persisted work items for a report, parent first then children by id. */
+  async getWorkItems(reportId: string): Promise<NightlyWorkItem[]> {
+    const result = await this.pool.query<{
+      work_item_id: string;
+      report_id: string;
+      kind: NightlyWorkItem["kind"];
+      parent_work_item_id: string | null;
+      occurrence_id: string | null;
+      coverage_analyzer_id: string | null;
+      coverage_gap_code: string | null;
+      title: string;
+      body: string;
+      resolution: NightlyWorkItem["resolution"];
+    }>(
+      `select work_item_id, report_id, kind, parent_work_item_id, occurrence_id,
+              coverage_analyzer_id, coverage_gap_code, title, body, resolution
+         from nightly_work_items
+        where report_id = $1
+        order by (kind = 'nightly_run') desc, work_item_id`,
+      [reportId],
+    );
+    return result.rows.map((row) => ({
+      workItemId: row.work_item_id,
+      reportId: row.report_id,
+      kind: row.kind,
+      parentWorkItemId: row.parent_work_item_id,
+      occurrenceId: row.occurrence_id,
+      coverageGap:
+        row.coverage_analyzer_id !== null && row.coverage_gap_code !== null
+          ? { analyzerId: row.coverage_analyzer_id, code: row.coverage_gap_code }
+          : null,
+      title: row.title,
+      body: row.body,
+      resolution: row.resolution,
+    }));
   }
 
   async getRun(id: string): Promise<EvaluationRun | null> {
@@ -314,50 +479,62 @@ export class RunStore {
 
   /**
    * Atomically, for a nightly run: move analyzing -> terminal, record the
-   * decision and its findings, enqueue the outbox effect, and — only when the run
-   * actually `decided` — advance the review watermark.
+   * decision, the durable report (coverage included), the deduplicated finding
+   * graph, the intended work items and fix proposals, enqueue the outbox effects,
+   * and — only when the run `decided` AND completely reviewed its range — advance
+   * the complete-review watermark. All-or-nothing: there is no interleaving where
+   * an external effect exists without the report it came from, and no interleaving
+   * where the watermark claims a range whose report was not written.
    *
-   * The watermark advance is GUARDED on the base we reviewed
+   * The complete advance is GUARDED on the base we reviewed
    * (`last_reviewed_head is not distinct from base`, null-safe for a first review):
    *  - it advances only if the watermark still points at our base, so it never
    *    regresses and an out-of-order/older head cannot clobber a newer watermark;
-   *  - a stale advance simply touches 0 rows — the decision + effect still commit.
-   * The decision does NOT advance the watermark on `indeterminate`: a range we
-   * could not review must be re-reviewed later, so the watermark stays put.
+   *  - a stale advance simply touches 0 rows — the report + effects still commit.
+   *
+   * Two things deliberately do NOT advance it:
+   *  - `indeterminate`: a range we could not review must be re-reviewed later;
+   *  - a `decided` run with any REQUIRED coverage gap. This is the honesty fix the
+   *    whole slice exists for — a watermark that steps over change no analyzer
+   *    looked at is a claim no later run can ever detect as false.
+   * The attempted head is recorded either way, so the attempt is auditable without
+   * ever being mistaken for a review.
+   *
+   * Re-committing the SAME report identity is idempotent: reports/findings/work
+   * items/proposals are keyed by their stable ids, so a retry after a crashed
+   * publication updates the analysis facts in place and creates no duplicate work.
+   * Human-owned lifecycle columns (`resolution`, proposal delivery/CI/merge state)
+   * are never rewritten backwards by a re-commit.
    */
-  async commitNightlyDecision(params: {
-    runId: string;
-    from: RunState;
-    to: RunState;
-    reason: string;
-    repository: string;
-    branch: string;
-    baseSha: string | null;
-    headSha: string;
-    decision: NightlyDecision;
-    findings: Finding[];
-    /** Summary check plus any fix-PR effects; enqueued in the same transaction. */
-    effects: OutboxEffect[];
-    /** Fencing token from the claim; the commit only lands if the lease still matches. */
-    fenceLease?: string;
-  }): Promise<boolean> {
+  async commitNightlyDecision(params: CommitNightlyDecisionParams): Promise<boolean> {
+    const report = params.report;
+    const identity = report.identity;
     return withTransaction(this.pool, async (client) => {
       const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
       if (!applied) return false;
 
       const now = this.clock.now();
       await client.query(
-        `insert into nightly_decisions (run_id, dispositions, findings, summary, decided_at)
-         values ($1, $2, $3, $4, $5)
-         on conflict (run_id) do nothing`,
+        `insert into nightly_decisions (run_id, dispositions, findings, summary, coverage, decided_at)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (run_id) do update
+           set dispositions = excluded.dispositions,
+               findings     = excluded.findings,
+               summary      = excluded.summary,
+               coverage     = excluded.coverage,
+               decided_at   = excluded.decided_at`,
         [
           params.runId,
           JSON.stringify(params.decision.dispositions),
           JSON.stringify(params.findings),
           JSON.stringify(params.decision.summary),
+          JSON.stringify(params.decision.coverage),
           now,
         ],
       );
+
+      await this.#writeReport(client, params, now);
+
       for (const effect of params.effects) {
         await client.query(
           `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
@@ -367,18 +544,201 @@ export class RunStore {
         );
       }
 
-      if (params.to === "decided") {
+      // The attempt is always on record; only a COMPLETE review moves the watermark.
+      await client.query(
+        `insert into review_watermarks (repository, branch, last_reviewed_head, last_attempted_head, updated_at, attempted_at)
+         values ($1, $2, null, $3, $4, $4)
+         on conflict (repository, branch) do update
+           set last_attempted_head = excluded.last_attempted_head,
+               attempted_at        = excluded.attempted_at,
+               updated_at          = excluded.updated_at`,
+        [identity.repository, identity.branch, identity.headSha, now],
+      );
+
+      if (params.to === "decided" && isCompleteReview(report)) {
         await client.query(
-          `insert into review_watermarks (repository, branch, last_reviewed_head, updated_at)
-           values ($1, $2, $3, $4)
-           on conflict (repository, branch) do update
-             set last_reviewed_head = excluded.last_reviewed_head, updated_at = excluded.updated_at
-             where review_watermarks.last_reviewed_head is not distinct from $5`,
-          [params.repository, params.branch, params.headSha, now, params.baseSha],
+          `update review_watermarks
+              set last_reviewed_head = $3, updated_at = $4
+            where repository = $1 and branch = $2
+              and last_reviewed_head is not distinct from $5`,
+          [identity.repository, identity.branch, identity.headSha, now, identity.baseSha],
         );
       }
       return true;
     });
+  }
+
+  /** Report + finding graph + work items + proposals, inside the caller's transaction. */
+  async #writeReport(client: PoolClient, params: CommitNightlyDecisionParams, now: Date): Promise<void> {
+    const { report, workGraph } = params;
+    const identity = report.identity;
+    const findingsByKey = new Map(params.findings.map((f) => [findingKey(f), f]));
+
+    await client.query(
+      `insert into nightly_reports
+         (report_id, run_id, repository, branch, base_sha, head_sha, policy_version, schema_version,
+          coverage, required_coverage_complete, summary, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+       on conflict (report_id) do update
+         set run_id                     = excluded.run_id,
+             coverage                   = excluded.coverage,
+             required_coverage_complete = excluded.required_coverage_complete,
+             summary                    = excluded.summary,
+             updated_at                 = excluded.updated_at`,
+      [
+        report.reportId,
+        params.runId,
+        identity.repository,
+        identity.branch,
+        identity.baseSha,
+        identity.headSha,
+        identity.policyVersion,
+        identity.schemaVersion,
+        JSON.stringify(report.coverage),
+        report.requiredCoverageComplete,
+        JSON.stringify(report.summary),
+        now,
+      ],
+    );
+
+    for (const finding of report.findings) {
+      // The full evidence payload for the audit record. Matched on (path, ruleId)
+      // — the report finding is a projection of one analyzer finding, and a missing
+      // match is stored as null rather than silently substituting another finding.
+      const evidence = findingsByKey.get(finding.findingKey) ?? null;
+
+      // Delivery/CI/merge state belongs to the PR lifecycle, not to analysis: a
+      // re-commit must never reset a proposal that has already been published. Write
+      // (or no-op preserve) the authoritative proposal row FIRST, then read back
+      // whatever is actually on record, so the copy embedded in
+      // `nightly_report_findings.remediation` below is never allowed to disagree
+      // with `nightly_fix_proposals` — the two would otherwise desync on a retry
+      // whose recomputed report still carries the stale `queued/unknown/open`
+      // defaults for a proposal that was published and progressed by a later brief.
+      const proposal = finding.remediation?.proposal ?? null;
+      let remediationForStorage = finding.remediation;
+      if (proposal !== null) {
+        const authoritative = await client.query<{ delivery: ProposalDelivery; ci: ProposalCiState; merge_state: ProposalMergeState }>(
+          `insert into nightly_fix_proposals
+             (proposal_id, occurrence_id, provenance, branch, edits, delivery, ci, merge_state, created_at, updated_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+           on conflict (proposal_id) do update set updated_at = nightly_fix_proposals.updated_at
+           returning delivery, ci, merge_state`,
+          [
+            proposal.proposalId,
+            proposal.occurrenceId,
+            JSON.stringify(proposal.provenance),
+            proposal.branch,
+            JSON.stringify(proposal.edits),
+            proposal.delivery,
+            proposal.ci,
+            proposal.merge,
+            now,
+          ],
+        );
+        const onRecord = authoritative.rows[0]!;
+        remediationForStorage = {
+          ...finding.remediation!,
+          proposal: { ...proposal, delivery: onRecord.delivery, ci: onRecord.ci, merge: onRecord.merge_state },
+        };
+      }
+
+      await client.query(
+        `insert into nightly_report_findings
+           (occurrence_id, report_id, finding_key, rule_id, defect_class, path, start_line, end_line,
+            validation, deterministic_support, visibility, visibility_reason, resolution, remediation,
+            finding, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16)
+         on conflict (occurrence_id) do update
+           set validation            = excluded.validation,
+               deterministic_support = excluded.deterministic_support,
+               visibility            = excluded.visibility,
+               visibility_reason     = excluded.visibility_reason,
+               remediation           = excluded.remediation,
+               finding               = excluded.finding,
+               updated_at            = excluded.updated_at`,
+        [
+          finding.occurrenceId,
+          report.reportId,
+          finding.findingKey,
+          finding.ruleId,
+          finding.defectClass,
+          finding.region.path,
+          finding.region.startLine,
+          finding.region.endLine,
+          finding.validation,
+          finding.deterministicSupport,
+          finding.visibility,
+          finding.visibilityReason,
+          finding.resolution,
+          remediationForStorage === null ? null : JSON.stringify(remediationForStorage),
+          JSON.stringify(evidence),
+          now,
+        ],
+      );
+    }
+
+    // Parent BEFORE children: a child references its parent, and brief 02 must be
+    // able to publish in the same order without inventing an ordering of its own.
+    const items = workGraph.parent === null ? [] : [workGraph.parent, ...workGraph.children];
+    for (const item of items) {
+      await client.query(
+        `insert into nightly_work_items
+           (work_item_id, report_id, kind, parent_work_item_id, occurrence_id,
+            coverage_analyzer_id, coverage_gap_code, title, body, resolution, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+         on conflict (work_item_id) do update
+           set title      = excluded.title,
+               body       = excluded.body,
+               updated_at = excluded.updated_at`,
+        [
+          item.workItemId,
+          item.reportId,
+          item.kind,
+          item.parentWorkItemId,
+          item.occurrenceId,
+          item.coverageGap?.analyzerId ?? null,
+          item.coverageGap?.code ?? null,
+          item.title,
+          item.body,
+          item.resolution,
+          now,
+        ],
+      );
+      // The creation record is pinned to seq 0, so re-committing the same report
+      // re-inserts nothing rather than appending a second "created" row.
+      await client.query(
+        `insert into nightly_work_item_transitions (work_item_id, seq, axis, from_state, to_state, reason, at)
+         values ($1, 0, 'resolution', null, $2, 'work item created', $3)
+         on conflict (work_item_id, seq) do nothing`,
+        [item.workItemId, item.resolution, now],
+      );
+    }
+
+    // A work item this report no longer needs (e.g. the coverage gap a successor
+    // attempt closed) must not sit open forever. Resolve it with a recorded reason
+    // rather than deleting it: the audit trail is the product.
+    const keep = items.map((item) => item.workItemId);
+    const stale = await client.query<{ work_item_id: string; resolution: string }>(
+      `update nightly_work_items
+          set resolution = 'resolved', updated_at = $2
+        where report_id = $1 and resolution = 'open' and not (work_item_id = any($3::text[]))
+        returning work_item_id, resolution`,
+      [report.reportId, now, keep],
+    );
+    for (const row of stale.rows) {
+      // Appended after the creation record. The guarded update above only returns
+      // rows the FIRST time (they are no longer `open` afterwards), so this appends
+      // once per real transition rather than on every re-commit.
+      await client.query(
+        `insert into nightly_work_item_transitions (work_item_id, seq, axis, from_state, to_state, reason, at)
+         select $1::text,
+                coalesce((select max(seq) from nightly_work_item_transitions where work_item_id = $1::text), -1) + 1,
+                'resolution', 'open', 'resolved', $2::text, $3::timestamptz
+         on conflict (work_item_id, seq) do nothing`,
+        [row.work_item_id, "no longer present in the latest report for this identity", now],
+      );
+    }
   }
 
   /**

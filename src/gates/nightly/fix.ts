@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Finding } from "../../domain/evidence/types.js";
 import type { ProposedFix } from "../../domain/fixes/types.js";
 import type { Fixer } from "../../providers/fixers/port.js";
+import { findingKey } from "../../domain/findings/identity.js";
 import { rankDispositions, summarize, type NightlyDecision, type NightlyFindingDisposition } from "./decision.js";
 
 /**
@@ -19,13 +20,16 @@ export function generateFixes(
   decision: NightlyDecision,
   fixers: Record<string, Fixer>,
 ): { decision: NightlyDecision; fixes: ProposedFix[] } {
-  const findingByKey = new Map(findings.map((f) => [dispositionKey(f.ruleId, f.defectClass, f.primaryRegion.path, f.primaryRegion.startLine), f]));
+  // Keyed on the normalized finding identity, which every disposition now carries.
+  // The older (class, rule, path, startLine) key omitted `endLine`, so two findings
+  // differing only in extent aliased and one could be handed the other's finding.
+  const findingByKey = new Map(findings.map((f) => [findingKey(f), f]));
 
   const fixes: ProposedFix[] = [];
   const dispositions: NightlyFindingDisposition[] = decision.dispositions.map((d) => {
     if (d.disposition !== "propose_fix") return d;
 
-    const finding = findingByKey.get(dispositionKey(d.ruleId, d.defectClass, d.region.path, d.region.startLine));
+    const finding = findingByKey.get(d.findingKey);
     const edit = finding ? fixers[d.defectClass]?.propose(finding) ?? null : null;
     if (!finding || !edit) {
       // Eligible but not patchable — surface for a human instead of a fake fix.
@@ -34,6 +38,7 @@ export function generateFixes(
 
     fixes.push({
       subject: finding.subject,
+      findingKey: d.findingKey,
       defectClass: d.defectClass,
       ruleId: d.ruleId,
       branch: fixBranch(d.defectClass, edit.path, edit.startLine),
@@ -53,11 +58,6 @@ export function generateFixes(
     decision: { dispositions: rankDispositions(dispositions), summary: summarize(dispositions), coverage: decision.coverage },
     fixes,
   };
-}
-
-function dispositionKey(ruleId: string, defectClass: string, path: string, startLine: number): string {
-  // JSON-encoded so a path containing whitespace cannot alias two distinct keys.
-  return JSON.stringify([defectClass, ruleId, path, startLine]);
 }
 
 /**
