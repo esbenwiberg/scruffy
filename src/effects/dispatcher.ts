@@ -1,7 +1,9 @@
 import type { EffectProduction } from "../domain/findings/work-publication.js";
+import { fixWorkItemsSection } from "../domain/fixes/delivery.js";
+import type { NightlyFixLifecyclePort } from "../persistence/fix-lifecycle.js";
 import type { OutboxPort, OutboxRecord } from "../persistence/outbox.js";
 import type { NightlyPublicationPort } from "../persistence/publications.js";
-import type { ScmWriter } from "../providers/scm/port.js";
+import type { IssueRef, ScmWriter } from "../providers/scm/port.js";
 import { CheckRunPayload, toCheckRunInput } from "./check-run.js";
 import {
   NIGHTLY_CHECK_REFRESH_EFFECT,
@@ -67,6 +69,13 @@ export class EffectsDispatcher {
      * with an honest reason rather than silently dropped or falsely marked sent.
      */
     private readonly publications?: NightlyPublicationPort,
+    /**
+     * Durable fix-delivery state. Optional for the same reason as `publications`;
+     * without it a fix PR is still opened, but its number/url/head sha are not
+     * persisted, so nothing can reconcile CI, merge, or verification. A deployment
+     * that wants the lifecycle wires this.
+     */
+    private readonly fixLifecycle?: NightlyFixLifecyclePort,
   ) {}
 
   /** Dispatch one batch. Returns the number of effects successfully sent. */
@@ -135,7 +144,7 @@ export class EffectsDispatcher {
       case "pull_request": {
         const parsed = PullRequestPayload.safeParse(record.payload);
         if (!parsed.success) return { kind: "permanent", reason: `invalid pull_request payload: ${parsed.error.message}` };
-        return this.#write(() => this.scm.openPullRequest(toPullRequestInput(parsed.data)));
+        return this.#deliverPullRequest(parsed.data);
       }
       case NIGHTLY_ISSUE_EFFECT: {
         const parsed = NightlyIssuePayload.safeParse(record.payload);
@@ -164,6 +173,51 @@ export class EffectsDispatcher {
       default:
         return { kind: "permanent", reason: `unknown effect type ${record.effectType}` };
     }
+  }
+
+  /**
+   * Open (or match) the fix PR, then STORE the provider's answer.
+   *
+   * Persisting the result is the whole point: the previous implementation
+   * discarded it, so a `delivery = 'ready_open'` row named no pull request and
+   * nothing downstream could read its CI, its merge, or its head sha. The stored
+   * head sha is what binds every later CI verdict to a commit.
+   *
+   * The body is completed here rather than at plan time. When the effect was
+   * enqueued the child issue did not exist — the PR effect DEPENDS on that
+   * reference, so by the time it is claimed the reference is on record and the PR
+   * a human opens links straight to the finding issue and the nightly run issue.
+   *
+   * `draft` comes back from the provider, not from what we asked for: if a
+   * repository refuses drafts, an "unconfirmed" patch that opened ready for review
+   * must be recorded as ready, not as the draft we intended.
+   */
+  async #deliverPullRequest(payload: PullRequestPayload): Promise<ApplyResult> {
+    const input = toPullRequestInput(payload);
+    const child = await this.#issueRef(payload.workItemId);
+    const parent = await this.#issueRef(payload.parentWorkItemId);
+    const links = fixWorkItemsSection(child, parent);
+
+    return this.#write(async () => {
+      const result = await this.scm.openPullRequest({
+        ...input,
+        body: links === null ? input.body : `${input.body}\n\n${links}`,
+        ...(child !== null ? { childIssue: child } : {}),
+      });
+      if (payload.proposalId === undefined || !this.fixLifecycle) return;
+      await this.fixLifecycle.recordDeliveryResult({
+        proposalId: payload.proposalId,
+        delivery: result.draft ? "draft_open" : "ready_open",
+        pr: { number: result.number, url: result.url, headSha: result.headSha, draft: result.draft },
+      });
+    });
+  }
+
+  /** A published issue reference for a work item, in provider-port shape, or null. */
+  async #issueRef(workItemId: string | null | undefined): Promise<IssueRef | null> {
+    if (workItemId === undefined || workItemId === null || !this.publications) return null;
+    const ref = await this.publications.getIssueRef(workItemId);
+    return ref === null ? null : { number: ref.number, id: ref.externalId, url: ref.url };
   }
 
   /**
@@ -303,6 +357,8 @@ export class EffectsDispatcher {
    * aborted batch, so it is logged and contained.
    */
   async #recordTerminalFailure(record: OutboxRecord, reason: string): Promise<void> {
+    if (record.effectType === "pull_request") await this.#recordDeliveryFailure(record, reason);
+
     const produces = record.produces;
     if (produces === null || !this.publications) return;
     try {
@@ -326,6 +382,36 @@ export class EffectsDispatcher {
     } catch (err) {
       console.error(
         `outbox ${record.id}: could not record terminal publication failure: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Record that a fix proposal will never be delivered.
+   *
+   * A refused patch (stale preimage, a branch carrying someone else's commit) or an
+   * exhausted retry budget is the case the brief calls "fails safely and remains
+   * visible": the proposal moves to `delivery_failed` with the reason, the child
+   * issue stays actionable, and no PR is invented. The store refuses the write when a
+   * PR handle is already on record — the crash between `openPullRequest` and
+   * `markSent` reaches exactly that state, and relabelling a live PR as failed would
+   * abandon a pull request a human is looking at.
+   */
+  async #recordDeliveryFailure(record: OutboxRecord, reason: string): Promise<void> {
+    const fixLifecycle = this.fixLifecycle;
+    if (!fixLifecycle) return;
+    // Re-parsed rather than threaded through: a payload that failed to parse is one of
+    // the reasons we are here, and it has no proposal identity to record against.
+    const parsed = PullRequestPayload.safeParse(record.payload);
+    if (!parsed.success || parsed.data.proposalId === undefined) return;
+    try {
+      const recorded = await fixLifecycle.recordDeliveryFailure(parsed.data.proposalId, reason);
+      if (!recorded) {
+        console.error(`outbox ${record.id}: ${parsed.data.proposalId} already has a pull request — recording no delivery failure`);
+      }
+    } catch (err) {
+      console.error(
+        `outbox ${record.id}: could not record terminal delivery failure: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

@@ -71,7 +71,14 @@ class FlakyWriter implements ScmWriter {
   async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     if (this.throwOn.has(input.externalId)) throw new Error(`boom on ${input.externalId}`);
     this.pullRequests.push(input);
-    return { number: this.pullRequests.length, created: true };
+    const number = this.pullRequests.length;
+    return {
+      number,
+      url: `https://github.test/${input.subject.repository}/pull/${number}`,
+      headSha: "a".repeat(40),
+      draft: input.draft,
+      created: true,
+    };
   }
   async upsertIssue(_input: IssueUpsertInput): Promise<IssueUpsertResult> {
     throw new Error("this writer publishes no issues");

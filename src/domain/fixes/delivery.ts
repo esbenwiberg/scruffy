@@ -140,6 +140,22 @@ export function commitCarriesProposal(message: string, proposalId: string): bool
   return message.split("\n").some((line) => line.trim() === wanted);
 }
 
+/**
+ * The "which work items is this PR about" block, or null when neither issue is
+ * known yet. Shared by the plan-time renderer and the dispatcher so the PR body a
+ * human reads has ONE format regardless of when the references became available.
+ */
+export function fixWorkItemsSection(
+  childIssue: { number: number; url: string } | null,
+  parentIssue: { number: number; url: string } | null,
+): string | null {
+  if (childIssue === null && parentIssue === null) return null;
+  const lines = ["## Work items"];
+  if (childIssue !== null) lines.push(`- Finding issue: #${childIssue.number} (${childIssue.url})`);
+  if (parentIssue !== null) lines.push(`- Nightly run issue: #${parentIssue.number} (${parentIssue.url})`);
+  return lines.join("\n");
+}
+
 export interface FixPullRequestBodyInput {
   report: NightlyReportIdentity;
   reportId: string;
@@ -183,19 +199,15 @@ export function renderFixPullRequestBody(input: FixPullRequestBodyInput): string
     `Proposed remediation for a nightly finding (\`${input.defectClass}\` / \`${input.ruleId}\`).`,
     "",
     input.findingSummary,
-    "",
-    "## Work items",
   );
-  lines.push(
-    input.childIssue === null
-      ? "- Finding issue: not yet published (see the nightly check)"
-      : `- Finding issue: #${input.childIssue.number} (${input.childIssue.url})`,
-  );
-  lines.push(
-    input.parentIssue === null
-      ? "- Nightly run issue: not yet published"
-      : `- Nightly run issue: #${input.parentIssue.number} (${input.parentIssue.url})`,
-  );
+
+  // At PLAN time neither issue exists yet (the PR effect waits on the child issue
+  // reference before it is even claimed), so the section is appended by the
+  // dispatcher from durable references instead of guessed at here. Rendering
+  // "not yet published" into an immutable PR body would leave a permanent lie in
+  // the PR of every successfully published finding.
+  const links = fixWorkItemsSection(input.childIssue, input.parentIssue);
+  if (links !== null) lines.push("", links);
 
   lines.push(
     "",

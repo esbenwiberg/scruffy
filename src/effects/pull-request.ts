@@ -35,6 +35,8 @@ export const PullRequestPayload = z.object({
   proposalId: z.string().min(1).optional(),
   /** Work item whose child issue this PR remediates, for body/link reconciliation. */
   workItemId: z.string().min(1).optional(),
+  /** The nightly run (parent) work item, so the PR body links the whole report. */
+  parentWorkItemId: z.string().min(1).optional(),
   /** Open as a draft (structurally safe but semantically unconfirmed patch). */
   draft: z.boolean().optional(),
   provenance: RemediationProvenance.optional(),
