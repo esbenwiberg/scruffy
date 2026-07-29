@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { describeDb } from "../support/db.js";
 import { bootHarness, type Harness, HARNESS_POLICY } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
