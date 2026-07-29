@@ -267,6 +267,59 @@ describe("dependent issue effects (in-memory)", () => {
     expect(scm.recordedCheckRuns()[0]!.input.summary).toContain("could not be created");
   });
 
+  it("does NOT cascade when the dead-lettered effect's work item is already published", async () => {
+    // The reachable shape: `recordIssue` succeeded, then `markSent` threw, so the row
+    // stayed claimed and is retried until its budget runs out. The work item IS
+    // published. Cascading "this reference will never exist" from it would dead-letter
+    // every child effect and withhold the whole night's findings from a human, with a
+    // recorded reason that is false.
+    const { report, workGraph } = reportWithFindingAndCoverageGap();
+    const parentId = workGraph.parent!.workItemId;
+    const publications = new MemoryPublications();
+    publications.seedGraph(report.reportId, workGraph);
+    const outbox = new MemoryOutbox(publications);
+    for (const effect of planIssuePublicationEffects({ report, workGraph, check: CHECK })) outbox.enqueue(effect);
+
+    // Publish the parent, then make every later write to it fail.
+    let sabotage = false;
+    const scm = new (class extends FakeScm {
+      override async upsertIssue(input: IssueUpsertInput): Promise<IssueUpsertResult> {
+        if (sabotage && input.marker.includes("nwi_run")) throw new Error("GitHub 500");
+        return super.upsertIssue(input);
+      }
+    })();
+    const dispatcher = new EffectsDispatcher(outbox, scm, publications);
+
+    await dispatcher.dispatchOnce();
+    expect(await publications.getIssueRef(parentId)).not.toBeNull();
+    // Re-open the parent effect as a crashed dispatcher would leave it.
+    const parentRow = outbox.rows.find((row) => row.produces?.workItemId === parentId)!;
+    parentRow.status = "pending";
+    sabotage = true;
+
+    for (let pass = 0; pass < 12; pass += 1) await dispatcher.dispatchOnce();
+
+    // The parent's publication survived, no false failure was recorded...
+    const parent = publications.record(parentId)!;
+    expect(parent.issue).not.toBeNull();
+    expect(parent.publicationError).toBeNull();
+    // ...and the children were published and attached rather than orphaned.
+    for (const child of workGraph.children) {
+      expect(await publications.getIssueRef(child.workItemId)).not.toBeNull();
+      expect(publications.record(child.workItemId)!.publicationError).toBeNull();
+      expect(publications.record(child.workItemId)!.attachedToParent).toBe(true);
+    }
+    // The dead letters are only the effects that genuinely could not write to the
+    // sabotaged parent issue (its re-publication and the body reconciliation). Nothing
+    // was cascaded: no child effect was failed on the parent's behalf.
+    const failed = outbox.byStatus("failed");
+    expect(failed.map((row) => row.effectType).sort()).toEqual([NIGHTLY_ISSUE_EFFECT, NIGHTLY_ISSUE_SUMMARY_EFFECT]);
+    for (const row of failed) {
+      expect(row.produces?.workItemId ?? parentId).toBe(parentId);
+      expect(row.lastError).not.toContain("will never be published");
+    }
+  });
+
   it("dead-letters an issue effect when no publication store is wired (never pretends success)", async () => {
     const r = rig();
     const unconfigured = new EffectsDispatcher(r.outbox, r.scm);
@@ -414,19 +467,51 @@ describeDb("dependent issue effects (Postgres claim predicate)", () => {
     expect(state.children.find((c) => c.workItemId === childWorkItemIds[1]!)!.attachedToParent).toBe(true);
   });
 
-  it("recordPublicationFailure never downgrades an already published work item", async () => {
-    const { parentWorkItemId, reportId } = await commit();
+  it("recordPublicationFailure never downgrades an already published work item, and SAYS so", async () => {
+    const { parentWorkItemId, childWorkItemIds, reportId } = await commit();
     await publications.recordIssue(parentWorkItemId, "marker", {
       provider: "github",
       number: 10,
       externalId: "10000",
       url: "https://github.com/acme/web/issues/10",
     });
-    await publications.recordPublicationFailure(parentWorkItemId, "a stale effect failed later");
+    // The refusal is reported, not silent: the dispatcher decides whether to cascade
+    // from it, and cascading from a published parent orphans every child.
+    expect(await publications.recordPublicationFailure(parentWorkItemId, "a stale effect failed later")).toBe(false);
 
     const state = (await publications.publicationState(reportId))!;
     expect(state.parent!.issue).toMatchObject({ number: 10 });
     expect(state.parent!.publicationError).toBeNull();
+
+    // An UNpublished item does record, and says so — the two answers must differ, or
+    // the caller cannot tell "refused" from "recorded".
+    expect(await publications.recordPublicationFailure(childWorkItemIds[0]!, "GitHub refused")).toBe(true);
+  });
+
+  it("records an attachment failure for a child that has no publication row yet", async () => {
+    // The cascade from a failed parent reaches children that were never published, so
+    // a bare UPDATE would store nothing and lose the reason.
+    const { childWorkItemIds, reportId } = await commit();
+    await publications.recordAttachmentFailure(childWorkItemIds[0]!, "parent was never filed");
+
+    const state = (await publications.publicationState(reportId))!;
+    const child = state.children.find((c) => c.workItemId === childWorkItemIds[0]!)!;
+    expect(child.issue).toBeNull();
+    expect(child.attachmentError).toContain("parent was never filed");
+  });
+
+  it("deleting a report does not trip the outbox reference to its work items", async () => {
+    // `nightly_reports` cascades to `nightly_work_items`; an outbox column referencing
+    // those with the default NO ACTION would make any retention or purge path fail.
+    const { reportId } = await commit();
+    await expect(pool.query("delete from nightly_reports where report_id = $1", [reportId])).resolves.toBeDefined();
+
+    // Every effect that produced a reference to a now-deleted work item went with it,
+    // and so did the dependency edges pointing at them.
+    const produces = await pool.query<{ n: string }>("select count(*)::text as n from outbox where produces is not null");
+    expect(produces.rows[0]!.n).toBe("0");
+    const deps = await pool.query<{ n: string }>("select count(*)::text as n from outbox_dependencies");
+    expect(deps.rows[0]!.n).toBe("0");
   });
 
   it("re-committing the same report re-uses the outbox rows and their dependency edges", async () => {

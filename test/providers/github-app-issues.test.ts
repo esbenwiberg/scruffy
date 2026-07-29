@@ -237,6 +237,48 @@ describe("GithubAppScmWriter issue publication", () => {
     expect(result).toMatchObject({ number: 20, created: true });
   });
 
+  it("re-applies the labels on update, so a removed label cannot become identity", async () => {
+    // The lookup is label-scoped (an AND filter). If an update dropped the labels, a
+    // human who removed one would make the NEXT publication miss the lookup and open
+    // a second issue carrying the same marker — two parents for one nightly run.
+    const { api, calls } = stub([
+      { match: isIssueList, reply: () => ok([issue(8, 8008, `body\n${PARENT_MARKER}`)]) },
+      { match: isIssuePatch, reply: (call) => ok(issue(8, 8008, String(call.params!.body))) },
+    ]);
+    const scm = new GithubAppScmWriter({ api });
+
+    await scm.upsertIssue(upsertInput());
+
+    const patch = calls.find((c) => isIssuePatch(c.route))!;
+    expect(patch.params!.labels).toEqual([SCRUFFY_ISSUE_LABEL, "scruffy:nightly-run"]);
+  });
+
+  it("a knownRef updates that issue directly and never runs the lookup", async () => {
+    // The lookup is O(label-scoped history) in the not-found case. A caller holding a
+    // durable reference must not pay it on every re-dispatch — and must not be able to
+    // create a second issue by missing the lookup either.
+    const { api, calls } = stub([
+      {
+        match: isIssueList,
+        reply: () => {
+          throw new Error("a knownRef must not trigger a marker lookup");
+        },
+      },
+      { match: isIssuePatch, reply: (call) => ok(issue(8, 8008, String(call.params!.body))) },
+    ]);
+    const scm = new GithubAppScmWriter({ api });
+
+    const result = await scm.upsertIssue(
+      upsertInput({ knownRef: { number: 8, id: "8008", url: `https://github.com/${REPO}/issues/8` } }),
+    );
+
+    expect(result).toEqual({ number: 8, id: "8008", url: `https://github.com/${REPO}/issues/8`, created: false });
+    expect(calls.map((c) => c.route)).toEqual([`PATCH /repos/${REPO}/issues/8`]);
+    // Identity is unchanged: the marker still round-trips through the update, so a
+    // later attempt with no reference can still find it.
+    expect(String(calls[0]!.params!.body)).toContain(PARENT_MARKER);
+  });
+
   it("an already-attached child is a no-op, not a second attachment", async () => {
     const { api, calls } = stub([{ match: isSubIssueList, reply: () => ok([{ id: 11000, number: 11 }]) }]);
     const scm = new GithubAppScmWriter({ api });
@@ -249,6 +291,28 @@ describe("GithubAppScmWriter issue publication", () => {
 
     expect(result).toEqual({ alreadyLinked: true });
     expect(calls.some((c) => isSubIssueCreate(c.route))).toBe(false);
+  });
+
+  it("a SAME-NUMBERED sub-issue from another repository is not our child", async () => {
+    // Sub-issues may be cross-repository, so a parent's list can hold `other/repo#11`
+    // while our own child is `acme/widgets#11`. Matching on the number would report
+    // that child attached — the parent body would then name a child nobody can find.
+    const { api, calls } = stub([
+      // Same number, DIFFERENT database id: a foreign issue.
+      { match: isSubIssueList, reply: () => ok([{ id: 999_999, number: 11 }]) },
+      { match: isSubIssueCreate, reply: () => ({ status: 201, data: {} }) },
+    ]);
+    const scm = new GithubAppScmWriter({ api });
+
+    const result = await scm.linkChildIssue({
+      repository: REPO,
+      parent: { number: 10, id: "10000", url: "u" },
+      child: { number: 11, id: "11000", url: "u" },
+    });
+
+    expect(result).toEqual({ alreadyLinked: false });
+    expect(calls.filter((c) => isSubIssueCreate(c.route))).toHaveLength(1);
+    expect(calls.find((c) => isSubIssueCreate(c.route))!.params!.sub_issue_id).toBe(11000);
   });
 
   it("resolves a 422 attach race by re-listing and reporting alreadyLinked", async () => {
