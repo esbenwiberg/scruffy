@@ -1,11 +1,13 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { describeDb } from "../support/db.js";
-import { bootHarness, type Harness } from "./boot.js";
+import { bootHarness, type Harness, HARNESS_POLICY } from "./boot.js";
 import { REPO } from "../fixtures/scenarios.js";
 import type { CandidateCiEvidence, CandidateCiState, ChangedFile } from "../../src/providers/scm/port.js";
 import type { ReleaseOutcome } from "../../src/gates/release/decision.js";
 import { parseReleaseReport } from "../../src/domain/release/report.js";
 import { HARNESS_REQUIRED_CI_CONTEXTS } from "./boot.js";
+import type { EffectivePolicy } from "../../src/domain/policy/types.js";
+import type { ReleaseRiskAnalyst } from "../../src/providers/release-risk/port.js";
 
 /**
  * End-to-end release gate over a seeded RANGE (prev-release, candidate]. Real
@@ -346,5 +348,101 @@ describeDb("release gate over a seeded range", () => {
     const checks = releaseChecks(CAND2);
     expect(checks).toHaveLength(1);
     expect(checks[0]!.input.conclusion).toBe("neutral");
+  });
+});
+
+/**
+ * The controlled-shadow posture: all three evidence lanes required and genuinely
+ * exercised. A scripted release-risk analyst supplies honest fake LLM evidence (no
+ * lane is marked not-applicable to dodge coverage), CI is seeded passing, and the
+ * range content alone drives ship / sign-off / stop. This proves the persisted
+ * report and the advisory check AGREE on candidate, report id, coverage and
+ * outcome, and that the check stays neutral/advisory across every outcome.
+ */
+const ALL_LANES_REQUIRED_POLICY: EffectivePolicy = {
+  ...HARNESS_POLICY,
+  release: {
+    ...HARNESS_POLICY.release,
+    evidence: {
+      "source-analysis": { applicable: true, required: true },
+      "release-risk-llm": { applicable: true, required: true },
+      "candidate-ci": { applicable: true, required: true, requiredContexts: [...HARNESS_REQUIRED_CI_CONTEXTS] },
+    },
+  },
+};
+
+/** A deterministic analyst that reviews the whole range and finds no risk. */
+const CLEAN_ANALYST: ReleaseRiskAnalyst = {
+  id: "harness-fake-release-risk",
+  version: "1",
+  async assess() {
+    return {
+      changeSummary: "harness range assessment",
+      risks: [],
+      gaps: [],
+      reviewedLines: 1,
+      totalLines: 1,
+      provenance: { modelId: "harness-fake-model", promptVersion: "release-risk-harness-v1" },
+    };
+  },
+};
+
+describeDb("release report/check congruence over all required lanes", () => {
+  afterEach(async () => {
+    await h.pool.end();
+  });
+
+  it("keeps report decision and advisory check congruent", async () => {
+    h = await bootHarness({ policy: ALL_LANES_REQUIRED_POLICY, releaseRisk: CLEAN_ANALYST });
+
+    // One candidate per outcome, driven through the durable path. Every lane is
+    // complete (source clean/analyzed, LLM reviewed, CI passing) so ship/sign-off/
+    // stop is determined by the range content alone, not a missing lane.
+    const cases = [
+      { sha: "d4".repeat(20), files: [CLEAN_FILE], outcome: "ship" as const },
+      { sha: "e5".repeat(20), files: [TLS_FILE], outcome: "sign-off-required" as const },
+      { sha: "f6".repeat(20), files: [SECRET_FILE], outcome: "stop" as const },
+    ];
+
+    for (const c of cases) {
+      h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: c.sha }, c.files);
+      h.scm.seedCandidateCi({ repository: REPO, commitSha: c.sha }, passingCi(c.sha));
+      await h.scruffy.runRelease({ repository: REPO, candidate: c.sha, prevRelease: PREV });
+    }
+    await h.scruffy.flushEffects();
+
+    for (const c of cases) {
+      const reports = await reportsOf(c.sha);
+      expect(reports, `one report for ${c.outcome}`).toHaveLength(1);
+      const { report, reportId, candidateShaColumn } = reports[0]!;
+      const decision = await decisionOf(c.sha);
+      const checks = releaseChecks(c.sha);
+      expect(checks).toHaveLength(1);
+      const check = checks[0]!.input;
+
+      // Outcome agrees across report, durable decision row, and check.
+      expect(report.decision.outcome).toBe(c.outcome);
+      expect(decision?.outcome).toBe(c.outcome);
+      expect(check.summary).toContain(`outcome: ${c.outcome}`);
+
+      // Candidate SHA agrees everywhere (blob, denormalized column, check subject).
+      expect(report.subject.candidateSha).toBe(c.sha);
+      expect(candidateShaColumn).toBe(c.sha);
+      expect(check.subject.commitSha).toBe(c.sha);
+      expect(check.summary).toContain(c.sha);
+
+      // Report id agrees: the check is rendered from the report.
+      expect(check.summary).toContain(reportId);
+
+      // Coverage agrees: all three required lanes present (none dropped/NA), and
+      // every lane's status is echoed in the advisory check.
+      expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis", "release-risk-llm", "candidate-ci"]);
+      for (const lane of report.evidenceLanes) {
+        expect(check.summary, `${c.outcome} lane ${lane.laneId}`).toContain(`${lane.laneId}: ${lane.status}`);
+      }
+
+      // Shadow-first: advisory and neutral for EVERY outcome, including stop.
+      expect(check.conclusion).toBe("neutral");
+    }
   });
 });

@@ -14,6 +14,7 @@ import {
   RELEASE_SIGNOFF_CLASSES,
 } from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
+import type { ReleaseRiskAnalyst } from "../../src/providers/release-risk/port.js";
 import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
 
 /**
@@ -60,6 +61,14 @@ export interface Harness {
 export interface BootOptions {
   leaseMs?: number;
   maxAttempts?: number;
+  /** Override HARNESS_POLICY — e.g. an all-lanes-required campaign policy. */
+  policy?: EffectivePolicy;
+  /**
+   * Wire a range-level release-risk analyst so the release-risk-llm lane is
+   * exercised for real (honest fake evidence, never a bypassed lane). Only opt-in
+   * suites that also make the lane applicable/required in `policy` need this.
+   */
+  releaseRisk?: ReleaseRiskAnalyst;
 }
 
 export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
@@ -78,13 +87,14 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
     pool,
     clock,
     ids,
-    policy: HARNESS_POLICY,
+    policy: options.policy ?? HARNESS_POLICY,
     scmReader: scm,
     scmWriter: scm,
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     fixers: defaultFixers(),
     webhookSecret: WEBHOOK_SECRET,
+    ...(options.releaseRisk ? { releaseRisk: options.releaseRisk } : {}),
     ...(options.leaseMs !== undefined ? { leaseMs: options.leaseMs } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
   });
