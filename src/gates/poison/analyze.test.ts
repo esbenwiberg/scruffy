@@ -25,6 +25,9 @@ const scm: ScmReader = {
   async getChangedFilesInRange(_range: RevisionRange): Promise<ChangedFile[]> {
     return [];
   },
+  async getFileContent(_subject, path) {
+    return { complete: false, path, reason: "not_found" };
+  },
 };
 
 function tlsFinding(overrides: Partial<Finding> = {}): Finding {

@@ -12,6 +12,7 @@ import {
   NIGHTLY_FIXABLE_CLASSES,
   RELEASE_STOP_CLASSES,
   RELEASE_SIGNOFF_CLASSES,
+  DEFAULT_REMEDIATION_POLICY,
 } from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
 import { WEBHOOK_SECRET } from "../fixtures/scenarios.js";
@@ -36,6 +37,12 @@ export const HARNESS_POLICY: EffectivePolicy = {
   release: {
     stopDefectClasses: [...RELEASE_STOP_CLASSES],
     signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  },
+  remediation: {
+    maxFiles: DEFAULT_REMEDIATION_POLICY.maxFiles,
+    maxTotalLines: DEFAULT_REMEDIATION_POLICY.maxTotalLines,
+    maxTotalBytes: DEFAULT_REMEDIATION_POLICY.maxTotalBytes,
+    protectedPaths: [...DEFAULT_REMEDIATION_POLICY.protectedPaths],
   },
 };
 

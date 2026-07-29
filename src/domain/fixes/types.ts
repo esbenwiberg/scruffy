@@ -44,3 +44,57 @@ export const ProposedFix = z.object({
   edits: z.array(ProposedEdit).min(1),
 });
 export type ProposedFix = z.infer<typeof ProposedFix>;
+
+/**
+ * One edit as an LLM remediation proposal states it — UNTRUSTED, schema-parsed
+ * model output, never applied directly. Unlike `ProposedEdit` (a service-trusted,
+ * already-anchored edit), a model edit anchors itself to source content the
+ * validator must independently confirm:
+ *
+ *  - `expectedOriginal` is the exact text the model claims occupies the edit
+ *    location. This is what proposal-validation matches against real subject
+ *    content — a mismatch (missing or ambiguous) is a hallucination signal, not
+ *    a patch to trust.
+ *  - `startLine`/`endLine` are an OPTIONAL hint. When given, the match must be
+ *    exact at that range. When absent, the validator locates the unique
+ *    occurrence of `expectedOriginal` in the file — zero or multiple matches
+ *    both reject the edit rather than guess.
+ *  - `uncertain` is the model's own declared doubt about this specific edit,
+ *    carried through to classification; it can only ever narrow eligibility
+ *    (push toward draft), never widen it.
+ */
+export const ModelProposedEdit = z
+  .object({
+    path: z.string().min(1),
+    expectedOriginal: z.string().min(1),
+    startLine: z.number().int().positive().optional(),
+    endLine: z.number().int().positive().optional(),
+    replacement: z.string(),
+    rationale: z.string().min(1),
+    uncertain: z.boolean().optional(),
+  })
+  .superRefine((edit, ctx) => {
+    if ((edit.startLine === undefined) !== (edit.endLine === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["endLine"],
+        message: "startLine and endLine must both be present or both be absent",
+      });
+      return;
+    }
+    if (edit.startLine !== undefined && edit.endLine !== undefined && edit.endLine < edit.startLine) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endLine"], message: "endLine must be >= startLine" });
+    }
+  });
+export type ModelProposedEdit = z.infer<typeof ModelProposedEdit>;
+
+/**
+ * The full structured output of the LLM remediation prompt — one or more bounded
+ * edits, never a free-form patch. Bounded to `min(1)`: an empty array is not a
+ * coherent proposal, it is "no fix" and must be represented as remediation
+ * unavailable, not as a zero-edit proposal that then vacuously validates.
+ */
+export const ModelFixProposal = z.object({
+  edits: z.array(ModelProposedEdit).min(1),
+});
+export type ModelFixProposal = z.infer<typeof ModelFixProposal>;

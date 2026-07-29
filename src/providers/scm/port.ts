@@ -26,11 +26,43 @@ export interface RevisionRange {
   headSha: string;
 }
 
+/** A path's full content, read completely at an immutable subject revision. */
+export interface FileContentComplete {
+  complete: true;
+  path: string;
+  content: string;
+}
+
+/**
+ * A path that could not be read completely. Never fabricated as empty content:
+ * a caller anchoring a patch edit against `""` when the read actually failed
+ * would treat "could not read" as "empty file", which can only ever produce a
+ * wrong or unsafe edit.
+ */
+export interface FileContentError {
+  complete: false;
+  path: string;
+  reason: "not_found" | "binary" | "oversized" | "provider_error";
+  detail?: string;
+}
+
+export type FileContentResult = FileContentComplete | FileContentError;
+
 export interface ScmReader {
   /** Changed files for a PR/subject, by immutable revision. */
   getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]>;
   /** Changed files across a range (base, head]. Used by the nightly gate. */
   getChangedFilesInRange(range: RevisionRange): Promise<ChangedFile[]>;
+  /**
+   * Full, immutable content of one path at `subject`. This is the anchor
+   * material remediation uses to bind a proposed edit's preimage to real
+   * source — never a diff/patch, and never a partial read reported as
+   * complete. A read that cannot be served in full (missing, binary,
+   * oversized, or a provider fault) reports `complete: false` with a stable
+   * reason rather than throwing, so a caller can attribute the gap to one
+   * finding's remediation attempt instead of aborting the whole run.
+   */
+  getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult>;
 }
 
 export type CheckConclusion = "success" | "failure" | "neutral";

@@ -60,6 +60,20 @@ export const RELEASE_STOP_CLASSES = ["leaked-credential", "destructive-schema-ch
 export const RELEASE_SIGNOFF_CLASSES = ["disabled-tls-verification", ...MODEL_DEFECT_CLASSES] as const;
 
 /**
+ * Service-owned bounds on every proposed patch, deterministic or model-sourced.
+ * Narrow on purpose: a nightly fix PR is a small, mechanical, low-ambiguity
+ * change, never a repository-wide rewrite. Protected paths cover the gate's
+ * own policy/prompt sources and common CI/lockfile surfaces a patch must never
+ * touch regardless of what a finding or model claims.
+ */
+export const DEFAULT_REMEDIATION_POLICY = {
+  maxFiles: 3,
+  maxTotalLines: 60,
+  maxTotalBytes: 4096,
+  protectedPaths: [".github/", "src/domain/policy/", "src/providers/prompts/", "package-lock.json", "package.json"],
+} as const;
+
+/**
  * The production policy derived from the registry's class lists — the single
  * place the class↔gate bindings become an EffectivePolicy, so entrypoints
  * (server, scripts) cannot drift from each other. The harness keeps its own
@@ -71,6 +85,12 @@ export function defaultPolicy(version = "policy-v1"): EffectivePolicy {
     poison: { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true },
     nightly: { reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES], fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES] },
     release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
+    remediation: {
+      maxFiles: DEFAULT_REMEDIATION_POLICY.maxFiles,
+      maxTotalLines: DEFAULT_REMEDIATION_POLICY.maxTotalLines,
+      maxTotalBytes: DEFAULT_REMEDIATION_POLICY.maxTotalBytes,
+      protectedPaths: [...DEFAULT_REMEDIATION_POLICY.protectedPaths],
+    },
   };
 }
 

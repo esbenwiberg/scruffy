@@ -3,6 +3,7 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  FileContentResult,
   IssueLinkInput,
   IssueLinkResult,
   IssueUpsertInput,
@@ -36,6 +37,7 @@ export interface FakeIssue {
 export class FakeScm implements ScmReader, ScmWriter {
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
+  readonly #fileContent = new Map<string, FileContentResult>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, { number: number; input: PullRequestInput }>();
   readonly #issues: FakeIssue[] = [];
@@ -53,12 +55,25 @@ export class FakeScm implements ScmReader, ScmWriter {
     this.#rangeFiles.set(this.#rangeKey(range), files);
   }
 
+  /** Seed full immutable content for `path` at `subject`. Plain string convenience overload seeds a complete read. */
+  seedFileContent(subject: SubjectRevision, path: string, content: string): void;
+  seedFileContent(subject: SubjectRevision, path: string, result: FileContentResult): void;
+  seedFileContent(subject: SubjectRevision, path: string, contentOrResult: string | FileContentResult): void {
+    const result: FileContentResult =
+      typeof contentOrResult === "string" ? { complete: true, path, content: contentOrResult } : contentOrResult;
+    this.#fileContent.set(this.#contentKey(subject, path), result);
+  }
+
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {
     return this.#files.get(this.#subjectKey(subject)) ?? [];
   }
 
   async getChangedFilesInRange(range: RevisionRange): Promise<ChangedFile[]> {
     return this.#rangeFiles.get(this.#rangeKey(range)) ?? [];
+  }
+
+  async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
+    return this.#fileContent.get(this.#contentKey(subject, path)) ?? { complete: false, path, reason: "not_found" };
   }
 
   async upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult> {
@@ -181,5 +196,9 @@ export class FakeScm implements ScmReader, ScmWriter {
 
   #rangeKey(range: RevisionRange): string {
     return `${range.repository}@${range.baseSha ?? "∅"}..${range.headSha}`;
+  }
+
+  #contentKey(subject: SubjectRevision, path: string): string {
+    return `${this.#subjectKey(subject)}::${path}`;
   }
 }

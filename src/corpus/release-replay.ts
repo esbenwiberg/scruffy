@@ -73,6 +73,7 @@ export async function replayReleaseCorpus(
     const scm: ScmReader = {
       getChangedFiles: async () => c.files,
       getChangedFilesInRange: async () => c.files,
+      getFileContent: async (_subject, path) => ({ complete: false, path, reason: "not_found" }),
     };
     const { decision } = await runReleaseAnalysis(c.range, {
       scm,

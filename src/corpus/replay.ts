@@ -95,6 +95,7 @@ export async function replayCorpus(corpus: readonly LabeledCase[], deps: ReplayD
       getChangedFilesInRange: async () => {
         throw new Error("range read not supported in poison corpus replay");
       },
+      getFileContent: async (_subject, path) => ({ complete: false, path, reason: "not_found" }),
     };
     const { decision } = await runPoisonAnalysis(c.subject, {
       scm,

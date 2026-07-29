@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
-import type { ChangedFile, RevisionRange, ScmReader } from "./port.js";
+import type { ChangedFile, FileContentResult, RevisionRange, ScmReader } from "./port.js";
 import type { GhApi } from "./github-app.js";
 
 /**
@@ -49,6 +49,16 @@ const CommitPulls = z.array(
     base: z.object({ sha: z.string() }),
   }),
 );
+
+const ContentsResponse = z.object({
+  type: z.string(),
+  encoding: z.string().optional(),
+  content: z.string().optional(),
+});
+
+/** Anchoring a multi-megabyte file is never a mechanical, low-ambiguity edit;
+ * refuse rather than read it in and silently balloon memory/patch size. */
+const MAX_CONTENT_BYTES = 1_000_000;
 
 export interface GithubAppScmReaderOptions {
   api: GhApi;
@@ -137,11 +147,61 @@ export class GithubAppScmReader implements ScmReader {
     return /^[0-9a-f]{40}$/.test(open.base.sha) ? open.base.sha : null;
   }
 
+  /**
+   * Immutable full-file content at `subject.commitSha`. Reports `complete:
+   * false` with a stable reason for anything that is not a clean, safely
+   * anchorable text read — never throws for an ordinary "cannot serve this
+   * read" case, so one path's gap does not abort the caller's whole attempt.
+   */
+  async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
+    try {
+      const res = await this.#api(`GET /repos/${subject.repository}/contents/${path}`, { ref: subject.commitSha });
+      if (Array.isArray(res.data)) {
+        return { complete: false, path, reason: "not_found", detail: "path is a directory" };
+      }
+      const parsed = this.#parse(ContentsResponse, res.data, `contents of ${path}`);
+      if (parsed.type !== "file") {
+        return { complete: false, path, reason: "not_found", detail: `path is a ${parsed.type}` };
+      }
+      if (parsed.encoding !== "base64" || parsed.content === undefined) {
+        // >1 MiB files come back with encoding "none" and empty content — the
+        // API itself refuses to inline them; treat identically to oversized.
+        return { complete: false, path, reason: "oversized", detail: "content not inline (file too large for the contents API)" };
+      }
+      const buffer = Buffer.from(parsed.content, "base64");
+      if (buffer.byteLength > MAX_CONTENT_BYTES) {
+        return { complete: false, path, reason: "oversized" };
+      }
+      if (isBinary(buffer)) {
+        return { complete: false, path, reason: "binary" };
+      }
+      return { complete: true, path, content: buffer.toString("utf8") };
+    } catch (err) {
+      if (statusOf(err) === 404) return { complete: false, path, reason: "not_found" };
+      return { complete: false, path, reason: "provider_error", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   #parse<T>(schema: z.ZodType<T>, data: unknown, what: string): T {
     const parsed = schema.safeParse(data);
     if (!parsed.success) throw new Error(`github-app: unexpected ${what} response shape: ${parsed.error.message}`);
     return parsed.data;
   }
+}
+
+/** A numeric `status` off an unknown error (Octokit's RequestError carries one), or null. */
+function statusOf(err: unknown): number | null {
+  if (typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number") {
+    return (err as { status: number }).status;
+  }
+  return null;
+}
+
+/** Heuristic binary sniff: a NUL byte in the first few KB never occurs in valid
+ * UTF-8 text, which is the same signal `git diff`/most editors use. */
+function isBinary(buffer: Buffer): boolean {
+  const probe = buffer.subarray(0, Math.min(buffer.length, 8192));
+  return probe.includes(0);
 }
 
 /** Map GitHub file entries to ChangedFile, refusing an incomplete diff. A file

@@ -85,6 +85,7 @@ export async function replayNightlyCorpus(
     const scm: ScmReader = {
       getChangedFiles: async () => c.files,
       getChangedFilesInRange: async () => c.files,
+      getFileContent: async (_subject, path) => ({ complete: false, path, reason: "not_found" }),
     };
     const analysis = await runNightlyAnalysis(c.range, {
       scm,
