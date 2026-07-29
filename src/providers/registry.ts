@@ -86,11 +86,15 @@ export const RELEASE_EVIDENCE_POLICY = {
 } as const;
 
 /**
- * Evidence declarations for deterministic OFFLINE corpus replay: source analysis is
- * still required (the corpus scores real deterministic review), but the model and
- * candidate-CI lanes are EXPLICITLY not applicable — there is no model backend and
- * no live GitHub to read CI from. This is an explicit, honest declaration, NOT a
- * permissive fallback: the schema still parses it and rejects contradictions.
+ * Evidence declarations for OFFLINE corpus replay: source analysis is still
+ * required (the corpus scores real deterministic review), but the release-risk-llm
+ * and candidate-CI lanes are EXPLICITLY not applicable — no `ReleaseRiskAnalyst` is
+ * wired on the replay paths and there is no live GitHub to read CI from. Note this
+ * is also used by the GROUNDED release lane, which does wire a line-level
+ * `ModelAnalyzer`: that feeds source analysis, not the range-level release-risk
+ * lane, so declaring release-risk-llm not-applicable stays accurate there. This is
+ * an explicit, honest declaration, NOT a permissive fallback: the schema still
+ * parses it and rejects contradictions.
  */
 export function releaseOfflineEvidence() {
   return {
