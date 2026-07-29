@@ -1,4 +1,5 @@
 import type { SubjectRevision } from "../../domain/evidence/types.js";
+import type { CiEvidence, PullRequestObservation } from "../../domain/fixes/lifecycle.js";
 
 /**
  * SCM adapter port. GitHub-specific mechanics live behind this; the domain and
@@ -92,20 +93,42 @@ export interface CheckRunResult {
   created: boolean;
 }
 
-/** A single line-scoped edit applied by a fix PR. */
+/**
+ * A single line-scoped edit applied by a fix PR.
+ *
+ * `expectedOriginal` is the PRECONDITION: the exact text those lines must
+ * contain in the reviewed subject. An adapter that receives it MUST verify it
+ * against content read at the reviewed sha and refuse the whole proposal on a
+ * mismatch, rather than replacing whatever happens to be there. It is optional
+ * because deterministic fixers are pure functions of a finding's region and read
+ * no content, so they have no original text to honestly claim; those edits are
+ * still bound to the candidate because the adapter anchors the commit to the
+ * reviewed sha itself.
+ */
 export interface PullRequestEdit {
   path: string;
   startLine: number;
   endLine: number;
   replacement: string;
+  expectedOriginal?: string;
+}
+
+/** Which fixer/model/prompt produced the patch, carried through to the PR. */
+export interface PullRequestProvenance {
+  fixerKind: "deterministic" | "model";
+  fixerId: string;
+  fixerVersion: string;
+  modelId: string | null;
+  promptVersion: string | null;
+  proposalSchemaVersion: string;
 }
 
 export interface PullRequestInput {
-  /** The reviewed head the fix is proposed against. */
+  /** The reviewed head the fix is proposed against (immutable candidate). */
   subject: SubjectRevision;
   /** Stable idempotency key; re-opening with the same key must not duplicate. */
   externalId: string;
-  /** Deterministic head branch for the fix. */
+  /** Candidate-bound head branch for the fix (see `fixProposalBranch`). */
   branch: string;
   /**
    * The branch the review ran on — the PR's merge target. Optional for
@@ -113,14 +136,44 @@ export interface PullRequestInput {
    * repository's default branch when absent.
    */
   baseBranch?: string;
+  /**
+   * The reviewed range's base sha (null on a branch's first review). Part of the
+   * reviewed identity, NOT the merge target — recorded so a human can see which
+   * range produced the proposal.
+   */
+  baseSha?: string | null;
   title: string;
   body: string;
   edits: PullRequestEdit[];
+  /**
+   * Open as a draft. A structurally safe but semantically unconfirmed patch is a
+   * draft; a critic-confirmed one is ready for review. Part of the provider
+   * contract because "clearly marked draft" is a safety property, not styling.
+   */
+  draft: boolean;
+  /**
+   * Fix proposal identity. The adapter writes it into the commit message as the
+   * manifest that proves THIS proposal landed on the branch.
+   */
+  proposalId: string;
+  /** The published child finding issue this PR remediates, when already known. */
+  childIssue?: IssueRef;
+  provenance?: PullRequestProvenance;
 }
 
 export interface PullRequestResult {
   /** Provider PR number/handle. */
   number: number;
+  /** Provider URL, stored so a human never has to reconstruct it. */
+  url: string;
+  /**
+   * The PR's head sha at the moment of this call. IMMUTABLE evidence anchor: all
+   * CI evidence is bound to a head sha, so a stored verdict can never be carried
+   * onto a later head.
+   */
+  headSha: string;
+  /** Draft state as the provider reports it (not as we requested it). */
+  draft: boolean;
   /** True when this call opened a new PR; false when it matched an existing one. */
   created: boolean;
 }
@@ -219,6 +272,41 @@ export interface ScmIssueWriter {
   linkChildIssue(input: IssueLinkInput): Promise<IssueLinkResult>;
 }
 
+/** A tracker issue's current state, as the provider reports it. */
+export interface ExternalIssueObservation {
+  number: number;
+  state: "open" | "closed";
+  /** Provider close reason (`completed`/`not_planned`), or null when withheld. */
+  stateReason: string | null;
+  /** Login of whoever closed it, or null when the provider does not say. */
+  closedBy: string | null;
+}
+
+/**
+ * READ half of the fix lifecycle — the states humans and repository CI produce
+ * that Scruffy consumes as evidence.
+ *
+ * Separate from `ScmReader` (analysis-time source reads) and from `ScmWriter`
+ * (the narrow effects credential) because it needs neither: reconciliation reads
+ * provider state and writes nothing. Everything is keyed by an IMMUTABLE handle —
+ * a PR number, a sha, a branch, an issue number — so a reconciler can never
+ * conflate two candidates.
+ */
+export interface ScmLifecycleReader {
+  /** Current PR state, or null when the provider no longer has it. */
+  getPullRequest(repository: string, number: number): Promise<PullRequestObservation | null>;
+  /**
+   * All CI evidence for exactly `sha` — check runs AND combined commit statuses,
+   * because repositories use either or both. The returned evidence carries the
+   * sha it was read at so a caller cannot accidentally apply it to another head.
+   */
+  getCiEvidence(repository: string, sha: string): Promise<CiEvidence>;
+  /** Immutable head sha of a branch (the post-merge candidate), or null. */
+  getBranchHead(repository: string, branch: string): Promise<string | null>;
+  /** Current issue state, so a human closure can be recorded as a dismissal. */
+  getIssueState(repository: string, number: number): Promise<ExternalIssueObservation | null>;
+}
+
 export interface ScmWriter extends ScmIssueWriter {
   /**
    * Idempotent upsert. The canonical key is (subject, externalId); the invariant
@@ -230,6 +318,14 @@ export interface ScmWriter extends ScmIssueWriter {
    * (see CheckRunResult) — do not build created-gated side effects on top of it.
    */
   upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult>;
-  /** Idempotent fix-PR open keyed by externalId. Never auto-merges. */
+  /**
+   * Idempotent fix-PR open keyed by externalId. Never auto-merges.
+   *
+   * The adapter MUST: verify every supplied `expectedOriginal` against content
+   * read at `subject.commitSha`; land all edits together (one commit, or an
+   * equivalently crash-safe manifest) before opening the PR; and refuse — loudly,
+   * without opening a misleading PR — when the head branch already exists but
+   * does not carry THIS proposal's manifest.
+   */
   openPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
 }

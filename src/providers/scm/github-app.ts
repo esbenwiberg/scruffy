@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { withIssueMarker } from "../../domain/findings/work-publication.js";
+import { commitCarriesProposal, fixCommitMessage } from "../../domain/fixes/delivery.js";
 import type {
   CheckRunInput,
   CheckRunResult,
@@ -53,11 +54,45 @@ const CreatedCheckRun = z.object({ id: z.number() });
 
 const RepoInfo = z.object({ default_branch: z.string().min(1) });
 
-const PullsList = z.array(z.object({ number: z.number() }));
+/**
+ * A pull request as GitHub returns it on the list and create routes. `draft` is
+ * read back rather than assumed from the request: whether the PR a human sees is
+ * marked draft is provider truth, and a repository/plan that refuses drafts must
+ * not leave us recording one.
+ */
+const PullSummary = z.object({
+  number: z.number().int().positive(),
+  html_url: z.string().min(1),
+  draft: z.boolean().optional(),
+  head: z.object({ sha: z.string().min(1) }),
+});
 
-const CreatedPull = z.object({ number: z.number() });
+const PullsList = z.array(PullSummary);
 
 const GitRef = z.object({ object: z.object({ sha: z.string().min(1) }) });
+
+/** A git commit object. `message` carries the fix-proposal manifest trailer. */
+const GitCommit = z.object({
+  sha: z.string().min(1),
+  message: z.string(),
+  tree: z.object({ sha: z.string().min(1) }),
+});
+
+const CreatedBlob = z.object({ sha: z.string().min(1) });
+
+const CreatedTree = z.object({ sha: z.string().min(1) });
+
+/** One level of a git tree. Walked per path segment to recover a blob's mode. */
+const GitTree = z.object({
+  tree: z.array(
+    z.object({
+      path: z.string(),
+      mode: z.string().min(1),
+      type: z.string().min(1),
+      sha: z.string().min(1).nullable().optional(),
+    }),
+  ),
+});
 
 const FileContents = z.object({
   content: z.string(),
@@ -150,40 +185,50 @@ export class GithubAppScmWriter implements ScmWriter {
   // ── Fix pull requests ───────────────────────────────────────────────────────
 
   /**
-   * Idempotent on externalId via the deterministic head branch (the branch IS
-   * the idempotency key — see nightly's fixBranch). The flow is crash-resumable
-   * at every step:
+   * Idempotent on the candidate-bound head branch (`fixProposalBranch`), which is
+   * derived from the FULL fix proposal identity, so the same defect at the same
+   * location on a later candidate is a different branch and cannot be mistaken
+   * for delivery of the old one.
    *
-   *  1. a PR (any state) already exists for the head branch → done, created:false
+   * The flow is crash-resumable at every step:
+   *
+   *  1. a PR (any state) already exists for this branch → done, `created: false`
    *     (a human-closed fix PR is a human decision; we do not re-open or nag);
-   *  2. ensure the branch exists, created from the reviewed subject sha;
-   *  3. apply the line edits ONLY if the branch still points at the subject sha —
-   *     a branch that has advanced means a previous attempt already committed the
-   *     edits (deterministic branches are single-purpose), so re-applying them to
-   *     the already-fixed file would corrupt it;
+   *  2. the branch does not exist → build the patch as ONE commit whose parent is
+   *     the reviewed candidate sha and whose message carries the proposal manifest,
+   *     then create the ref pointing at it;
+   *  3. the branch DOES exist → the only sanctioned way to conclude "our patch is
+   *     already there" is that its head commit declares this exact proposal id.
+   *     A branch that merely advanced proves nothing, so anything else FAILS
+   *     rather than opening a PR that misrepresents what it contains;
    *  4. open the PR against `baseBranch` (the branch nightly reviewed), falling
-   *     back to the repository default branch; a 422 duplicate race resolves by
-   *     re-listing.
+   *     back to the repository default branch, as a draft when asked; a 422
+   *     duplicate race resolves by re-listing.
    *
    * NEVER merges. The PR is a proposal validated by the target repo's own CI.
    */
   async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     const { repository, commitSha } = input.subject;
     const owner = repository.split("/")[0];
+    const head = `${owner}:${input.branch}`;
 
-    const existing = await this.#findPullByHead(repository, `${owner}:${input.branch}`);
-    if (existing !== null) return { number: existing, created: false };
+    const existing = await this.#findPullByHead(repository, head);
+    if (existing !== null) return { ...existing, created: false };
 
     const refSha = await this.#branchHead(repository, input.branch);
     if (refSha === null) {
-      await this.#api(`POST /repos/${repository}/git/refs`, {
-        ref: `refs/heads/${input.branch}`,
-        sha: commitSha,
-      });
-    }
-
-    if (refSha === null || refSha === commitSha) {
-      await this.#commitEdits(repository, input.branch, input.edits, input.title);
+      const commit = await this.#buildProposalCommit(repository, input);
+      try {
+        await this.#api(`POST /repos/${repository}/git/refs`, { ref: `refs/heads/${input.branch}`, sha: commit });
+      } catch (err) {
+        // 422 = the ref appeared under us (a concurrent attempt). Re-verify the
+        // manifest instead of force-updating: whatever is there now must still be
+        // provably this proposal.
+        if (statusOf(err) !== 422) throw err;
+        await this.#requireProposalOnBranch(repository, input);
+      }
+    } else {
+      await this.#requireProposalOnBranch(repository, input);
     }
 
     const base = input.baseBranch ?? (await this.#defaultBranch(repository));
@@ -193,16 +238,136 @@ export class GithubAppScmWriter implements ScmWriter {
         body: input.body,
         head: input.branch,
         base,
+        draft: input.draft,
       });
-      return { number: this.#parse(CreatedPull, created.data, "created pull").number, created: true };
+      return { ...this.#toPullResult(this.#parse(PullSummary, created.data, "created pull")), created: true };
     } catch (err) {
       // 422 = "a pull request already exists" — a concurrent/crashed attempt won
       // the race. Re-list and return it; anything else is a real failure.
       if (statusOf(err) !== 422) throw err;
-      const raced = await this.#findPullByHead(repository, `${owner}:${input.branch}`);
+      const raced = await this.#findPullByHead(repository, head);
       if (raced === null) throw err;
-      return { number: raced, created: false };
+      return { ...raced, created: false };
     }
+  }
+
+  /**
+   * Assert that `input.branch`'s head commit declares delivery of exactly
+   * `input.proposalId`, throwing otherwise.
+   *
+   * This replaces the old "the branch advanced, so a previous attempt must have
+   * committed the edits" inference. That inference is unsound in both directions:
+   * a partially-written older attempt, a human commit, or a rebase all advance the
+   * branch without containing our patch — and acting on it opened a PR whose body
+   * described edits that were not in it. Failing here is loud, retryable, and
+   * leaves the child work item visibly undelivered.
+   */
+  async #requireProposalOnBranch(repository: string, input: PullRequestInput): Promise<void> {
+    const refSha = await this.#branchHead(repository, input.branch);
+    if (refSha === null) {
+      throw new Error(`github-app: branch ${input.branch} disappeared while delivering ${input.proposalId}`);
+    }
+    const commit = await this.#commit(repository, refSha);
+    if (!commitCarriesProposal(commit.message, input.proposalId)) {
+      throw new Error(
+        `github-app: branch ${input.branch} is at ${refSha}, which does not declare fix proposal ` +
+          `${input.proposalId} — refusing to open a pull request that would misrepresent its contents`,
+      );
+    }
+  }
+
+  /**
+   * Build the whole proposal as ONE commit and return its sha. Nothing is written
+   * to a branch until every edit has been validated and the complete tree exists,
+   * so there is no observable half-applied state:
+   *
+   *  1. read each touched path's full content AT THE REVIEWED SHA (never at the
+   *     branch — the point is to anchor to what was actually analysed);
+   *  2. verify every supplied `expectedOriginal` against those exact lines. A
+   *     mismatch is a stale or hallucinated preimage and rejects the proposal;
+   *  3. apply the edits per file (`applyEdits` rejects overlaps/out-of-range);
+   *  4. write one blob per file, preserving the file's existing mode so a fix
+   *     never silently un-executables a script;
+   *  5. one tree on top of the reviewed commit's tree, one commit with the
+   *     reviewed sha as its single parent and the manifest trailer in its message.
+   */
+  async #buildProposalCommit(repository: string, input: PullRequestInput): Promise<string> {
+    const { commitSha } = input.subject;
+    const parent = await this.#commit(repository, commitSha);
+
+    const byPath = new Map<string, PullRequestEdit[]>();
+    for (const edit of input.edits) {
+      const group = byPath.get(edit.path) ?? [];
+      group.push(edit);
+      byPath.set(edit.path, group);
+    }
+
+    const entries: { path: string; mode: string; type: "blob"; sha: string }[] = [];
+    for (const [path, fileEdits] of byPath) {
+      const fetched = await this.#api(`GET /repos/${repository}/contents/${path}`, { ref: commitSha });
+      const file = this.#parse(FileContents, fetched.data, `contents of ${path}`);
+      if (file.encoding !== CONTENTS_ENCODING) {
+        // >1 MiB files come back with encoding "none" and empty content. Editing
+        // that would silently truncate the file — refuse loudly instead.
+        throw new Error(`contents of ${path} returned encoding '${file.encoding}' (file too large?) — cannot apply edits safely`);
+      }
+      const original = Buffer.from(file.content, "base64").toString("utf8");
+      verifyPreimages(original, fileEdits, commitSha);
+      const updated = applyEdits(original, fileEdits);
+
+      const mode = await this.#blobMode(repository, parent.tree.sha, path);
+      const blob = await this.#api(`POST /repos/${repository}/git/blobs`, {
+        content: Buffer.from(updated, "utf8").toString("base64"),
+        encoding: CONTENTS_ENCODING,
+      });
+      entries.push({ path, mode, type: "blob", sha: this.#parse(CreatedBlob, blob.data, `blob for ${path}`).sha });
+    }
+
+    const tree = await this.#api(`POST /repos/${repository}/git/trees`, {
+      base_tree: parent.tree.sha,
+      tree: entries,
+    });
+    const commit = await this.#api(`POST /repos/${repository}/git/commits`, {
+      message: fixCommitMessage({ title: input.title, proposalId: input.proposalId, reviewedSha: commitSha }),
+      tree: this.#parse(CreatedTree, tree.data, "created tree").sha,
+      parents: [commitSha],
+    });
+    return this.#parse(GitCommit, commit.data, "created commit").sha;
+  }
+
+  /**
+   * The git mode of `path` in `treeSha`, found by walking one tree level per path
+   * segment. Deliberately not `?recursive=1`: that response is TRUNCATED on large
+   * repositories, and a truncated listing would make a real path look missing.
+   * A path that is absent (or is not a blob) at the reviewed revision throws —
+   * the same fate as a hallucinated path.
+   */
+  async #blobMode(repository: string, treeSha: string, path: string): Promise<string> {
+    const segments = path.split("/");
+    let current = treeSha;
+    for (const [index, segment] of segments.entries()) {
+      const listed = await this.#api(`GET /repos/${repository}/git/trees/${current}`);
+      const entry = this.#parse(GitTree, listed.data, `git tree ${current}`).tree.find((e) => e.path === segment);
+      if (!entry) throw new Error(`github-app: path '${path}' does not exist at the reviewed revision`);
+      const last = index === segments.length - 1;
+      if (last) {
+        if (entry.type !== "blob") throw new Error(`github-app: path '${path}' is a ${entry.type}, not a file`);
+        return entry.mode;
+      }
+      if (entry.type !== "tree" || !entry.sha) throw new Error(`github-app: path '${path}' traverses a non-directory`);
+      current = entry.sha;
+    }
+    throw new Error(`github-app: path '${path}' could not be resolved`);
+  }
+
+  /** A git commit object by sha. */
+  async #commit(repository: string, sha: string): Promise<z.infer<typeof GitCommit>> {
+    const fetched = await this.#api(`GET /repos/${repository}/git/commits/${sha}`);
+    return this.#parse(GitCommit, fetched.data, `git commit ${sha}`);
+  }
+
+  #toPullResult(pull: z.infer<typeof PullSummary>): Omit<PullRequestResult, "created"> {
+    return { number: pull.number, url: pull.html_url, headSha: pull.head.sha, draft: pull.draft ?? false };
   }
 
   // ── Work-item issues ────────────────────────────────────────────────────────
@@ -361,38 +526,11 @@ export class GithubAppScmWriter implements ScmWriter {
     );
   }
 
-  async #commitEdits(repository: string, branch: string, edits: readonly PullRequestEdit[], title: string): Promise<void> {
-    // One contents-API commit per file: group the edits by path.
-    const byPath = new Map<string, PullRequestEdit[]>();
-    for (const edit of edits) {
-      const group = byPath.get(edit.path) ?? [];
-      group.push(edit);
-      byPath.set(edit.path, group);
-    }
-
-    for (const [path, fileEdits] of byPath) {
-      const fetched = await this.#api(`GET /repos/${repository}/contents/${path}`, { ref: branch });
-      const file = this.#parse(FileContents, fetched.data, `contents of ${path}`);
-      if (file.encoding !== CONTENTS_ENCODING) {
-        // >1 MiB files come back with encoding "none" and empty content. Editing
-        // that would silently truncate the file — refuse loudly instead.
-        throw new Error(`contents of ${path} returned encoding '${file.encoding}' (file too large?) — cannot apply edits safely`);
-      }
-      const updated = applyEdits(Buffer.from(file.content, "base64").toString("utf8"), fileEdits);
-      await this.#api(`PUT /repos/${repository}/contents/${path}`, {
-        message: title,
-        content: Buffer.from(updated, "utf8").toString("base64"),
-        sha: file.sha,
-        branch,
-      });
-    }
-  }
-
-  /** PR number for a head branch (ANY state — a closed fix PR is a human decision), or null. */
-  async #findPullByHead(repository: string, head: string): Promise<number | null> {
+  /** The PR for a head branch (ANY state — a closed fix PR is a human decision), or null. */
+  async #findPullByHead(repository: string, head: string): Promise<Omit<PullRequestResult, "created"> | null> {
     const listed = await this.#api(`GET /repos/${repository}/pulls`, { head, state: "all", per_page: 1 });
     const pulls = this.#parse(PullsList, listed.data, "pulls list");
-    return pulls.length > 0 ? pulls[0]!.number : null;
+    return pulls.length > 0 ? this.#toPullResult(pulls[0]!) : null;
   }
 
   /** Head sha of a branch, or null when the branch does not exist (404). */
@@ -429,6 +567,40 @@ function statusOf(err: unknown): number | null {
     return (err as { status: number }).status;
   }
   return null;
+}
+
+/**
+ * Verify every supplied `expectedOriginal` against `content`. Pure; exported for
+ * tests.
+ *
+ * This is the precondition the old writer did not have: it replaced whatever
+ * occupied a line range, so a proposal computed against one revision could be
+ * applied to content that had since changed — silently destroying the new text.
+ * A mismatch here means the patch is stale or the preimage was fabricated;
+ * either way the whole proposal is refused, not partially applied.
+ *
+ * Edits WITHOUT a preimage are not silently accepted as "verified" — they are
+ * simply not preimage-anchored, and their safety comes from the commit being
+ * parented on the reviewed sha whose content this function was handed.
+ */
+export function verifyPreimages(content: string, edits: readonly PullRequestEdit[], reviewedSha: string): void {
+  const lines = content.split("\n");
+  for (const edit of edits) {
+    if (edit.expectedOriginal === undefined) continue;
+    if (edit.startLine < 1 || edit.endLine > lines.length) {
+      throw new Error(
+        `preimage for ${edit.path} lines ${edit.startLine}-${edit.endLine} is out of range at ${reviewedSha} ` +
+          `(file has ${lines.length} lines)`,
+      );
+    }
+    const actual = lines.slice(edit.startLine - 1, edit.endLine).join("\n");
+    if (actual !== edit.expectedOriginal) {
+      throw new Error(
+        `preimage mismatch for ${edit.path} lines ${edit.startLine}-${edit.endLine} at ${reviewedSha} — ` +
+          "refusing to apply a stale or unanchored edit",
+      );
+    }
+  }
 }
 
 /**

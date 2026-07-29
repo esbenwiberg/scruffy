@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
 import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  ExternalIssueObservation,
   FileContentResult,
   IssueLinkInput,
   IssueLinkResult,
@@ -11,10 +13,13 @@ import type {
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
+  ScmLifecycleReader,
   ScmReader,
   ScmWriter,
 } from "./port.js";
 import { withIssueMarker } from "../../domain/findings/work-publication.js";
+import { commitCarriesProposal, fixCommitMessage } from "../../domain/fixes/delivery.js";
+import type { CiEvidence, PullRequestObservation } from "../../domain/fixes/lifecycle.js";
 
 /** One published issue as the fake holds it; `input.body` carries the marker. */
 export interface FakeIssue {
@@ -34,15 +39,34 @@ export interface FakeIssue {
  * Fixtures use the SAME shapes GitHub returns; when we add the real adapter, a
  * contract test recorded from Octokit keeps these honest.
  */
-export class FakeScm implements ScmReader, ScmWriter {
+/** One fix PR as the fake holds it, including the state humans/CI move it through. */
+export interface FakePullRequest {
+  number: number;
+  url: string;
+  headSha: string;
+  draft: boolean;
+  state: "open" | "closed";
+  merged: boolean;
+  mergeCommitSha: string | null;
+  repository: string;
+  branch: string;
+  input: PullRequestInput;
+}
+
+export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #fileContent = new Map<string, FileContentResult>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
-  readonly #pullRequests = new Map<string, { number: number; input: PullRequestInput }>();
+  readonly #pullRequests = new Map<string, FakePullRequest>();
+  /** `repository#branch` -> the branch's head commit, mirroring a git ref. */
+  readonly #branches = new Map<string, { sha: string; message: string }>();
+  /** `repository@sha` -> CI evidence the repository posted for that commit. */
+  readonly #ci = new Map<string, CiEvidence>();
   readonly #issues: FakeIssue[] = [];
   /** `repository#parentNumber` -> child database id -> child number. */
   readonly #subIssues = new Map<string, Map<number, number>>();
+  readonly #issueState = new Map<number, ExternalIssueObservation>();
   #idSeq = 0;
   #prSeq = 0;
   #issueSeq = 0;
@@ -90,17 +114,175 @@ export class FakeScm implements ScmReader, ScmWriter {
     return { id, created: true };
   }
 
+  /**
+   * Mirrors the GitHub adapter's MECHANISM, not just its signature, because the
+   * mechanism is what the harness tests are about:
+   *
+   *  - idempotent on the candidate-bound `externalId`, so a re-dispatch converges
+   *    on one PR and a later candidate (different proposal identity) never matches
+   *    an earlier one;
+   *  - every `expectedOriginal` is verified against seeded content AT THE REVIEWED
+   *    SHA, so a stale preimage fails here exactly as it would against GitHub;
+   *  - the branch carries the proposal manifest in its commit message, and a
+   *    pre-existing branch that does not declare THIS proposal is refused rather
+   *    than assumed to already contain the patch;
+   *  - `draft` round-trips as provider truth.
+   */
   async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     const existing = this.#pullRequests.get(input.externalId);
     if (existing) {
-      // Idempotent: keep the number, update the payload, report not-created.
-      this.#pullRequests.set(input.externalId, { number: existing.number, input });
-      return { number: existing.number, created: false };
+      // Idempotent: keep the number/head, update the payload, report not-created.
+      existing.input = input;
+      return { number: existing.number, url: existing.url, headSha: existing.headSha, draft: existing.draft, created: false };
     }
+
+    const { repository, commitSha } = input.subject;
+    const branchKey = `${repository}#${input.branch}`;
+    const branch = this.#branches.get(branchKey);
+    if (branch !== undefined) {
+      if (!commitCarriesProposal(branch.message, input.proposalId)) {
+        throw new Error(
+          `fake-scm: branch ${input.branch} is at ${branch.sha}, which does not declare fix proposal ${input.proposalId}`,
+        );
+      }
+    } else {
+      await this.#verifyPreimages(input);
+      const sha = fakeSha(`${input.proposalId}:commit`);
+      this.#branches.set(branchKey, {
+        sha,
+        message: fixCommitMessage({ title: input.title, proposalId: input.proposalId, reviewedSha: commitSha }),
+      });
+    }
+
     this.#prSeq += 1;
     const number = this.#prSeq;
-    this.#pullRequests.set(input.externalId, { number, input });
-    return { number, created: true };
+    const record: FakePullRequest = {
+      number,
+      url: `https://github.com/${repository}/pull/${number}`,
+      headSha: this.#branches.get(branchKey)!.sha,
+      draft: input.draft,
+      state: "open",
+      merged: false,
+      mergeCommitSha: null,
+      repository,
+      branch: input.branch,
+      input,
+    };
+    this.#pullRequests.set(input.externalId, record);
+    return { number, url: record.url, headSha: record.headSha, draft: record.draft, created: true };
+  }
+
+  /**
+   * Check every supplied preimage against content seeded at the REVIEWED sha.
+   * A path with no seeded content is a hallucinated path, not an empty file.
+   */
+  async #verifyPreimages(input: PullRequestInput): Promise<void> {
+    for (const edit of input.edits) {
+      if (edit.expectedOriginal === undefined) continue;
+      const read = await this.getFileContent(input.subject, edit.path);
+      if (!read.complete) {
+        throw new Error(`fake-scm: cannot read ${edit.path} at ${input.subject.commitSha} (${read.reason})`);
+      }
+      const lines = read.content.split("\n");
+      const actual = lines.slice(edit.startLine - 1, edit.endLine).join("\n");
+      if (edit.startLine < 1 || edit.endLine > lines.length || actual !== edit.expectedOriginal) {
+        throw new Error(
+          `fake-scm: preimage mismatch for ${edit.path} lines ${edit.startLine}-${edit.endLine} at ${input.subject.commitSha}`,
+        );
+      }
+    }
+  }
+
+  // ── Lifecycle reads + the human/CI actions tests need to simulate ───────────
+
+  async getPullRequest(repository: string, number: number): Promise<PullRequestObservation | null> {
+    const record = this.#pull(repository, number);
+    if (record === undefined) return null;
+    return {
+      number: record.number,
+      url: record.url,
+      headSha: record.headSha,
+      draft: record.draft,
+      state: record.state,
+      merged: record.merged,
+      mergeCommitSha: record.merged ? record.mergeCommitSha : null,
+    };
+  }
+
+  async getCiEvidence(repository: string, sha: string): Promise<CiEvidence> {
+    return this.#ci.get(`${repository}@${sha}`) ?? { sha, checkRuns: [], statuses: [] };
+  }
+
+  async getBranchHead(repository: string, branch: string): Promise<string | null> {
+    return this.#branches.get(`${repository}#${branch}`)?.sha ?? null;
+  }
+
+  async getIssueState(_repository: string, number: number): Promise<ExternalIssueObservation | null> {
+    const closed = this.#issueState.get(number);
+    if (closed !== undefined) return closed;
+    const known = this.#issues.some((issue) => issue.ref.number === number);
+    return known ? { number, state: "open", stateReason: null, closedBy: null } : null;
+  }
+
+  /** Seed a pre-existing branch (collision/crash-resume cases). */
+  seedBranch(repository: string, branch: string, sha: string, message: string): void {
+    this.#branches.set(`${repository}#${branch}`, { sha, message });
+  }
+
+  /** Seed the repository's CI result for one immutable commit. */
+  seedCiEvidence(repository: string, sha: string, evidence: Omit<CiEvidence, "sha">): void {
+    this.#ci.set(`${repository}@${sha}`, { sha, ...evidence });
+  }
+
+  /** A human (or a push) advances the PR head — the previous head's CI is now stale. */
+  advancePullRequestHead(repository: string, number: number, sha: string): void {
+    const record = this.#requirePull(repository, number);
+    record.headSha = sha;
+    this.#branches.set(`${repository}#${record.branch}`, {
+      sha,
+      message: this.#branches.get(`${repository}#${record.branch}`)?.message ?? "",
+    });
+  }
+
+  /** A human merges the PR. Scruffy never does this itself. */
+  mergePullRequest(repository: string, number: number, mergeCommitSha: string): void {
+    const record = this.#requirePull(repository, number);
+    record.state = "closed";
+    record.merged = true;
+    record.mergeCommitSha = mergeCommitSha;
+  }
+
+  /** A human closes the PR without merging. */
+  closePullRequest(repository: string, number: number): void {
+    const record = this.#requirePull(repository, number);
+    record.state = "closed";
+    record.merged = false;
+  }
+
+  /** A human closes the child issue outside Scruffy. */
+  closeIssue(number: number, options: { actor?: string; stateReason?: string } = {}): void {
+    this.#issueState.set(number, {
+      number,
+      state: "closed",
+      stateReason: options.stateReason ?? null,
+      closedBy: options.actor ?? null,
+    });
+  }
+
+  /** Move a branch head, e.g. to the post-merge candidate. */
+  setBranchHead(repository: string, branch: string, sha: string): void {
+    const existing = this.#branches.get(`${repository}#${branch}`);
+    this.#branches.set(`${repository}#${branch}`, { sha, message: existing?.message ?? "" });
+  }
+
+  #pull(repository: string, number: number): FakePullRequest | undefined {
+    return [...this.#pullRequests.values()].find((pr) => pr.repository === repository && pr.number === number);
+  }
+
+  #requirePull(repository: string, number: number): FakePullRequest {
+    const record = this.#pull(repository, number);
+    if (record === undefined) throw new Error(`fake-scm: no pull request #${number} in ${repository}`);
+    return record;
   }
 
   /**
@@ -167,7 +349,7 @@ export class FakeScm implements ScmReader, ScmWriter {
     return [...this.#checkRuns.values()];
   }
 
-  recordedPullRequests(): { number: number; input: PullRequestInput }[] {
+  recordedPullRequests(): FakePullRequest[] {
     return [...this.#pullRequests.values()];
   }
 
@@ -201,4 +383,13 @@ export class FakeScm implements ScmReader, ScmWriter {
   #contentKey(subject: SubjectRevision, path: string): string {
     return `${this.#subjectKey(subject)}::${path}`;
   }
+}
+
+/**
+ * A deterministic 40-hex sha for a seed string. Shaped like a real git sha
+ * because the domain schemas require one — a `sha_1`-style handle would let a
+ * test pass against an identity production would reject.
+ */
+export function fakeSha(seed: string): string {
+  return createHash("sha256").update(seed).digest("hex").slice(0, 40);
 }
