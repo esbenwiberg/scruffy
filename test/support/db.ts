@@ -17,12 +17,25 @@ import { DEFAULT_DATABASE_URL } from "../../src/persistence/db.js";
 
 const PROBE_TIMEOUT_MS = 1500;
 
+/**
+ * When a DB is REQUIRED (SCRUFFY_REQUIRE_DB), the environment provisions Postgres
+ * and it may still be starting when this module loads — the exact race
+ * scripts/wait-for-db.mjs already guards `db:up` against. A single-shot probe would
+ * turn that startup race into a FALSE loud failure ("connection refused" the instant
+ * the suite loads), so when a DB is required we POLL for it to become ready before
+ * deciding it is unreachable. The loud-failure contract is preserved: if Postgres
+ * never comes up within the window, we still throw. When a DB is NOT required, we
+ * keep the single-shot fast skip so local `npm test` never hangs.
+ */
+const REQUIRE_DB_MAX_WAIT_MS = 60_000;
+const REQUIRE_DB_POLL_MS = 1000;
+
 function target(): { host: string; port: number } {
   const url = new URL(process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL);
   return { host: url.hostname, port: Number(url.port) || 5432 };
 }
 
-function probe(): Promise<boolean> {
+function probeOnce(): Promise<boolean> {
   return new Promise((resolve) => {
     const { host, port } = target();
     const socket = connect({ host, port });
@@ -35,6 +48,21 @@ function probe(): Promise<boolean> {
     socket.once("timeout", () => settle(false));
     socket.once("error", () => settle(false));
   });
+}
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function probe(): Promise<boolean> {
+  if (await probeOnce()) return true;
+  // Fast skip when a DB is not required — never hang local runs on a missing DB.
+  if (!process.env.SCRUFFY_REQUIRE_DB) return false;
+  // A DB is required: wait for a still-starting Postgres before giving up.
+  const deadline = Date.now() + REQUIRE_DB_MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    await delay(REQUIRE_DB_POLL_MS);
+    if (await probeOnce()) return true;
+  }
+  return false;
 }
 
 /** True when the configured Postgres is reachable; false otherwise. */

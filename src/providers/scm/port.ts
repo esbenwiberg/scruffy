@@ -26,11 +26,63 @@ export interface RevisionRange {
   headSha: string;
 }
 
+/**
+ * Normalized terminal state of ONE candidate-CI signal. Provider-specific
+ * vocabularies (GitHub check-run conclusions AND commit-status states) collapse
+ * into this single set. Only `success` is a clean, unambiguous pass — every other
+ * value (including `pending`, which is not terminal, and `unknown`, which is a
+ * malformed/unrecognized signal) is NOT clean and holds a release.
+ */
+export type CandidateCiState =
+  | "success"
+  | "failure"
+  | "pending"
+  | "cancelled"
+  | "timed-out"
+  | "neutral"
+  | "action-required"
+  | "error"
+  | "unknown";
+
+/** One normalized CI record, bound to the exact commit SHA it was gathered for. */
+export interface CandidateCiRecord {
+  /** The check-run name or commit-status context. */
+  context: string;
+  state: CandidateCiState;
+  /** The exact commit SHA this record belongs to (a check-run's head_sha, or the
+   * requested candidate for a per-sha commit-status read). Bound to the candidate,
+   * NEVER to a branch name — duplicate/wrong-SHA evidence is resolved downstream. */
+  sha: string;
+  source: "check-run" | "commit-status";
+  /** Provider ordering hint (ISO timestamp) for resolving duplicate records of one
+   * context to a clear latest. Absent when the provider supplied none. */
+  updatedAt?: string;
+}
+
+/**
+ * All normalized CI records for an EXACT candidate SHA. An empty `records` list is
+ * a genuinely CI-less candidate — NEVER a stand-in for a read that failed. Adapters
+ * MUST throw on any API/schema failure rather than return an empty successful set.
+ */
+export interface CandidateCiEvidence {
+  /** The exact candidate SHA the evidence was gathered for. */
+  sha: string;
+  records: CandidateCiRecord[];
+}
+
 export interface ScmReader {
   /** Changed files for a PR/subject, by immutable revision. */
   getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]>;
   /** Changed files across a range (base, head]. Used by the nightly gate. */
   getChangedFilesInRange(range: RevisionRange): Promise<ChangedFile[]>;
+  /**
+   * Normalized candidate-CI evidence (GitHub check runs + commit statuses) for the
+   * EXACT candidate SHA in `subject`. Reads and records bind to the candidate SHA,
+   * never a branch. MUST throw on any API/schema failure — an empty successful list
+   * is reserved for a candidate that genuinely has no CI signal, and a fault that
+   * masqueraded as "no required checks" would false-green the release lane.
+   */
+  getCandidateCi(subject: SubjectRevision): Promise<CandidateCiEvidence>;
 }
 
 export type CheckConclusion = "success" | "failure" | "neutral";

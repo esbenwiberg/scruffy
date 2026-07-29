@@ -3,9 +3,11 @@ import { coverageFrom, type CoverageGap } from "../../domain/evidence/coverage.j
 import type { ReleasePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
-import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
+import type { ScmReader, RevisionRange, ChangedFile, CandidateCiEvidence } from "../../providers/scm/port.js";
+import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
 import { dedupeFindings } from "../../domain/findings/identity.js";
-import { evaluateRelease, type ReleaseDecision } from "./decision.js";
+import { evaluateRelease, type ReleaseDecision, type ReleaseLlmLane, type ReleaseCiLane } from "./decision.js";
+import { evaluateCandidateCi, type CandidateCiEvaluation } from "./candidate-ci.js";
 
 /**
  * Release analysis orchestration: read the (prev-release, candidate] range's
@@ -21,8 +23,25 @@ import { evaluateRelease, type ReleaseDecision } from "./decision.js";
  */
 export async function runReleaseAnalysis(
   range: RevisionRange,
-  deps: { scm: ScmReader; analyzers: readonly Analyzer[]; validator: Validator; policy: ReleasePolicy },
-): Promise<{ findings: Finding[]; decision: ReleaseDecision }> {
+  deps: {
+    scm: ScmReader;
+    analyzers: readonly Analyzer[];
+    validator: Validator;
+    policy: ReleasePolicy;
+    /**
+     * Optional range-level LLM release-risk analyst. When wired, its retained
+     * risks and coverage feed BOTH the decision (escalation) and the report
+     * (a release-risk-llm lane). When absent the release path is unchanged —
+     * source-analysis only — so a run without a model backend stays honest.
+     */
+    releaseRisk?: ReleaseRiskAnalyst;
+  },
+): Promise<{
+  findings: Finding[];
+  decision: ReleaseDecision;
+  releaseRisk?: ReleaseRiskAssessment;
+  candidateCi: CandidateCiEvaluation;
+}> {
   const files = await deps.scm.getChangedFilesInRange(range);
   const subject = { repository: range.repository, commitSha: range.headSha };
 
@@ -60,5 +79,84 @@ export async function runReleaseAnalysis(
     findings.push({ ...finding, validation });
   }
 
-  return { findings, decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps)) };
+  // Range-level model risk assessment (a separate lane from the line-level
+  // analyzers). Its risks/coverage escalate the decision but never stop it.
+  const releaseRisk = await assessReleaseRisk(deps.releaseRisk, range, files);
+  const llmDecl = deps.policy.evidence["release-risk-llm"];
+  const llmRequired = llmDecl.applicable && llmDecl.required;
+  let llm: ReleaseLlmLane | undefined;
+  if (releaseRisk) {
+    llm = { retainedRiskCount: releaseRisk.risks.length, complete: releaseRisk.gaps.length === 0 };
+  } else if (llmRequired) {
+    // Policy REQUIRES a range-level LLM assessment but none was produced (no analyst
+    // wired for this run). Unsupported required evidence is blind, and blind is not
+    // clean — escalate exactly like a missing required CI lane. It never stops.
+    llm = { retainedRiskCount: 0, complete: false };
+  }
+  // else: the lane is not required and no analyst ran — undefined, unchanged (the
+  // source-analysis-only behavior for a model-less run).
+
+  // Candidate-CI lane: normalized check/status evidence for the EXACT candidate SHA,
+  // evaluated against the policy-named required contexts. A read failure becomes a
+  // FAILED lane (never an empty success), and a required incomplete lane escalates.
+  const candidateCi = await assessCandidateCi(deps.scm, deps.policy, subject.commitSha, subject);
+  const ci: ReleaseCiLane = { required: candidateCi.required, complete: candidateCi.complete };
+
+  return {
+    findings,
+    decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps), llm, ci),
+    candidateCi,
+    ...(releaseRisk ? { releaseRisk } : {}),
+  };
+}
+
+/**
+ * Read and evaluate the candidate-CI lane. The read is bound to the exact candidate
+ * SHA. A thrown read is caught and turned into a FAILED lane — never an empty
+ * successful set — so an API/schema fault escalates rather than false-greening. A
+ * non-applicable lane skips the read entirely.
+ */
+async function assessCandidateCi(
+  scm: ScmReader,
+  policy: ReleasePolicy,
+  candidateSha: string,
+  subject: { repository: string; commitSha: string },
+): Promise<CandidateCiEvaluation> {
+  const ci = policy.evidence["candidate-ci"];
+  if (!ci.applicable) return evaluateCandidateCi(candidateSha, ci, null, null);
+
+  let evidence: CandidateCiEvidence | null = null;
+  let readError: string | null = null;
+  try {
+    evidence = await scm.getCandidateCi(subject);
+  } catch (error) {
+    readError = error instanceof Error ? error.message : "candidate CI read failed";
+  }
+  return evaluateCandidateCi(candidateSha, ci, evidence, readError);
+}
+
+/**
+ * Run the optional release-risk analyst defensively. The analyst is contracted
+ * not to throw for a provider/parse failure (it returns a gap), but an unexpected
+ * throw must still not crash the gate or masquerade as a clean review — so it is
+ * recorded as a provider_unavailable gap over the whole range.
+ */
+async function assessReleaseRisk(
+  analyst: ReleaseRiskAnalyst | undefined,
+  range: RevisionRange,
+  files: ChangedFile[],
+): Promise<ReleaseRiskAssessment | undefined> {
+  if (!analyst) return undefined;
+  try {
+    return await analyst.assess(range, files);
+  } catch (error) {
+    return {
+      changeSummary: "",
+      risks: [],
+      gaps: [{ code: "provider_unavailable", detail: error instanceof Error ? error.message : "release-risk analyst threw" }],
+      reviewedLines: 0,
+      totalLines: 0,
+      provenance: { modelId: null, promptVersion: "unknown" },
+    };
+  }
 }

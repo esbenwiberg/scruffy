@@ -148,6 +148,67 @@ describe("GithubAppScmReader getChangedFilesInRange", () => {
   });
 });
 
+describe("GithubAppScmReader candidate CI", () => {
+  const isCheckRuns = (r: string) => r.endsWith("/check-runs");
+  const isCiStatuses = (r: string) => r.endsWith("/statuses");
+
+  const checkRuns = {
+    check_runs: [
+      { name: "ci/build", status: "completed", conclusion: "success", head_sha: HEAD, completed_at: "2026-07-20T10:00:00Z" },
+      { name: "ci/lint", status: "queued", conclusion: null, head_sha: HEAD },
+      { name: "ci/e2e", status: "completed", conclusion: "timed_out", head_sha: HEAD, completed_at: "2026-07-20T10:09:00Z" },
+    ],
+  };
+  const statuses = [
+    { context: "ci/test", state: "success", updated_at: "2026-07-20T11:00:00Z" },
+    { context: "legacy/deploy", state: "error", updated_at: "2026-07-20T11:02:00Z" },
+  ];
+
+  it("normalizes candidate CI for an exact SHA", async () => {
+    const { api } = stub([
+      { match: isCheckRuns, reply: () => ok(checkRuns) },
+      { match: isCiStatuses, reply: () => ok(statuses) },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    const evidence = await reader.getCandidateCi(SUBJECT);
+
+    expect(evidence.sha).toBe(HEAD);
+    expect(evidence.records).toEqual(
+      expect.arrayContaining([
+        { context: "ci/build", state: "success", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:00:00Z" },
+        { context: "ci/lint", state: "pending", sha: HEAD, source: "check-run" }, // not completed -> pending
+        { context: "ci/e2e", state: "timed-out", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:09:00Z" },
+        { context: "ci/test", state: "success", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:00:00Z" },
+        { context: "legacy/deploy", state: "error", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:02:00Z" },
+      ]),
+    );
+    expect(evidence.records.every((r) => r.sha === HEAD)).toBe(true);
+  });
+
+  it("does not treat failed CI reads as empty success", async () => {
+    // An API failure on the check-runs read must REJECT — never resolve to an empty
+    // (falsely clean) set. The whole point of the lane is that missing != clean.
+    const { api: failing } = stub([
+      {
+        match: isCheckRuns,
+        reply: () => {
+          throw httpError(500);
+        },
+      },
+      { match: isCiStatuses, reply: () => ok([]) },
+    ]);
+    await expect(new GithubAppScmReader({ api: failing }).getCandidateCi(SUBJECT)).rejects.toThrow(/500/);
+
+    // A malformed check-runs shape is schema-parsed and throws, never []-as-success.
+    const { api: malformed } = stub([
+      { match: isCheckRuns, reply: () => ok({ check_runs: [{ status: "completed" }] }) }, // missing `name`
+      { match: isCiStatuses, reply: () => ok([]) },
+    ]);
+    await expect(new GithubAppScmReader({ api: malformed }).getCandidateCi(SUBJECT)).rejects.toThrow(/unexpected/);
+  });
+});
+
 describe("GithubAppScmReader error discipline", () => {
   it("propagates an API failure (NEVER returns [] — an empty diff on a fault would false-green the gate)", async () => {
     const { api } = stub([

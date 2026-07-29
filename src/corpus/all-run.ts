@@ -3,6 +3,8 @@ import {
   defaultValidator,
   defaultFixers,
   modelAnalyzers,
+  releaseOfflineEvidence,
+  releaseCampaignEvidence,
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
@@ -16,7 +18,7 @@ import { replayReleaseCorpus } from "./release-replay.js";
 import { SYNTHETIC_CORPUS } from "./synthetic.js";
 import { SEEDED_CORPUS } from "./seeded.js";
 import { SEEDED_NIGHTLY_CORPUS } from "./nightly-corpus.js";
-import { SEEDED_RELEASE_CORPUS } from "./release-corpus.js";
+import { SEEDED_RELEASE_CORPUS, CAMPAIGN_RELEASE_CORPUS } from "./release-corpus.js";
 import {
   GROUNDED_POISON_CORPUS,
   GROUNDED_NIGHTLY_CORPUS,
@@ -43,7 +45,16 @@ const NIGHTLY_POLICY: NightlyPolicy = {
   reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
   fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
 };
-const RELEASE_POLICY: ReleasePolicy = { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] };
+const RELEASE_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
+};
+const RELEASE_CAMPAIGN_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseCampaignEvidence(),
+};
 
 const det = () => ({ analyzers: defaultAnalyzers(), validator: defaultValidator() });
 const modelBacked = () => ({ analyzers: [...defaultAnalyzers(), ...modelAnalyzers(groundedModel())], validator: defaultValidator() });
@@ -92,7 +103,11 @@ async function main(): Promise<void> {
   }
 
   // ── Release ─────────────────────────────────────────────────────────────────
-  const releaseDet = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, { ...det(), policy: RELEASE_POLICY });
+  const releaseDet = await replayReleaseCorpus([...SEEDED_RELEASE_CORPUS, ...CAMPAIGN_RELEASE_CORPUS], {
+    ...det(),
+    policy: RELEASE_POLICY,
+    campaignPolicy: RELEASE_CAMPAIGN_POLICY,
+  });
   const releaseGrounded = await replayReleaseCorpus(GROUNDED_RELEASE_CORPUS, { ...modelBacked(), policy: RELEASE_POLICY });
   for (const [lane, r] of [["deterministic", releaseDet], ["grounded", releaseGrounded]] as const) {
     const ok = r.metrics.unsafeShips === 0 && r.regressions.length === 0;

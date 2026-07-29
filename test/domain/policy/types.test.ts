@@ -29,12 +29,22 @@ describe("NightlyPolicy: fixable ⊆ reportable", () => {
   });
 });
 
+/** A schema-valid evidence manifest: source + CI required, LLM applicable. */
+function validEvidence(): Record<string, unknown> {
+  return {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: true, required: false },
+    "candidate-ci": { applicable: true, required: true, requiredContexts: ["ci/build", "ci/test"] },
+  };
+}
+
 describe("ReleasePolicy: stop and signoff disjoint", () => {
   it("accepts disjoint stop and signoff lists", () => {
     expect(
       ReleasePolicy.safeParse({
         stopDefectClasses: ["leaked-credential"],
         signoffDefectClasses: ["disabled-tls-verification"],
+        evidence: validEvidence(),
       }).success,
     ).toBe(true);
   });
@@ -43,10 +53,82 @@ describe("ReleasePolicy: stop and signoff disjoint", () => {
     const result = ReleasePolicy.safeParse({
       stopDefectClasses: ["leaked-credential"],
       signoffDefectClasses: ["leaked-credential", "disabled-tls-verification"],
+      evidence: validEvidence(),
     });
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]?.path).toEqual(["signoffDefectClasses"]);
     }
+  });
+});
+
+describe("ReleasePolicy: service-owned evidence lanes", () => {
+  const base = { stopDefectClasses: ["leaked-credential"], signoffDefectClasses: ["disabled-tls-verification"] };
+  const withEvidence = (evidence: unknown) => ReleasePolicy.safeParse({ ...base, evidence });
+
+  it("accepts a fully-declared evidence policy with required non-Scruffy CI contexts", () => {
+    expect(withEvidence(validEvidence()).success).toBe(true);
+  });
+
+  it("rejects a policy with no evidence declaration at all (a missing lane must fail, not weaken)", () => {
+    expect(ReleasePolicy.safeParse(base).success).toBe(false);
+  });
+
+  it("rejects unsafe release evidence policy", () => {
+    // Malformed applicability: `applicable` is not a boolean.
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "source-analysis": { applicable: "yes", required: true },
+      }).success,
+    ).toBe(false);
+
+    // Contradiction: a required lane that is not applicable.
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "release-risk-llm": { applicable: false, required: true },
+      }).success,
+    ).toBe(false);
+
+    // An applicable candidate-CI lane with NO required contexts (trivially clean).
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "candidate-ci": { applicable: true, required: true, requiredContexts: [] },
+      }).success,
+    ).toBe(false);
+
+    // Duplicate required CI contexts.
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "candidate-ci": { applicable: true, required: true, requiredContexts: ["ci/build", "ci/build"] },
+      }).success,
+    ).toBe(false);
+
+    // A non-applicable candidate-CI lane that still names contexts (contradiction).
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "candidate-ci": { applicable: false, required: false, requiredContexts: ["ci/build"] },
+      }).success,
+    ).toBe(false);
+
+    // An UNKNOWN lane id — `.strict()` rejects it rather than silently ignoring it.
+    expect(withEvidence({ ...validEvidence(), "mystery-lane": { applicable: true, required: true } }).success).toBe(false);
+
+    // A MISSING known lane — every lane must be declared explicitly.
+    const missingCi = validEvidence();
+    delete (missingCi as Record<string, unknown>)["candidate-ci"];
+    expect(withEvidence(missingCi).success).toBe(false);
+
+    // Candidate CI that names the gate's OWN `scruffy/release` context (self-dependency).
+    expect(
+      withEvidence({
+        ...validEvidence(),
+        "candidate-ci": { applicable: true, required: true, requiredContexts: ["scruffy/release"] },
+      }).success,
+    ).toBe(false);
   });
 });

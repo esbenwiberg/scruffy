@@ -7,6 +7,7 @@ import {
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
+  releaseOfflineEvidence,
   RELEASE_STOP_CLASSES,
   RELEASE_SIGNOFF_CLASSES,
 } from "../../src/providers/registry.js";
@@ -42,7 +43,11 @@ const NIGHTLY_POLICY: NightlyPolicy = {
   reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
   fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
 };
-const RELEASE_POLICY: ReleasePolicy = { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] };
+const RELEASE_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
+};
 
 // Model-backed deps: grounded cases are SEMANTIC defects, invisible to the
 // deterministic analyzers, so the model analyzer must be wired in.
