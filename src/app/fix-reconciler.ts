@@ -189,7 +189,9 @@ export class FixReconciler {
 
         if (resolution !== child.resolution) {
           await this.deps.lifecycle.setResolution({
-            occurrenceId: child.occurrenceId ?? child.workItemId,
+            // Null for a coverage-gap child: it has a work item but no finding row,
+            // and inventing an occurrence id would silently target nothing.
+            occurrenceId: child.occurrenceId,
             workItemId: child.workItemId,
             resolution,
             reason: reasonFor(child, dismissal, resolution),
@@ -207,7 +209,7 @@ export class FixReconciler {
         children: settled,
       });
 
-      await this.#refreshParent(view, closure.close ? renderParentClosure(closure) : renderParentClosure(closure), closure.close);
+      await this.#refreshParent(view, renderParentClosure(closure), closure.close);
       await this.#refreshCheck(view, closure.blockers, closure.close);
 
       if (closure.close) {
@@ -286,15 +288,17 @@ export class FixReconciler {
     await this.deps.writer.upsertIssue({
       repository: view.repository,
       marker: workItemIssueMarker(child.workItemId),
-      labels: issueLabelsFor(child.occurrenceId === null ? "coverage_gap" : "finding"),
+      labels: issueLabelsFor(child.kind),
       title: child.title,
-      body: `${child.title}\n\n${lifecycle}`,
+      body: `${child.body}\n\n${lifecycle}`,
       knownRef: { number: child.issue.number, id: child.issue.externalId, url: child.issue.url },
       // Terminal means terminal: closed with GitHub's own distinction between work
-      // that was completed and work a human decided not to do.
+      // that was completed and work a human decided not to do. A non-terminal child
+      // sends NO state at all — refreshing a body must never reopen an issue whose
+      // closure we simply failed to read this tick.
       ...(isTerminalResolution(child.resolution)
         ? ({ state: "closed", stateReason: child.resolution === "resolved" ? "completed" : "not_planned" } as const)
-        : ({ state: "open" } as const)),
+        : {}),
     });
   }
 

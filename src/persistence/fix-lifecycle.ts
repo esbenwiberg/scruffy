@@ -8,6 +8,7 @@ import {
 } from "../domain/fixes/lifecycle.js";
 import {
   FindingResolution,
+  NightlyWorkItemKind,
   ProposalCiState,
   ProposalDelivery,
   ProposalMergeState,
@@ -118,6 +119,10 @@ export interface ChildProposalState {
  * actually recorded, or the two drift and the issue becomes the more persuasive lie.
  */
 export interface ReportChildState extends ParentChildState {
+  /** Drives the issue labels the refresh re-applies (the lookup is label-scoped). */
+  kind: NightlyWorkItemKind;
+  /** The planned body. Lifecycle state is appended to it, never stored inside it. */
+  body: string;
   occurrenceId: string | null;
   issue: IssueExternalRef | null;
   proposal: ChildProposalState | null;
@@ -157,9 +162,13 @@ export interface NightlyFixLifecyclePort {
   getVerification(occurrenceId: string, subjectSha: string): Promise<FindingVerification | null>;
   /** Record a human's external closure of a work item as a dismissal. */
   recordDismissal(workItemId: string, dismissal: ExternalDismissal): Promise<void>;
-  /** Set the durable resolution of a finding occurrence and its work item. */
+  /**
+   * Set the durable resolution of a finding occurrence and its work item.
+   * `occurrenceId` is null for a coverage-gap child, which has a work item but no
+   * finding row.
+   */
   setResolution(input: {
-    occurrenceId: string;
+    occurrenceId: string | null;
     workItemId: string | null;
     resolution: FindingResolution;
     reason: string;
@@ -414,19 +423,21 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
   }
 
   async setResolution(input: {
-    occurrenceId: string;
+    occurrenceId: string | null;
     workItemId: string | null;
     resolution: FindingResolution;
     reason: string;
   }): Promise<void> {
     const now = this.clock.now();
     await withTransaction(this.pool, async (client) => {
-      await client.query(
-        `update nightly_report_findings
-            set resolution = $2, updated_at = $3
-          where occurrence_id = $1 and resolution is distinct from $2`,
-        [input.occurrenceId, input.resolution, now],
-      );
+      if (input.occurrenceId !== null) {
+        await client.query(
+          `update nightly_report_findings
+              set resolution = $2, updated_at = $3
+            where occurrence_id = $1 and resolution is distinct from $2`,
+          [input.occurrenceId, input.resolution, now],
+        );
+      }
       if (input.workItemId === null) return;
       const before = await client.query<{ resolution: string }>(
         `select resolution from nightly_work_items where work_item_id = $1 for update`,
@@ -482,7 +493,7 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
         // The verification join is LATERAL and ordered: a finding may be verified
         // more than once (each post-merge head is its own immutable subject), and
         // the current answer is the newest one — never an older, more convenient one.
-        `select w.work_item_id, w.title, w.resolution, w.occurrence_id,
+        `select w.work_item_id, w.kind, w.title, w.body, w.resolution, w.occurrence_id,
                 w.dismissal_actor, w.dismissal_reason, w.dismissed_at,
                 p.proposal_id, p.delivery, p.ci, p.ci_head_sha, p.merge_state,
                 p.pr_number, p.pr_url, p.delivery_error,
@@ -599,7 +610,9 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
 
 interface ChildRow {
   work_item_id: string;
+  kind: string;
   title: string;
+  body: string;
   resolution: string;
   occurrence_id: string | null;
   dismissal_actor: string | null;
@@ -626,7 +639,9 @@ interface ChildRow {
 function toChildState(row: ChildRow): ReportChildState {
   return {
     workItemId: row.work_item_id,
+    kind: NightlyWorkItemKind.parse(row.kind),
     title: row.title,
+    body: row.body,
     resolution: FindingResolution.parse(row.resolution),
     deliveryFailed: row.delivery === "delivery_failed",
     publicationFailed: row.publication_error !== null,
