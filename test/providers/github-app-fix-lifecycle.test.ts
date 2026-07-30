@@ -430,9 +430,11 @@ describe("GitHub App fix delivery", () => {
   });
 
   it("refuses a stale preimage without writing a ref or opening a PR", async () => {
-    // The reviewed content no longer matches what the proposal claims to replace.
-    const drifted = TLS_FILE.replace("  rejectUnauthorized: false,", "  rejectUnauthorized: false, // audited");
-    const repo = githubRepo({ [CANDIDATE_1]: { "src/http.ts": drifted, "src/config.ts": CONFIG_FILE } });
+    // The SECOND file of the proposal no longer matches what it claims to replace,
+    // so the first file has already been read and applied by the time the refusal
+    // happens — the case where a naive writer leaves an orphan blob behind.
+    const drifted = CONFIG_FILE.replace("  verifySsl: false,", "  verifySsl: false, // audited");
+    const repo = githubRepo({ [CANDIDATE_1]: { "src/http.ts": TLS_FILE, "src/config.ts": drifted } });
     const scm = new GithubAppScmWriter({ api: repo.api });
 
     const input = deliveryInput({
@@ -450,8 +452,10 @@ describe("GitHub App fix delivery", () => {
     await expect(scm.openPullRequest(input)).rejects.toThrow(/preimage mismatch/);
     expect(repo.refs.size).toBe(0);
     expect(repo.pulls).toHaveLength(0);
-    // Not even the unaffected file was pushed: a partial patch is worse than none.
-    expect(repo.calls.some((c) => c.route.endsWith("/git/trees") && c.route.startsWith("POST"))).toBe(false);
+    // Not even the unaffected file was pushed: a partial patch is worse than none,
+    // and read-and-verify completes for EVERY file before the first byte is written.
+    expect(repo.calls.some((c) => c.route === `POST /repos/${REPO}/git/blobs`)).toBe(false);
+    expect(repo.calls.some((c) => c.route === `POST /repos/${REPO}/git/trees`)).toBe(false);
   });
 
   it("refuses a colliding branch that does not declare this proposal", async () => {
