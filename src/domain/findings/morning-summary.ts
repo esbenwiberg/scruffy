@@ -134,10 +134,16 @@ export function nightlyReviewTitle(input: {
  * Count the items a human still owes this run. Deliberately NOT `closure.blockers`,
  * which may name more than one problem per child (e.g. open AND delivery failed):
  * a title that said "3 open items" for two children would overstate the work.
+ *
+ * Incomplete coverage is itself an owed item, but normally it is ALREADY one of the
+ * children (every required gap becomes a coverage-gap work item), so it is only added
+ * separately when no unresolved coverage child represents it — otherwise the one gap
+ * would be counted twice and the title would overstate the morning's work.
  */
 export function openItemCount(input: Pick<MorningSummaryInput, "requiredCoverageComplete" | "children">): number {
-  const unresolved = input.children.filter((c) => c.resolution !== "resolved" && c.resolution !== "dismissed").length;
-  return unresolved + (input.requiredCoverageComplete ? 0 : 1);
+  const unresolved = input.children.filter((c) => c.resolution !== "resolved" && c.resolution !== "dismissed");
+  const coverageIsAChild = unresolved.some((c) => c.kind === "coverage_gap");
+  return unresolved.length + (input.requiredCoverageComplete || coverageIsAChild ? 0 : 1);
 }
 
 export function renderMorningSummary(input: MorningSummaryInput): MorningSummary {
