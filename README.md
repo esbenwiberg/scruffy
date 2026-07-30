@@ -24,7 +24,8 @@ shadow mode.
 The gates deliberately have different authority:
 
 - Poison may make a blocking decision, but abstains when evidence is weak.
-- Nightly never blocks. It reports findings or proposes fix PRs.
+- Nightly never blocks. It files tracked work items and proposes fix PRs, and it
+  never merges them.
 - Release produces one aggregate decision. Uncertainty requires sign-off rather
   than being treated as safe.
 
@@ -61,8 +62,10 @@ Important limitations:
 - the first real GitHub App installation and outward check-run are operator
   steps that have not been completed;
 - the webhook server handles `pull_request` events, not merge queues;
-- nightly and release have manual entry points but no production scheduler or
-  release integration yet;
+- the nightly scheduler, issue/fix lifecycle, and morning summary are implemented
+  and covered by Postgres-backed harnesses, but have **never run against a live
+  GitHub installation** — every proof so far uses fake GitHub and model adapters;
+- release still has a manual entry point and no release-workflow integration;
 - the included corpora are small synthetic validation sets, not evidence of
   production accuracy;
 - the local hostile-code runner uses Docker, which is not accepted as the final
@@ -179,13 +182,53 @@ abstention when using the default commit-status writer.
 npm run scruffy:nightly -- <owner/repo> <branch> [head-sha]
 ```
 
-The nightly gate reviews the range after the branch's stored watermark. Running
-it again at the same head is an idempotent no-op.
+The nightly gate reviews the range after the branch's last **completely reviewed**
+head. Running it again at the same head is an idempotent no-op, and a range whose
+analyzer coverage was incomplete stays owed rather than advancing the watermark.
+
+The command prints the same summary the hosted path publishes — the parent issue
+body and `scruffy/nightly` check summary, verbatim — plus which watermark moved,
+how many effects dispatched, and anything that dead-lettered. Controlled runs and
+backfills therefore cannot describe a night differently from the scheduler.
 
 The default `gh-cli` writer can publish the nightly summary, but it cannot open
-fix PRs. If the gate chooses `propose_fix`, that effect dead-letters and the
-command exits non-zero with a warning. Opening fix PRs requires the GitHub App
-writer.
+fix PRs or issues. If the run proposes a fix, that effect dead-letters and the
+command exits non-zero with a warning. Publishing the issue graph and opening fix
+PRs requires the GitHub App writer.
+
+### The nightly self-review and fixing loop
+
+With the GitHub App reader and writer configured, each nightly range produces:
+
+- **one parent issue** per range with actionable work, and a native child issue
+  for every surviving finding and every required coverage gap. A complete, clean
+  night creates no issue — only its advisory check. A refuted finding stays in the
+  audit record and reaches no human;
+- **a fix attempt for every surviving finding**: a deterministic fixer when one
+  applies, otherwise a schema-validated model proposal anchored to real file
+  content at the reviewed SHA, bounded by service-owned patch limits, and reviewed
+  by a critic;
+- **a linked pull request** when a bounded patch applies safely — ready for review
+  when confirmed, **draft** when structurally safe but unconfirmed. Unsafe, stale,
+  or policy-weakening proposals open no PR and say why on the child issue.
+
+In the morning, the parent issue and the `scruffy/nightly` check are rendered from
+the same persisted state: coverage first, then finding counts, then every child
+issue and PR with its delivery, CI (bound to the commit it was read at), and merge
+state, then any work Scruffy failed to do.
+
+Humans hold merge and dismissal authority:
+
+- merge a fix PR you agree with — read drafts especially carefully, they are
+  marked as not independently confirmed;
+- close a fix PR you do not want; its child issue stays actionable;
+- close a child issue to dismiss the item. Scruffy records the GitHub actor and
+  state reason as a human dismissal and never relabels it as a verified fix.
+
+**Scruffy never auto-merges and never changes branch protection.** A merge is not
+resolution: a merged fix clears its finding only after Scruffy verifies the defect
+is gone at the immutable post-merge head, and an indeterminate verification keeps
+the item — and the parent — open.
 
 ### Review a release candidate
 
@@ -262,9 +305,21 @@ webhook, verification, and rollback procedure is in
 | `SCRUFFY_RECONCILE_INTERVAL_MS` | Reconcile and outbox flush interval          | `10000`                |
 | `SCRUFFY_SCM_READER`            | GitHub read adapter                          | `gh-cli`               |
 | `SCRUFFY_SCM_WRITER`            | GitHub write adapter                         | `gh-cli`               |
+| `SCRUFFY_NIGHTLY_CADENCE_MS`    | Nightly cadence per repository/branch        | unset (no schedule)    |
+| `SCRUFFY_NIGHTLY_TICK_MS`       | How often the nightly schedule is polled     | `300000`               |
+| `SCRUFFY_NIGHTLY_LEASE_MS`      | Lease held by one nightly attempt            | `1800000`              |
+| `SCRUFFY_NIGHTLY_BATCH_SIZE`    | Repositories driven per schedule tick        | `20`                   |
+| `SCRUFFY_NIGHTLY_OWNER`         | Lease owner recorded in the schedule         | `nightly-scheduler:<pid>` |
 
 Unknown backend values and malformed positive-integer settings fail at startup
 instead of silently falling back.
+
+`SCRUFFY_NIGHTLY_CADENCE_MS` is the only switch for the hosted nightly schedule.
+Unset, the server runs no schedule and nightly reviews come from
+`npm run scruffy:nightly`. Set, it requires `SCRUFFY_SCM_READER=github-app` and
+fails startup otherwise — a schedule that can enumerate no installation would
+review nothing every night and look exactly like a quiet repository. The poll
+interval must be shorter than the cadence it drives.
 
 ## Architecture
 

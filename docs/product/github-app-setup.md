@@ -157,6 +157,46 @@ export SCRUFFY_SCM_READER=github-app
 export SCRUFFY_SCM_WRITER=github-app
 ```
 
+### Nightly schedule (optional, off by default)
+
+`SCRUFFY_NIGHTLY_CADENCE_MS` is the only switch. Unset, the server runs no
+schedule at all and nightly reviews come from the manual `scruffy:nightly`
+command. Set, the server reviews **every repository in the App installation**, at
+each repository's **resolved default branch head**:
+
+```bash
+export SCRUFFY_NIGHTLY_CADENCE_MS=86400000   # once per repository per 24h
+export SCRUFFY_NIGHTLY_TICK_MS=300000        # optional: poll the schedule (default 5min)
+export SCRUFFY_NIGHTLY_LEASE_MS=1800000      # optional: attempt lease (default 30min)
+export SCRUFFY_NIGHTLY_BATCH_SIZE=20         # optional: repositories per tick (default 20)
+export SCRUFFY_NIGHTLY_OWNER=scruffy-prod-1  # optional: recorded lease owner (default pid)
+```
+
+- The **installation is the repository list**. A repository nobody installed the
+  App on is never scheduled, and uninstalling stops new work for it.
+- The **default branch comes from GitHub** per repository, never from `main` as a
+  constant, so `master`/`develop`/`trunk` repositories work unchanged.
+- The cadence is **per repository/branch**, not a wall-clock hour: a repository is
+  owed a review once its last attempt is a cadence old. `TICK_MS` only decides how
+  promptly an owed repository is picked up, so it must be shorter than the cadence
+  (the server refuses to start otherwise).
+- The schedule requires `SCRUFFY_SCM_READER=github-app`. With the `gh-cli` reader
+  there is no installation to enumerate, so a configured cadence **fails startup**
+  rather than quietly reviewing nothing every night.
+- Each attempt takes a **lease** on the repository/branch, so overlapping ticks and
+  a second process cannot double-review or double-file. A crashed attempt becomes
+  owed again as soon as its lease expires — it does not wait for the next cadence
+  window.
+
+Startup states the resolved schedule, e.g.:
+
+```
+scruffy listening on :8080 (reader: github-app, writer: github-app, model: none, reconcile every 10000ms, nightly cadence 86400000ms, polled every 300000ms, 20 repos/tick)
+```
+
+With no cadence configured it says `nightly schedule: off (manual scruffy:nightly
+only)`.
+
 With both backends set to `github-app`, the server reads diffs and writes the
 check-run entirely through the App installation. `gh` and `GH_TOKEN` are **not**
 required. (Leaving either unset keeps the default `gh-cli` shadow mode, which is
