@@ -286,8 +286,11 @@ export class GithubAppScmWriter implements ScmWriter {
    *  2. verify every supplied `expectedOriginal` against those exact lines. A
    *     mismatch is a stale or hallucinated preimage and rejects the proposal;
    *  3. apply the edits per file (`applyEdits` rejects overlaps/out-of-range);
-   *  4. write one blob per file, preserving the file's existing mode so a fix
-   *     never silently un-executables a script;
+   *  4. only once EVERY file has been read, verified and applied, write one blob
+   *     per file, preserving the file's existing mode so a fix never silently
+   *     un-executables a script. Reading and writing are separate phases on
+   *     purpose: a proposal whose third file has a stale preimage must not leave
+   *     blobs for the first two behind;
    *  5. one tree on top of the reviewed commit's tree, one commit with the
    *     reviewed sha as its single parent and the manifest trailer in its message.
    */
@@ -302,7 +305,9 @@ export class GithubAppScmWriter implements ScmWriter {
       byPath.set(edit.path, group);
     }
 
-    const entries: { path: string; mode: string; type: "blob"; sha: string }[] = [];
+    // Phase 1 — read and validate everything. Nothing is written yet, so a refusal
+    // anywhere in here leaves the repository exactly as it was found.
+    const updates: { path: string; mode: string; content: string }[] = [];
     for (const [path, fileEdits] of byPath) {
       const fetched = await this.#api(`GET /repos/${repository}/contents/${path}`, { ref: commitSha });
       const file = this.#parse(FileContents, fetched.data, `contents of ${path}`);
@@ -313,14 +318,24 @@ export class GithubAppScmWriter implements ScmWriter {
       }
       const original = Buffer.from(file.content, "base64").toString("utf8");
       verifyPreimages(original, fileEdits, commitSha);
-      const updated = applyEdits(original, fileEdits);
+      updates.push({ path, mode: await this.#blobMode(repository, parent.tree.sha, path), content: applyEdits(original, fileEdits) });
+    }
 
-      const mode = await this.#blobMode(repository, parent.tree.sha, path);
+    // Phase 2 — write. Blobs are unreachable until the tree references them and the
+    // tree is unreachable until the commit does, so the first observable change to
+    // the repository is the ref created by the caller after this returns.
+    const entries: { path: string; mode: string; type: "blob"; sha: string }[] = [];
+    for (const update of updates) {
       const blob = await this.#api(`POST /repos/${repository}/git/blobs`, {
-        content: Buffer.from(updated, "utf8").toString("base64"),
+        content: Buffer.from(update.content, "utf8").toString("base64"),
         encoding: CONTENTS_ENCODING,
       });
-      entries.push({ path, mode, type: "blob", sha: this.#parse(CreatedBlob, blob.data, `blob for ${path}`).sha });
+      entries.push({
+        path: update.path,
+        mode: update.mode,
+        type: "blob",
+        sha: this.#parse(CreatedBlob, blob.data, `blob for ${update.path}`).sha,
+      });
     }
 
     const tree = await this.#api(`POST /repos/${repository}/git/trees`, {
