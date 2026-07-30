@@ -39,6 +39,9 @@ export interface ClaimScheduleInput {
    * Cadence gate: only claim when the last attempt STARTED at or before this
    * instant (typically `now - cadenceMs`). A branch never scheduled before has no
    * start on record and is always due.
+   *
+   * An OUTSTANDING attempt (claimed, never released — i.e. a crash) bypasses this
+   * gate once its lease has expired: see `NightlyScheduleStore.claim`.
    */
   dueBefore: Date;
 }
@@ -108,9 +111,22 @@ export class NightlyScheduleStore implements NightlySchedulePort {
   /**
    * One statement. The `on conflict ... do update ... where` predicate is the whole
    * mechanism: the update (and therefore the `returning`) only happens when the row
-   * is both unleased-or-expired AND due, so a losing caller gets no row rather than
-   * a second lease. `attempts` is bumped on every grant so a repeatedly failing
-   * branch is visible to an operator.
+   * is unleased-or-expired AND owed, so a losing caller gets no row rather than a
+   * second lease. `attempts` is bumped on every grant so a repeatedly failing branch
+   * is visible to an operator.
+   *
+   * "Owed" is two things, and conflating them is a bug we already made once:
+   *
+   *  - DUE BY CADENCE — the last attempt started before the cadence window. This is
+   *    the normal nightly rhythm.
+   *  - OUTSTANDING — an attempt was claimed and never released, which only happens
+   *    when the process died mid-run (`last_finished_at` is null or older than
+   *    `last_started_at`). Such a branch is owed as soon as its LEASE expires, not a
+   *    whole cadence later; otherwise a crash at 02:00 silently costs a full night
+   *    and the lease duration would do nothing at all.
+   *
+   * A FAILED attempt is released (finished), so it waits for its next window rather
+   * than being retried on every tick.
    */
   async claim(input: ClaimScheduleInput): Promise<NightlyScheduleClaim | null> {
     const leaseId = `${input.owner}:${input.now.toISOString()}`;
@@ -127,7 +143,10 @@ export class NightlyScheduleStore implements NightlySchedulePort {
              attempts         = nightly_schedule_state.attempts + 1,
              updated_at       = excluded.updated_at
          where (nightly_schedule_state.lease_expires_at is null or nightly_schedule_state.lease_expires_at <= $6)
-           and (nightly_schedule_state.last_started_at is null or nightly_schedule_state.last_started_at <= $7)
+           and (nightly_schedule_state.last_started_at is null
+                or nightly_schedule_state.last_started_at <= $7
+                or nightly_schedule_state.last_finished_at is null
+                or nightly_schedule_state.last_finished_at < nightly_schedule_state.last_started_at)
        returning lease_id`,
       [input.repository, input.branch, input.owner, leaseId, expires, input.now, input.dueBefore],
     );
