@@ -3,10 +3,12 @@ import type { EffectivePolicy } from "../domain/policy/types.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "./fixers/port.js";
 import type { ModelProvider } from "./models/port.js";
+import type { ReleaseRiskAnalyst } from "./release-risk/port.js";
 import { SecretScanAnalyzer } from "./analyzers/secret-scan.js";
 import { DestructiveMigrationAnalyzer } from "./analyzers/destructive-migration.js";
 import { DisabledTlsAnalyzer } from "./analyzers/disabled-tls.js";
 import { ModelAnalyzer, MODEL_DEFECT_CLASSES } from "./analyzers/model-analyzer.js";
+import { ModelReleaseRiskAnalyst } from "./release-risk/model-release-risk.js";
 import { SecretValidator } from "./validation/secret-validator.js";
 import { MigrationValidator } from "./validation/migration-validator.js";
 import { TlsValidator } from "./validation/tls-validator.js";
@@ -74,6 +76,64 @@ export const DEFAULT_REMEDIATION_POLICY = {
 } as const;
 
 /**
+ * The exact GitHub check/status contexts a controlled candidate must pass for the
+ * candidate-CI lane. Deliberately NON-Scruffy — the gate never depends on its own
+ * `scruffy/release` context (that self-dependency is rejected at policy parsing).
+ * These are the honest defaults for the controlled shadow repository; a real
+ * deployment overrides them with the repo's actual required contexts.
+ */
+export const RELEASE_REQUIRED_CI_CONTEXTS = ["ci/build", "ci/test"] as const;
+
+/**
+ * Service-owned evidence-lane declarations for the default/shadow release policy.
+ * Source analysis and candidate CI are REQUIRED — a controlled candidate cannot
+ * ship without full deterministic review and every named CI context passing for the
+ * exact SHA. The range-level LLM lane is applicable but not a ship precondition here
+ * (a model backend is optional in the base wiring); when an analyst IS wired its
+ * retained risks still force sign-off. Nothing is silently optional: every lane is
+ * declared explicitly, and there is no permissive fallback.
+ */
+export const RELEASE_EVIDENCE_POLICY = {
+  "source-analysis": { applicable: true, required: true },
+  "release-risk-llm": { applicable: true, required: false },
+  "candidate-ci": { applicable: true, required: true, requiredContexts: [...RELEASE_REQUIRED_CI_CONTEXTS] },
+} as const;
+
+/**
+ * Evidence declarations for OFFLINE corpus replay: source analysis is still
+ * required (the corpus scores real deterministic review), but the release-risk-llm
+ * and candidate-CI lanes are EXPLICITLY not applicable — no `ReleaseRiskAnalyst` is
+ * wired on the replay paths and there is no live GitHub to read CI from. Note this
+ * is also used by the GROUNDED release lane, which does wire a line-level
+ * `ModelAnalyzer`: that feeds source analysis, not the range-level release-risk
+ * lane, so declaring release-risk-llm not-applicable stays accurate there. This is
+ * an explicit, honest declaration, NOT a permissive fallback: the schema still
+ * parses it and rejects contradictions.
+ */
+export function releaseOfflineEvidence() {
+  return {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: false, required: false },
+    "candidate-ci": { applicable: false, required: false, requiredContexts: [] as string[] },
+  };
+}
+
+/**
+ * Evidence declarations for the CONTROLLED CAMPAIGN corpus lane: all three lanes
+ * are applicable AND required — the honest posture the controlled first shadow
+ * integration demands. Campaign cases inject explicit fake LLM + candidate-CI
+ * evidence for these lanes; this is NOT a permissive default, and it deliberately
+ * does not mark any lane not-applicable to dodge coverage.
+ */
+export function releaseCampaignEvidence() {
+  return {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: true, required: true },
+    "candidate-ci": { applicable: true, required: true, requiredContexts: [...RELEASE_REQUIRED_CI_CONTEXTS] },
+  };
+}
+
+/**
  * The production policy derived from the registry's class lists — the single
  * place the class↔gate bindings become an EffectivePolicy, so entrypoints
  * (server, scripts) cannot drift from each other. The harness keeps its own
@@ -84,7 +144,18 @@ export function defaultPolicy(version = "policy-v1"): EffectivePolicy {
     version,
     poison: { blockableDefectClasses: [...POISON_BLOCKABLE_CLASSES], requireValidation: true },
     nightly: { reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES], fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES] },
-    release: { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] },
+    release: {
+      stopDefectClasses: [...RELEASE_STOP_CLASSES],
+      signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+      evidence: {
+        "source-analysis": { ...RELEASE_EVIDENCE_POLICY["source-analysis"] },
+        "release-risk-llm": { ...RELEASE_EVIDENCE_POLICY["release-risk-llm"] },
+        "candidate-ci": {
+          ...RELEASE_EVIDENCE_POLICY["candidate-ci"],
+          requiredContexts: [...RELEASE_EVIDENCE_POLICY["candidate-ci"].requiredContexts],
+        },
+      },
+    },
     remediation: {
       maxFiles: DEFAULT_REMEDIATION_POLICY.maxFiles,
       maxTotalLines: DEFAULT_REMEDIATION_POLICY.maxTotalLines,
@@ -106,6 +177,17 @@ export function defaultAnalyzers(): Analyzer[] {
  */
 export function modelAnalyzers(model: ModelProvider): Analyzer[] {
   return [new ModelAnalyzer(model)];
+}
+
+/**
+ * The range-level LLM release-risk analyst, wired only when a model backend is
+ * configured. Deliberately SEPARATE from the line-level analyzers: it feeds the
+ * release report's release-risk-llm lane (a change summary + cited, model-asserted
+ * risks over the whole range), not the poison/nightly finding pipeline. Kept out
+ * of the deterministic default so tests and corpus replay never make a model call.
+ */
+export function releaseRiskAnalyst(model: ModelProvider): ReleaseRiskAnalyst {
+  return new ModelReleaseRiskAnalyst(model);
 }
 
 export function defaultValidator(): Validator {

@@ -30,6 +30,8 @@ function stub(handlers: { match: (args: string[]) => boolean; reply: string }[])
 const isCompare = (a: string[]) => a.some((s) => s.includes("/compare/"));
 const isPulls = (a: string[]) => a.some((s) => s.endsWith("/pulls"));
 const isStatus = (a: string[]) => a.some((s) => s.includes("/statuses/"));
+const isCheckRuns = (a: string[]) => a.some((s) => s.includes("/check-runs"));
+const isCiStatuses = (a: string[]) => a.some((s) => s.includes("/statuses?"));
 
 // A slurped compare page: one real diff, one binary/rename file with NO patch.
 const comparePage = JSON.stringify([
@@ -142,6 +144,61 @@ describe("GhCliScm reader", () => {
     const files = await scm.getChangedFiles(SUBJECT);
     expect(files.map((f) => f.path)).toEqual(["a.ts"]);
     expect(calls.some(isCompare)).toBe(false); // never compared against the closed PR's base
+  });
+});
+
+describe("GhCliScm candidate CI", () => {
+  const checkRuns = JSON.stringify({
+    check_runs: [
+      { name: "ci/build", status: "completed", conclusion: "success", head_sha: HEAD, completed_at: "2026-07-20T10:00:00Z" },
+      { name: "ci/lint", status: "in_progress", conclusion: null, head_sha: HEAD },
+      { name: "ci/flaky", status: "completed", conclusion: "cancelled", head_sha: HEAD, completed_at: "2026-07-20T10:05:00Z" },
+    ],
+  });
+  const statuses = JSON.stringify([
+    { context: "ci/test", state: "success", updated_at: "2026-07-20T11:00:00Z" },
+    { context: "legacy/deploy", state: "failure", updated_at: "2026-07-20T11:01:00Z" },
+  ]);
+
+  it("normalizes candidate CI for an exact SHA", async () => {
+    const { runGh } = stub([
+      { match: isCheckRuns, reply: checkRuns },
+      { match: isCiStatuses, reply: statuses },
+    ]);
+    const scm = new GhCliScm({ runGh });
+
+    const evidence = await scm.getCandidateCi(SUBJECT);
+
+    expect(evidence.sha).toBe(HEAD);
+    // Check-run conclusions and commit-status states both normalize, each carrying
+    // its context, source, and the EXACT candidate SHA it was gathered for.
+    expect(evidence.records).toEqual(
+      expect.arrayContaining([
+        { context: "ci/build", state: "success", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:00:00Z" },
+        { context: "ci/lint", state: "pending", sha: HEAD, source: "check-run" }, // not completed -> pending
+        { context: "ci/flaky", state: "cancelled", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:05:00Z" },
+        { context: "ci/test", state: "success", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:00:00Z" },
+        { context: "legacy/deploy", state: "failure", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:01:00Z" },
+      ]),
+    );
+    expect(evidence.records.every((r) => r.sha === HEAD)).toBe(true);
+  });
+
+  it("does not treat failed CI reads as empty success", async () => {
+    // A gh/API failure on either read must REJECT — never resolve to an empty
+    // (falsely clean) record set that would let a missing required check pass.
+    const failing: RunGh = async () => {
+      throw new Error("gh api exited 1: HTTP 500");
+    };
+    const scm = new GhCliScm({ runGh: failing });
+    await expect(scm.getCandidateCi(SUBJECT)).rejects.toThrow(/500/);
+
+    // A malformed check-runs shape (not an array) also throws, never []-as-success.
+    const { runGh } = stub([
+      { match: isCheckRuns, reply: JSON.stringify({ check_runs: "not-an-array" }) },
+      { match: isCiStatuses, reply: "[]" },
+    ]);
+    await expect(new GhCliScm({ runGh }).getCandidateCi(SUBJECT)).rejects.toThrow(/check_runs/);
   });
 });
 

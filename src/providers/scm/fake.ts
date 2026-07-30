@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
 import type {
+  CandidateCiEvidence,
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
@@ -61,6 +62,7 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #fileContent = new Map<string, FileContentResult>();
+  readonly #candidateCi = new Map<string, CandidateCiEvidence>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, FakePullRequest>();
   /** `repository#branch` -> the branch's head commit, mirroring a git ref. */
@@ -107,6 +109,18 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
 
   async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
     return this.#fileContent.get(this.#contentKey(subject, path)) ?? { complete: false, path, reason: "not_found" };
+  }
+
+  /** Seed honest candidate-CI evidence for a candidate SHA (tests/harness). */
+  seedCandidateCi(subject: SubjectRevision, evidence: CandidateCiEvidence): void {
+    this.#candidateCi.set(this.#subjectKey(subject), evidence);
+  }
+
+  async getCandidateCi(subject: SubjectRevision): Promise<CandidateCiEvidence> {
+    // No seed is a genuinely CI-less candidate (empty records), NOT a failed read:
+    // the fake never simulates an API fault. A required context then reads as
+    // missing -> the lane is incomplete -> sign-off, exactly as intended.
+    return this.#candidateCi.get(this.#subjectKey(subject)) ?? { sha: subject.commitSha, records: [] };
   }
 
   async upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult> {

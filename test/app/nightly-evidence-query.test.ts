@@ -10,7 +10,11 @@ import {
   type NightlyEvidenceReport,
 } from "../../src/app/nightly-evidence-query.js";
 import { releaseToCheck, RELEASE_CHECK_NAME } from "../../src/effects/check-run.js";
-import type { ReleaseDecision } from "../../src/gates/release/decision.js";
+import { evaluateRelease } from "../../src/gates/release/decision.js";
+import { assembleReleaseReport } from "../../src/domain/release/report.js";
+import { COMPLETE_COVERAGE } from "../../src/domain/evidence/coverage.js";
+import type { Finding } from "../../src/domain/evidence/types.js";
+import type { ReleasePolicy } from "../../src/domain/policy/types.js";
 
 /**
  * The provider-neutral nightly EVIDENCE boundary, and the boundary it must not
@@ -29,6 +33,24 @@ import type { ReleaseDecision } from "../../src/gates/release/decision.js";
 
 const REPO = "acme/api";
 const HEAD = "a".repeat(40);
+const PREVIOUS = "c".repeat(40);
+const CANDIDATE = "d".repeat(40);
+
+/**
+ * Deterministic-only release posture for the boundary assertion: source analysis is
+ * the one declared lane, the model and candidate-CI lanes are explicitly
+ * not-applicable. Declared rather than defaulted so the report never reads a lane as
+ * clean that was simply never wired.
+ */
+const RELEASE_POLICY: ReleasePolicy = {
+  stopDefectClasses: ["leaked-credential"],
+  signoffDefectClasses: ["disabled-tls-verification"],
+  evidence: {
+    "source-analysis": { applicable: true, required: true },
+    "release-risk-llm": { applicable: false, required: false },
+    "candidate-ci": { applicable: false, required: false, requiredContexts: [] },
+  },
+};
 
 function finding(overrides: Partial<NightlyEvidenceFinding> = {}): NightlyEvidenceFinding {
   return {
@@ -241,20 +263,34 @@ describe("the release boundary", () => {
   });
 
   it("leaves the release check advisory and neutral", () => {
-    const decision = {
-      outcome: "stop",
-      summary: { stopped: 1, escalated: 0, cleared: 0, notRelevant: 0 },
-      dispositions: [
-        {
-          effect: "stops",
-          defectClass: "leaked-credential",
-          region: { path: "src/config.ts", startLine: 3, endLine: 3, snippet: "token" },
-          reason: "confirmed blocker",
-        },
-      ],
-    } as unknown as ReleaseDecision;
+    // A REAL stop: a genuine leaked-credential finding through the real release
+    // kernel and the real report assembler, so this asserts the shipped rendering
+    // path rather than a hand-shaped stand-in that could drift from it.
+    const finding: Finding = {
+      ruleId: "secret-scan/aws",
+      defectClass: "leaked-credential",
+      subject: { repository: REPO, commitSha: CANDIDATE },
+      primaryRegion: { path: "src/config.ts", startLine: 3, endLine: 3, snippet: "AWS key literal (redacted)" },
+      provenance: { analyzerId: "secret-scan", analyzerVersion: "1", modelId: null, promptVersion: null },
+      supporting: [{ trust: "deterministic", statement: "matches AWS key shape" }],
+      contradicting: [],
+      completeness: { requiredEvidencePresent: true, contextTruncated: false },
+      validation: "validated",
+    };
+    const decision = evaluateRelease([finding], RELEASE_POLICY, COMPLETE_COVERAGE);
+    expect(decision.outcome).toBe("stop");
 
-    const check = releaseToCheck(decision);
+    const report = assembleReleaseReport({
+      subject: { repository: REPO, previousReleaseSha: PREVIOUS, candidateSha: CANDIDATE },
+      policyVersion: "policy-v1",
+      generatedAt: "2026-07-15T00:00:00.000Z",
+      provenance: { analyzers: [{ id: "secret-scan" }] },
+      findings: [finding],
+      decision,
+      laneDeclarations: RELEASE_POLICY.evidence,
+    });
+
+    const check = releaseToCheck(report);
     // Even a STOP is neutral: nightly's new durable lifecycle did not promote the
     // release check to a blocking status.
     expect(check.conclusion).toBe("neutral");

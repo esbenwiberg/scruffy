@@ -5,6 +5,8 @@ import { createPool } from "../../src/persistence/db.js";
 import { migrate } from "../../src/persistence/migrate.js";
 import { RunStore } from "../../src/persistence/runs.js";
 import type { PoisonDecision } from "../../src/gates/poison/decision.js";
+import type { ReleaseDecision } from "../../src/gates/release/decision.js";
+import { assembleReleaseReport } from "../../src/domain/release/report.js";
 import { COMPLETE_COVERAGE } from "../../src/domain/evidence/coverage.js";
 
 /**
@@ -26,7 +28,7 @@ let clock: FixedClock;
 
 beforeEach(async () => {
   await migrate(pool);
-  await pool.query("truncate outbox, poison_decisions, run_transitions, evaluation_runs cascade");
+  await pool.query("truncate outbox, poison_decisions, release_decisions, release_reports, run_transitions, evaluation_runs cascade");
   clock = new FixedClock(new Date("2026-07-15T00:00:00Z"));
   runs = new RunStore(pool, clock, new SeededIdGenerator("t"));
 });
@@ -186,5 +188,51 @@ describeDb("RunStore durability", () => {
     });
     expect(bWins).toBe(true);
     expect((await runs.getRun(run.id))?.state).toBe("decided");
+  });
+
+  it("does not persist a report without its effect", async () => {
+    const run = await runs.ensureRun(SUBJECT, "release", "policy-v1");
+    await runs.transition(run.id, "pending", "analyzing", "start");
+
+    const decision: ReleaseDecision = {
+      outcome: "ship",
+      reasons: ["no_release_findings"],
+      dispositions: [],
+      summary: { stopped: 0, escalated: 0, cleared: 0, notRelevant: 0 },
+      coverage: COMPLETE_COVERAGE,
+    };
+    const report = assembleReleaseReport({
+      subject: { repository: SUBJECT.repository, previousReleaseSha: null, candidateSha: SUBJECT.commitSha },
+      policyVersion: "policy-v1",
+      generatedAt: "2026-07-15T00:00:00.000Z",
+      provenance: { analyzers: [{ id: "secret-scan" }] },
+      findings: [],
+      decision,
+    });
+
+    // Force the report/effect transaction to fail: an unserializable (circular)
+    // effect payload throws inside the transaction, which must roll back the WHOLE
+    // commit — the transition, the report, and the decision included.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    await expect(
+      runs.commitReleaseDecision({
+        runId: run.id,
+        from: "analyzing",
+        to: "decided",
+        reason: "release ship",
+        decision,
+        report,
+        findings: [],
+        effect: { effectType: "check_run", externalId: "release:acme/web:x", payload: circular },
+      }),
+    ).rejects.toThrow();
+
+    // Nothing landed: no terminal report state, and no partial effect/decision.
+    expect((await runs.getRun(run.id))?.state).toBe("analyzing");
+    expect((await pool.query("select count(*) from release_reports")).rows[0].count).toBe("0");
+    expect((await pool.query("select count(*) from outbox")).rows[0].count).toBe("0");
+    expect((await pool.query("select count(*) from release_decisions")).rows[0].count).toBe("0");
   });
 });
