@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AnalysisCoverage, type CoverageGap, type CoverageGapCode } from "../evidence/coverage.js";
 import { ValidationOutcome } from "../evidence/types.js";
-import { ProposedEdit } from "../fixes/types.js";
+import { FixDeliveryReadiness, PreconditionedEdit } from "../fixes/delivery.js";
 import { NightlyReportIdentity, RemediationProvenance, coverageWorkItemId, findingWorkItemId, runWorkItemId } from "./work-identity.js";
 
 /**
@@ -73,8 +73,23 @@ export const RemediationReason = z.enum([
   "attempt_owed",
   /** A deterministic fixer produced a patch. */
   "deterministic_patch_ready",
+  /**
+   * The LLM remediation provider produced a patch that survived structural,
+   * preimage and policy validation. Distinct from `deterministic_patch_ready`
+   * because the trust argument is different: one is service-owned pure code, the
+   * other is untrusted output that was anchored and (maybe) critic-reviewed. The
+   * proposal's own `readiness` says whether it opens ready or as a draft.
+   */
+  "model_patch_proposed",
   /** Policy considers the class fixable but no registered fixer could patch it. */
   "fixer_declined",
+  /**
+   * A patch was produced and then REFUSED — protected path, size/scope limit,
+   * unanchorable preimage, or a critic that refuted it. Not the same as
+   * `fixer_declined` ("nobody had anything to say"): something was said and the
+   * service rejected it, so the finding stays actionable with a stated reason.
+   */
+  "patch_refused",
   /** The attempt ran and failed (provider error, malformed output). */
   "attempt_failed",
 ]);
@@ -191,7 +206,24 @@ export const FixProposalRecord = z.object({
   occurrenceId: z.string().min(1),
   provenance: RemediationProvenance,
   branch: z.string().min(1),
-  edits: z.array(ProposedEdit).min(1),
+  /** Preimage-carrying where the producer could honestly claim one. */
+  edits: z.array(PreconditionedEdit).min(1),
+  /**
+   * How much confidence the proposal carries into the SCM. `ready` = independently
+   * confirmed (a service-owned deterministic fixer, or a critic-confirmed model
+   * patch); `draft` = structurally safe but semantically UNCONFIRMED. The
+   * distinction is a safety property, not presentation: it decides whether a human
+   * is handed a pull request to review or a suggestion clearly marked as one.
+   * Defaulted so rows persisted before delivery existed still parse as `ready`,
+   * which is what they were (deterministic patches were the only kind).
+   */
+  readiness: FixDeliveryReadiness.default("ready"),
+  /**
+   * Stable reason code from the remediation attempt that produced this proposal
+   * (`deterministic_patch_ready`, `critic_confirmed`, `critic_indeterminate`, ...).
+   * Rendered into the PR body so a reviewer can see WHY it is ready or draft.
+   */
+  validationReason: z.string().min(1).default("unspecified"),
   delivery: ProposalDelivery,
   ci: ProposalCiState,
   merge: ProposalMergeState,

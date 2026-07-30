@@ -10,6 +10,7 @@ import {
   modelFixerProvenance,
   type RemediationProvenance,
 } from "../../domain/findings/work-identity.js";
+import type { PreconditionedEdit } from "../../domain/fixes/delivery.js";
 import { isProtectedPath, validateProposal } from "../../domain/fixes/proposal-validation.js";
 import {
   PROMPT_VERSION as FIX_PROMPT_VERSION,
@@ -87,8 +88,12 @@ export interface RemediationAttempt {
   detail?: string;
   /** Null exactly when no fixer/model ever produced or attempted a patch. */
   provenance: RemediationProvenance | null;
-  /** Present exactly when outcome is `ready` or `draft`. */
-  edits: ProposedEdit[] | null;
+  /**
+   * Present exactly when outcome is `ready` or `draft`. Model-sourced edits carry
+   * the anchored preimage the SCM writer re-checks at the reviewed sha; a
+   * deterministic fixer reads no content and therefore claims no preimage.
+   */
+  edits: PreconditionedEdit[] | null;
   criticVerdict: CriticVerdict | null;
   criticReason: string | null;
 }

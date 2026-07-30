@@ -44,6 +44,10 @@ describe("validateProposal: happy paths", () => {
           endLine: 1,
           replacement: "rejectUnauthorized: true",
           rationale: "restore TLS verification",
+          // The preimage handed to the SCM writer is the WHOLE anchored line range
+          // read back from real subject content — not the model's substring claim.
+          // That is what lets the writer re-check the precondition at apply time.
+          expectedOriginal: "const opts = { rejectUnauthorized: false };",
         },
       ],
     });

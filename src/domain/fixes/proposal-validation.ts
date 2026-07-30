@@ -1,4 +1,5 @@
 import type { RemediationPolicy } from "../policy/types.js";
+import type { PreconditionedEdit } from "./delivery.js";
 import type { ModelFixProposal, ModelProposedEdit, ProposedEdit } from "./types.js";
 
 /**
@@ -56,10 +57,19 @@ export interface ValidateProposalInput {
 }
 
 export type ProposalValidation =
-  | { ok: true; edits: ProposedEdit[] }
+  | { ok: true; edits: PreconditionedEdit[] }
   | { ok: false; reason: ProposalRejectionReason; detail: string };
 
-/** Validate and anchor every edit; on success, project to plain `ProposedEdit`s. */
+/**
+ * Validate and anchor every edit; on success, project to preconditioned edits.
+ *
+ * The surviving `expectedOriginal` is read back out of the SUBJECT CONTENT at the
+ * anchored range rather than copied from the model's claim. They are equal here by
+ * construction (that is what anchoring proved), but taking the file's own text is
+ * what makes the value re-checkable downstream: the SCM writer re-reads the same
+ * range at the same sha and refuses the commit on any difference, so a candidate
+ * that moved between review and delivery fails closed instead of being overwritten.
+ */
 export function validateProposal(input: ValidateProposalInput): ProposalValidation {
   const { proposal, subjectSha, sources, policy } = input;
   if (proposal.edits.length === 0) {
@@ -67,7 +77,7 @@ export function validateProposal(input: ValidateProposalInput): ProposalValidati
   }
 
   const byPath = new Map(sources.map((s) => [s.path, s]));
-  const resolved: ProposedEdit[] = [];
+  const resolved: PreconditionedEdit[] = [];
 
   for (const edit of proposal.edits) {
     if (isProtectedPath(edit.path, policy.protectedPaths)) {
@@ -101,6 +111,7 @@ export function validateProposal(input: ValidateProposalInput): ProposalValidati
       endLine: anchor.endLine,
       replacement: edit.replacement,
       rationale: edit.rationale,
+      expectedOriginal: source.content.split("\n").slice(anchor.startLine - 1, anchor.endLine).join("\n"),
     });
   }
 

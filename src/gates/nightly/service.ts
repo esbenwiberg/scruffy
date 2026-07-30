@@ -1,16 +1,19 @@
 import type { EvaluationRun, RunState } from "../../domain/evaluation/types.js";
+import type { Finding } from "../../domain/evidence/types.js";
 import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { Fixer } from "../../providers/fixers/port.js";
+import type { ModelProvider } from "../../providers/models/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { NightlyRunStore, OutboxEffect } from "../../persistence/runs.js";
 import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { planIssuePublicationEffects } from "../../effects/publication-plan.js";
-import type { PullRequestPayload } from "../../effects/pull-request.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
+import { findingKey } from "../../domain/findings/identity.js";
 import { runNightlyAnalysis } from "./analyze.js";
-import { generateFixes } from "./fix.js";
+import { planFixDeliveryEffects } from "./fix-delivery.js";
+import { attemptRemediations, type RemediationAttempt } from "./remediation.js";
 import type { NightlyDecision } from "./decision.js";
 import { abstainedNightlyReport, buildNightlyReport } from "./report.js";
 import { planNightlyWorkGraph } from "../../domain/findings/work-graph.js";
@@ -22,8 +25,14 @@ export interface NightlyServiceDeps {
   scm: ScmReader;
   analyzers: readonly Analyzer[];
   validator: Validator;
-  /** Fixers indexed by defect class, for propose_fix -> fix-PR generation. */
+  /** Deterministic fixers indexed by defect class. Always preferred over the model. */
   fixers: Record<string, Fixer>;
+  /**
+   * LLM remediation backend. Absent = no model configured, in which case a finding
+   * with no deterministic fixer records remediation `unavailable` with a stated
+   * reason. A missing model must never read as "no fix was needed".
+   */
+  model?: ModelProvider;
   policy: EffectivePolicy;
   /** Lease duration for an analysis claim. Default 60s. */
   leaseMs?: number;
@@ -169,7 +178,7 @@ export class NightlyService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision: rawDecision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+      const { findings, decision } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
         runNightlyAnalysis(range, {
           scm: this.deps.scm,
           analyzers: this.deps.analyzers,
@@ -178,14 +187,19 @@ export class NightlyService {
         }),
       );
 
-      // Turn propose_fix dispositions into concrete patches; any that cannot be
-      // patched are downgraded to report inside the returned decision.
-      const { decision, fixes } = generateFixes(findings, rawDecision, this.deps.fixers);
+      // EVERY surviving finding earns one remediation attempt — deterministic where
+      // a fixer is registered, the model otherwise. Note the disposition axis is no
+      // longer rewritten by the outcome: a finding whose patch could not be produced
+      // is still exactly as real as it was, it just carries an honest remediation
+      // state. Heartbeated separately because model calls are the slow part.
+      const attempts = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
+        this.#attemptRemediations(findings, decision),
+      );
 
       // The durable report is built BEFORE any effect payload, so the check, the
       // work graph, and the persisted row are all projections of one value rather
       // than three independent renderings that can disagree.
-      const report = buildNightlyReport({ identity: this.#reportIdentity(run, branch), findings, decision, fixes });
+      const report = buildNightlyReport({ identity: this.#reportIdentity(run, branch), findings, decision, attempts });
       const workGraph = planNightlyWorkGraph(report);
 
       const check = nightlyToCheck(report);
@@ -200,25 +214,12 @@ export class NightlyService {
       const effects: OutboxEffect[] = [
         { effectType: "check_run", externalId: checkPayload.externalId, payload: checkPayload },
       ];
-      for (const fix of fixes) {
-        const prPayload: PullRequestPayload = {
-          subject: fix.subject,
-          externalId: fix.branch,
-          branch: fix.branch,
-          // The fix targets the branch this nightly review ran on — opening it
-          // against the repo default branch would propose the patch to the
-          // wrong history whenever nightly reviews a non-default branch.
-          baseBranch: branch,
-          title: fix.title,
-          body: fix.body,
-          edits: fix.edits,
-        };
-        effects.push({ effectType: "pull_request", externalId: fix.branch, payload: prPayload });
-      }
-      // Publish the durable work graph as a parent issue with native child issues.
-      // The gate only ENQUEUES: every GitHub call happens in the effects component,
-      // behind the separate write credential. A complete, clean run plans nothing.
+      // Publish the durable work graph as a parent issue with native child issues,
+      // then deliver each proposal as a PR linked to its child issue. The gate only
+      // ENQUEUES: every GitHub call happens in the effects component, behind the
+      // separate write credential. A complete, clean run plans nothing at all.
       effects.push(...planIssuePublicationEffects({ report, workGraph, check: checkPayload }));
+      effects.push(...planFixDeliveryEffects({ report, workGraph }));
 
       await runs.commitNightlyDecision({
         runId: run.id,
@@ -226,7 +227,7 @@ export class NightlyService {
         to: "decided",
         reason:
           `nightly ${report.requiredCoverageComplete ? "completely reviewed" : "PARTIALLY reviewed"} the range: ` +
-          `${report.summary.surfaced} surfaced finding(s), ${report.summary.requiredGaps} required coverage gap(s), ${fixes.length} fix PR(s)`,
+          `${report.summary.surfaced} surfaced finding(s), ${report.summary.requiredGaps} required coverage gap(s), ${report.summary.proposals} fix proposal(s)`,
         report,
         workGraph,
         decision,
@@ -240,6 +241,31 @@ export class NightlyService {
     }
 
     return (await runs.getRun(run.id)) ?? run;
+  }
+
+  /**
+   * Attempt remediation for exactly the findings a human will be shown.
+   *
+   * SUPPRESSED FINDINGS ARE SKIPPED, and that is a cost decision as much as a
+   * correctness one: a suppressed finding produces no work item and no PR, so
+   * spending a model call on it would buy nothing. Everything else — validated or
+   * not, deterministically supported or not, "fixable class" or not — gets an
+   * attempt, because deciding in advance that a finding is unfixable is exactly
+   * the coupling this series set out to remove.
+   */
+  async #attemptRemediations(
+    findings: readonly Finding[],
+    decision: NightlyDecision,
+  ): Promise<Map<string, RemediationAttempt>> {
+    const surfaced = new Set(decision.dispositions.filter((d) => d.disposition !== "suppress").map((d) => d.findingKey));
+    const targets = findings.filter((f) => surfaced.has(findingKey(f)));
+    if (targets.length === 0) return new Map();
+    return attemptRemediations(targets, {
+      fixers: this.deps.fixers,
+      ...(this.deps.model !== undefined ? { model: this.deps.model } : {}),
+      scmReader: this.deps.scm,
+      policy: this.deps.policy.remediation,
+    });
   }
 
   /**
