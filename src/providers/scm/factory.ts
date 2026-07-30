@@ -1,7 +1,8 @@
-import type { ScmReader, ScmWriter } from "./port.js";
+import type { ScmLifecycleReader, ScmReader, ScmWriter } from "./port.js";
 import { GhCliScm } from "./gh-cli.js";
 import { GithubAppScmWriter } from "./github-app.js";
 import { GithubAppScmReader } from "./github-app-reader.js";
+import { GithubAppLifecycleReader } from "./github-app-lifecycle.js";
 import { createGithubAppApi, githubAppConfigFromEnv } from "./github-app-auth.js";
 
 /**
@@ -69,6 +70,30 @@ export function createScmReader(
       return new GhCliScm(options.targetUrl !== undefined ? { targetUrl: options.targetUrl } : {});
     case "github-app":
       return new GithubAppScmReader({ api: createGithubAppApi(githubAppConfigFromEnv()) });
+    default: {
+      const _exhaustive: never = backend;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * The read side of the fix lifecycle: PR state, CI evidence for an exact sha,
+ * branch heads, and issue state. Separate from `createScmReader` because it is a
+ * strictly larger capability than reviewing a commit, and only the App backend
+ * has it — `gh-cli` returns null, which the caller must treat as "this deployment
+ * cannot reconcile fix PRs" rather than as "there is nothing to reconcile".
+ *
+ * Returning null instead of a throwing stub is deliberate: a deployment that only
+ * posts shadow statuses is a legitimate configuration, and it should be visible
+ * at wiring time, not as a per-tick error from a loop nobody reads.
+ */
+export function createScmLifecycleReader(backend: ScmReaderBackend = resolveScmReaderBackend()): ScmLifecycleReader | null {
+  switch (backend) {
+    case "gh-cli":
+      return null;
+    case "github-app":
+      return new GithubAppLifecycleReader({ api: createGithubAppApi(githubAppConfigFromEnv()) });
     default: {
       const _exhaustive: never = backend;
       return _exhaustive;

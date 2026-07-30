@@ -208,7 +208,7 @@ export class GithubAppScmWriter implements ScmWriter {
    * NEVER merges. The PR is a proposal validated by the target repo's own CI.
    */
   async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
-    const { repository, commitSha } = input.subject;
+    const { repository } = input.subject;
     const owner = repository.split("/")[0];
     const head = `${owner}:${input.branch}`;
 

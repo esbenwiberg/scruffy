@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { FixedClock } from "../../src/platform/clock.js";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { FixedClock, SeededIdGenerator } from "../../src/platform/clock.js";
 import { FixReconciler } from "../../src/app/fix-reconciler.js";
 import { PatchAppliedVerifier } from "../../src/gates/nightly/verify.js";
 import { FakeScm, fakeSha } from "../../src/providers/scm/fake.js";
@@ -7,6 +7,22 @@ import { fixProposalExternalId } from "../../src/domain/fixes/delivery.js";
 import { workItemIssueMarker, type IssueExternalRef } from "../../src/domain/findings/work-publication.js";
 import { MemoryFixLifecycleStore, type SeedChild } from "../support/memory-fix-lifecycle.js";
 import type { FakeIssue } from "../../src/providers/scm/fake.js";
+import { describeDb } from "../support/db.js";
+import { createPool } from "../../src/persistence/db.js";
+import { migrate } from "../../src/persistence/migrate.js";
+import { RunStore } from "../../src/persistence/runs.js";
+import { PublicationStore } from "../../src/persistence/publications.js";
+import { FixLifecycleStore } from "../../src/persistence/fix-lifecycle.js";
+import { COMPLETE_COVERAGE } from "../../src/domain/evidence/coverage.js";
+import type { Finding } from "../../src/domain/evidence/types.js";
+import type { NightlyPolicy } from "../../src/domain/policy/types.js";
+import { dedupeFindings } from "../../src/domain/findings/identity.js";
+import { planNightlyWorkGraph } from "../../src/domain/findings/work-graph.js";
+import { NIGHTLY_REPORT_SCHEMA_VERSION, type NightlyReportIdentity } from "../../src/domain/findings/work-identity.js";
+import { evaluateNightly } from "../../src/gates/nightly/decision.js";
+import { generateFixes } from "../../src/gates/nightly/fix.js";
+import { buildNightlyReport } from "../../src/gates/nightly/report.js";
+import { TlsFixer } from "../../src/providers/fixers/tls-fixer.js";
 
 /**
  * The fix lifecycle Scruffy does NOT control, driven end to end: repository CI,
@@ -548,5 +564,239 @@ describe("fix lifecycle: idempotency", () => {
     // One issue per work item, however many times the body was refreshed.
     expect(rig.scm.recordedIssues()).toHaveLength(2);
     expect(rig.scm.recordedCheckRuns()).toHaveLength(1);
+  });
+});
+
+/**
+ * The same lifecycle, but against real SQL and across a process boundary.
+ *
+ * Everything above runs on an in-memory port, which proves the DERIVATIONS. This
+ * suite proves the part that memory cannot: that a restarted Scruffy still knows
+ * which pull request belongs to which finding, which commit a CI verdict was read
+ * at, that a human merged, and what a post-merge verification concluded. If any
+ * of that lived only in a process, a crash would silently re-open PRs, re-verify
+ * settled findings, or — worse — lose the PR and report the finding as unfixed
+ * while the fix sits open on GitHub.
+ */
+
+const dbPool = createPool();
+
+afterAll(async () => {
+  await dbPool.end();
+});
+
+const DB_REPO = "acme/web";
+const DB_HEAD = "b".repeat(40);
+const DB_POLICY: NightlyPolicy = {
+  reportableDefectClasses: ["disabled-tls-verification"],
+  fixableDefectClasses: ["disabled-tls-verification"],
+};
+const PR_HEAD_1 = "c".repeat(40);
+const PR_HEAD_2 = "d".repeat(40);
+const MERGE_SHA = "e".repeat(40);
+const POST_MERGE_SHA = fakeSha("post-merge-head");
+
+const DB_IDENTITY: NightlyReportIdentity = {
+  repository: DB_REPO,
+  branch: BRANCH,
+  baseSha: null,
+  headSha: DB_HEAD,
+  policyVersion: "policy-v1",
+  schemaVersion: NIGHTLY_REPORT_SCHEMA_VERSION,
+};
+
+function tlsFinding(): Finding {
+  return {
+    ruleId: "TLS.REJECT_UNAUTHORIZED_FALSE",
+    defectClass: "disabled-tls-verification",
+    subject: { repository: DB_REPO, commitSha: DB_HEAD },
+    primaryRegion: { path: FIX_PATH, startLine: 3, endLine: 3, snippet: "rejectUnauthorized: false" },
+    provenance: { analyzerId: "disabled-tls", analyzerVersion: "1.0.0", modelId: null, promptVersion: null },
+    supporting: [{ trust: "deterministic", statement: "disables TLS verification" }],
+    contradicting: [],
+    completeness: { requiredEvidencePresent: true, contextTruncated: false },
+    validation: "validated",
+  };
+}
+
+describeDb("fix lifecycle durability (Postgres)", () => {
+  let dbClock: FixedClock;
+
+  beforeEach(async () => {
+    await migrate(dbPool);
+    await dbPool.query(
+      `truncate nightly_finding_verifications, nightly_fix_proposal_transitions,
+                nightly_work_item_transitions, nightly_work_item_publications,
+                nightly_fix_proposals, nightly_work_items, nightly_report_findings,
+                nightly_reports, outbox_dependencies, outbox, nightly_decisions,
+                review_watermarks, run_transitions, evaluation_runs cascade`,
+    );
+    dbClock = new FixedClock(new Date("2026-07-30T02:00:00.000Z"));
+  });
+
+  it("keeps external references and transitions across a restart", async () => {
+    // ── Process 1: review, publish, deliver, observe ──────────────────────────
+    const runs = new RunStore(dbPool, dbClock, new SeededIdGenerator("fix-lifecycle"));
+    const findings = dedupeFindings([tlsFinding()]);
+    const { decision, fixes } = generateFixes(findings, evaluateNightly(findings, DB_POLICY, COMPLETE_COVERAGE), {
+      "disabled-tls-verification": new TlsFixer(),
+    });
+    const report = buildNightlyReport({ identity: DB_IDENTITY, findings, decision, fixes });
+    const workGraph = planNightlyWorkGraph(report);
+
+    const run = await runs.ensureNightlyRun({ repository: DB_REPO, commitSha: DB_HEAD }, BRANCH, null, "policy-v1");
+    const lease = await runs.claimForAnalysis(run.id, "worker-a", 60_000);
+    expect(
+      await runs.commitNightlyDecision({
+        runId: run.id,
+        from: "analyzing",
+        to: "decided",
+        reason: "nightly decided",
+        report,
+        workGraph,
+        decision,
+        findings,
+        effects: [],
+        fenceLease: lease!,
+      }),
+    ).toBe(true);
+
+    const seeded = await dbPool.query<{ proposal_id: string; occurrence_id: string; work_item_id: string }>(
+      "select proposal_id, occurrence_id, work_item_id from nightly_fix_proposals",
+    );
+    const { proposal_id: proposalId, occurrence_id: occurrenceId, work_item_id: childId } = seeded.rows[0]!;
+    expect(childId).not.toBeNull();
+    const parentId = (
+      await dbPool.query<{ work_item_id: string }>("select work_item_id from nightly_work_items where kind = 'nightly_run'")
+    ).rows[0]!.work_item_id;
+
+    // The issues GitHub gave back, and the PR the writer opened.
+    const publications = new PublicationStore(dbPool, dbClock);
+    await publications.recordIssue(parentId, workItemIssueMarker(parentId), {
+      provider: "github",
+      number: 700,
+      externalId: "I_parent",
+      url: `https://github.com/${DB_REPO}/issues/700`,
+    });
+    await publications.recordIssue(childId!, workItemIssueMarker(childId!), {
+      provider: "github",
+      number: 701,
+      externalId: "I_child",
+      url: `https://github.com/${DB_REPO}/issues/701`,
+    });
+
+    const before = new FixLifecycleStore(dbPool, dbClock);
+    const pr = { number: 4242, url: `https://github.com/${DB_REPO}/pull/4242`, headSha: PR_HEAD_1, draft: false };
+    await before.recordDeliveryResult({ proposalId, delivery: "ready_open", pr });
+    // Green at the first head...
+    await before.recordObservation({
+      proposalId,
+      delivery: "ready_open",
+      ci: "passed",
+      ciHeadSha: PR_HEAD_1,
+      merge: "open",
+      pr,
+      mergeCommitSha: null,
+    });
+    // ...then the author pushes, and nothing is known about the new head yet.
+    const pushed = { ...pr, headSha: PR_HEAD_2 };
+    await before.recordObservation({
+      proposalId,
+      delivery: "ready_open",
+      ci: "unknown",
+      ciHeadSha: null,
+      merge: "open",
+      pr: pushed,
+      mergeCommitSha: null,
+    });
+    // A human merges it, and the first post-merge look cannot tell.
+    await before.recordObservation({
+      proposalId,
+      delivery: "ready_open",
+      ci: "passed",
+      ciHeadSha: PR_HEAD_2,
+      merge: "merged",
+      pr: pushed,
+      mergeCommitSha: MERGE_SHA,
+    });
+    await before.setResolution({
+      occurrenceId,
+      workItemId: childId,
+      resolution: "awaiting_verification",
+      reason: "merged — awaiting post-merge verification",
+    });
+    await before.recordVerification(occurrenceId, {
+      outcome: "indeterminate",
+      detail: "could not read src/http.ts at the post-merge head",
+      subjectSha: POST_MERGE_SHA,
+      verifierId: "patch-applied-verifier-1",
+    });
+
+    // ── Process 2: nothing in memory, everything from the database ────────────
+    const after = new FixLifecycleStore(dbPool, new FixedClock(new Date("2026-07-30T03:00:00.000Z")));
+
+    const [record] = await after.proposalsToReconcile(10);
+    expect(record).toBeDefined();
+    // The provider handles: which PR this finding's patch actually lives in.
+    expect(record!.pr).toEqual({ number: 4242, url: `https://github.com/${DB_REPO}/pull/4242`, headSha: PR_HEAD_2, draft: false });
+    expect(record!.merge).toBe("merged");
+    expect(record!.mergeCommitSha).toBe(MERGE_SHA);
+    // The CI verdict is inseparable from the commit it was read on.
+    expect(record!.ci).toBe("passed");
+    expect(record!.ciHeadSha).toBe(PR_HEAD_2);
+    // And the delivery identity: the reviewed candidate and the branch it targets
+    // are read back, never recomputed from something that may have moved.
+    expect(record!.repository).toBe(DB_REPO);
+    expect(record!.baseBranch).toBe(BRANCH);
+    expect(record!.reviewedHeadSha).toBe(DB_HEAD);
+    expect(record!.branch).toContain(DB_HEAD.slice(0, 12));
+    expect(record!.edits[0]).toMatchObject({ path: FIX_PATH, expectedOriginal: expect.stringContaining("rejectUnauthorized") });
+
+    // The verification is keyed to its immutable subject sha and to nothing else:
+    // a restart must not let an answer about one commit stand in for another.
+    expect(await after.getVerification(occurrenceId, POST_MERGE_SHA)).toMatchObject({ outcome: "indeterminate" });
+    expect(await after.getVerification(occurrenceId, "f".repeat(40))).toBeNull();
+
+    // Every axis transition is on record, in order, each naming its evidence.
+    const transitions = await dbPool.query<{ axis: string; from_state: string | null; to_state: string; evidence_sha: string | null }>(
+      "select axis, from_state, to_state, evidence_sha from nightly_fix_proposal_transitions where proposal_id = $1 order by seq",
+      [proposalId],
+    );
+    expect(transitions.rows).toEqual([
+      { axis: "delivery", from_state: null, to_state: "ready_open", evidence_sha: null },
+      { axis: "ci", from_state: "unknown", to_state: "passed", evidence_sha: PR_HEAD_1 },
+      // The push: same PR, new head, and the green result explicitly did not follow it.
+      { axis: "ci", from_state: "passed", to_state: "unknown", evidence_sha: PR_HEAD_2 },
+      { axis: "ci", from_state: "unknown", to_state: "passed", evidence_sha: PR_HEAD_2 },
+      { axis: "merge", from_state: "open", to_state: "merged", evidence_sha: MERGE_SHA },
+    ]);
+    const workItemTransitions = await dbPool.query<{ from_state: string | null; to_state: string }>(
+      "select from_state, to_state from nightly_work_item_transitions where work_item_id = $1 and axis = 'resolution' order by seq",
+      [childId],
+    );
+    expect(workItemTransitions.rows.at(-1)).toEqual({ from_state: "open", to_state: "awaiting_verification" });
+
+    // The closure view a restarted reconciler reads: parent still open, its issue
+    // reference intact, the child merged-but-unverified rather than resolved.
+    const [view] = await after.openReports(10);
+    expect(view!.parent).toMatchObject({ workItemId: parentId, issue: { number: 700, externalId: "I_parent" } });
+    expect(view!.requiredCoverageComplete).toBe(true);
+    const child = view!.children.find((c) => c.workItemId === childId)!;
+    expect(child.issue).toMatchObject({ number: 701, externalId: "I_child" });
+    expect(child.resolution).toBe("awaiting_verification");
+    expect(child.proposal).toMatchObject({ proposalId, delivery: "ready_open", ci: "passed", merge: "merged", pr: { number: 4242 } });
+    expect(child.verification).toMatchObject({ outcome: "indeterminate", subjectSha: POST_MERGE_SHA });
+    expect(child.dismissal).toBeNull();
+
+    // Finally: a human's dismissal of a DIFFERENT-looking outcome survives too, and
+    // survives as a dismissal — the actor and reason GitHub gave, not a verification.
+    await after.recordDismissal(childId!, { actor: "octocat", stateReason: "not_planned", at: new Date("2026-07-30T04:00:00.000Z") });
+    await after.setResolution({ occurrenceId, workItemId: childId, resolution: "dismissed", reason: "closed on GitHub" });
+    const restarted = new FixLifecycleStore(dbPool, dbClock);
+    const dismissedChild = (await restarted.openReports(10))[0]!.children.find((c) => c.workItemId === childId)!;
+    expect(dismissedChild.dismissal).toMatchObject({ actor: "octocat", stateReason: "not_planned" });
+    expect(dismissedChild.resolution).toBe("dismissed");
+    // A terminal finding drops out of reconciliation instead of being re-polled forever.
+    expect(await restarted.proposalsToReconcile(10)).toHaveLength(0);
   });
 });

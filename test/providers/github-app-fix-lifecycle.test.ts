@@ -410,7 +410,7 @@ describe("GitHub App fix delivery", () => {
     const commitWrites = repo.calls.filter((c) => c.route === `POST /repos/${REPO}/git/commits`);
     expect(treeWrites).toHaveLength(1);
     expect(commitWrites).toHaveLength(1);
-    expect((treeWrites[0].params?.tree as TreeEntry[]).map((e) => e.path).sort()).toEqual(["src/config.ts", "src/http.ts"]);
+    expect((treeWrites[0]!.params?.tree as TreeEntry[]).map((e) => e.path).sort()).toEqual(["src/config.ts", "src/http.ts"]);
     expect(Array.from(repo.blobs.values()).join("\n")).toContain("rejectUnauthorized: true,");
     expect(Array.from(repo.blobs.values()).join("\n")).toContain("verifySsl: true,");
     expect(Array.from(repo.blobs.values()).join("\n")).not.toContain("rejectUnauthorized: false");

@@ -3,8 +3,9 @@ import { SystemClock, UuidIdGenerator } from "../platform/clock.js";
 import { createPool } from "../persistence/db.js";
 import { migrate } from "../persistence/migrate.js";
 import { Scruffy } from "../app/scruffy.js";
-import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
+import type { ScmLifecycleReader, ScmReader, ScmWriter } from "../providers/scm/port.js";
 import {
+  createScmLifecycleReader,
   createScmReader,
   createScmWriter,
   resolveScmReaderBackend,
@@ -29,7 +30,9 @@ import { createWebhookServer } from "./http.js";
  *   - a reconcile-and-flush interval — the actual work engine. The webhook only
  *     records runs durably; this loop (and the immediate post-ack drive) does
  *     the analysis and dispatches outbox effects, and it recovers anything a
- *     crash left behind.
+ *     crash left behind. The same tick then reconciles the fix lifecycle —
+ *     repository CI, human merges/closures, and post-merge verification — which
+ *     is a no-op unless the reader backend can observe it (github-app).
  *
  * Config (env only, no secrets in files):
  *   SCRUFFY_WEBHOOK_SECRET          — required; GitHub webhook HMAC secret
@@ -51,6 +54,12 @@ import { createWebhookServer } from "./http.js";
 export interface ResolvedScmBackends {
   scmReader: ScmReader;
   scmWriter: ScmWriter;
+  /**
+   * Null on the gh-cli reader, which cannot observe PR/CI/issue lifecycle state.
+   * The fix-lifecycle loop is then an explicit no-op rather than a loop that
+   * quietly records nothing.
+   */
+  scmLifecycleReader: ScmLifecycleReader | null;
   readerBackend: ScmReaderBackend;
   writerBackend: ScmWriterBackend;
 }
@@ -71,6 +80,7 @@ export function createScmBackends(
     writerBackend,
     scmReader: createScmReader(readerBackend),
     scmWriter: createScmWriter(writerBackend),
+    scmLifecycleReader: createScmLifecycleReader(readerBackend),
   };
 }
 
@@ -86,7 +96,7 @@ async function main(): Promise<void> {
   // SCRUFFY_SCM_READER/_WRITER (or missing App credential) fails at boot rather
   // than mid-run. With both set to github-app the server runs fully
   // App-authenticated — no gh login or GH_TOKEN required.
-  const { scmReader, scmWriter, readerBackend, writerBackend } = createScmBackends();
+  const { scmReader, scmWriter, scmLifecycleReader, readerBackend, writerBackend } = createScmBackends();
   // Only wire a REAL model into remediation when SCRUFFY_MODEL_BACKEND explicitly
   // asks for one. Leaving `model` undefined (the "fake"/unset default) makes the
   // remediation boundary report an honest, explicit "unavailable" for any
@@ -109,6 +119,7 @@ async function main(): Promise<void> {
     validator: defaultValidator(),
     fixers: defaultFixers(),
     ...(model !== undefined ? { model } : {}),
+    ...(scmLifecycleReader !== null ? { scmLifecycleReader } : {}),
     webhookSecret: secret,
   });
 
@@ -128,6 +139,10 @@ async function main(): Promise<void> {
       try {
         await scruffy.reconcile();
         await scruffy.flushEffects();
+        // AFTER the flush: a PR opened by this very tick is then observable on the
+        // next one, and a fix PR that was just delivered already has its durable
+        // number/head sha to reconcile against.
+        await scruffy.reconcileFixes();
       } catch (err) {
         console.error(
           `reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`,
