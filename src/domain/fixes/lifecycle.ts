@@ -114,7 +114,15 @@ export interface HeadBoundCi {
 export function ciStateForHead(headSha: string, evidence: CiEvidence | null): HeadBoundCi {
   if (evidence === null) return { state: "unknown", evidenceSha: null, stale: false };
   if (evidence.sha !== headSha) return { state: "unknown", evidenceSha: null, stale: true };
-  return { state: deriveCiState(evidence), evidenceSha: evidence.sha, stale: false };
+  const state = deriveCiState(evidence);
+  // `unknown` means the repository posted NOTHING for this commit. Naming a sha
+  // alongside it would claim we hold a verdict for that commit when we hold the
+  // opposite — and the persisted form forbids the pairing outright
+  // (`(ci = 'unknown') = (ci_head_sha is null)`), so a read that produced one here
+  // would fail at the database rather than at the rule it violates.
+  return state === "unknown"
+    ? { state, evidenceSha: null, stale: false }
+    : { state, evidenceSha: evidence.sha, stale: false };
 }
 
 // ── Observed provider state ─────────────────────────────────────────────────
