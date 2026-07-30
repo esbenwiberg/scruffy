@@ -100,18 +100,39 @@ export interface RecordObservationInput {
   mergeCommitSha: string | null;
 }
 
-/** One child as parent-closure derivation needs it, plus its issue reference. */
+/** The delivery half of a child's durable state, when it has a proposal at all. */
+export interface ChildProposalState {
+  proposalId: string;
+  delivery: ProposalDelivery;
+  ci: ProposalCiState;
+  ciHeadSha: string | null;
+  merge: ProposalMergeState;
+  pr: { number: number; url: string } | null;
+  deliveryError: string | null;
+}
+
+/**
+ * One child as resolution derivation, issue rendering, and parent closure all need
+ * it. Everything is read from durable rows rather than recomputed from the
+ * provider: the issue body a human reads must be a projection of what Scruffy
+ * actually recorded, or the two drift and the issue becomes the more persuasive lie.
+ */
 export interface ReportChildState extends ParentChildState {
   occurrenceId: string | null;
   issue: IssueExternalRef | null;
-  /** Rendered lifecycle block for the child issue body, when it has a proposal. */
-  proposalId: string | null;
+  proposal: ChildProposalState | null;
+  /** A human's recorded external closure, or null. */
+  dismissal: ExternalDismissal | null;
+  /** The most recent post-merge verification for this occurrence, or null. */
+  verification: FindingVerification | null;
 }
 
 export interface ReportClosureView {
   reportId: string;
   repository: string;
   branch: string;
+  /** The reviewed candidate — the check run this report owns is bound to it. */
+  headSha: string;
   requiredCoverageComplete: boolean;
   parent: { workItemId: string; title: string; body: string; issue: IssueExternalRef | null } | null;
   children: ReportChildState[];
@@ -434,6 +455,7 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
       report_id: string;
       repository: string;
       branch: string;
+      head_sha: string;
       required_coverage_complete: boolean;
       work_item_id: string;
       title: string;
@@ -442,7 +464,7 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
       external_id: string | null;
       external_url: string | null;
     }>(
-      `select r.report_id, r.repository, r.branch, r.required_coverage_complete,
+      `select r.report_id, r.repository, r.branch, r.head_sha, r.required_coverage_complete,
               w.work_item_id, w.title, w.body,
               pub.external_number, pub.external_id, pub.external_url
          from nightly_work_items w
@@ -456,24 +478,27 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
 
     const views: ReportClosureView[] = [];
     for (const parent of parents.rows) {
-      const children = await this.pool.query<{
-        work_item_id: string;
-        title: string;
-        resolution: string;
-        occurrence_id: string | null;
-        proposal_id: string | null;
-        delivery: string | null;
-        publication_error: string | null;
-        external_number: number | null;
-        external_id: string | null;
-        external_url: string | null;
-      }>(
+      const children = await this.pool.query<ChildRow>(
+        // The verification join is LATERAL and ordered: a finding may be verified
+        // more than once (each post-merge head is its own immutable subject), and
+        // the current answer is the newest one — never an older, more convenient one.
         `select w.work_item_id, w.title, w.resolution, w.occurrence_id,
-                p.proposal_id, p.delivery,
-                pub.publication_error, pub.external_number, pub.external_id, pub.external_url
+                w.dismissal_actor, w.dismissal_reason, w.dismissed_at,
+                p.proposal_id, p.delivery, p.ci, p.ci_head_sha, p.merge_state,
+                p.pr_number, p.pr_url, p.delivery_error,
+                pub.publication_error, pub.external_number, pub.external_id, pub.external_url,
+                v.outcome as verification_outcome, v.detail as verification_detail,
+                v.subject_sha as verification_subject_sha, v.verifier_id as verification_verifier_id
            from nightly_work_items w
            left join nightly_fix_proposals p on p.work_item_id = w.work_item_id
            left join nightly_work_item_publications pub on pub.work_item_id = w.work_item_id
+           left join lateral (
+             select outcome, detail, subject_sha, verifier_id
+               from nightly_finding_verifications nv
+              where nv.occurrence_id = w.occurrence_id
+              order by nv.at desc
+              limit 1
+           ) v on true
           where w.report_id = $1 and w.kind <> 'nightly_run'
           order by w.work_item_id asc`,
         [parent.report_id],
@@ -482,6 +507,7 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
         reportId: parent.report_id,
         repository: parent.repository,
         branch: parent.branch,
+        headSha: parent.head_sha,
         requiredCoverageComplete: parent.required_coverage_complete,
         parent: {
           workItemId: parent.work_item_id,
@@ -489,16 +515,7 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
           body: parent.body,
           issue: toIssueRef(parent.external_number, parent.external_id, parent.external_url),
         },
-        children: children.rows.map((child) => ({
-          workItemId: child.work_item_id,
-          title: child.title,
-          resolution: FindingResolution.parse(child.resolution),
-          deliveryFailed: child.delivery === "delivery_failed",
-          publicationFailed: child.publication_error !== null,
-          occurrenceId: child.occurrence_id,
-          proposalId: child.proposal_id,
-          issue: toIssueRef(child.external_number, child.external_id, child.external_url),
-        })),
+        children: children.rows.map((child) => toChildState(child)),
       });
     }
     return views;
@@ -578,6 +595,71 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
       resolution: row.resolution,
     });
   }
+}
+
+interface ChildRow {
+  work_item_id: string;
+  title: string;
+  resolution: string;
+  occurrence_id: string | null;
+  dismissal_actor: string | null;
+  dismissal_reason: string | null;
+  dismissed_at: Date | null;
+  proposal_id: string | null;
+  delivery: string | null;
+  ci: string | null;
+  ci_head_sha: string | null;
+  merge_state: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  delivery_error: string | null;
+  publication_error: string | null;
+  external_number: number | null;
+  external_id: string | null;
+  external_url: string | null;
+  verification_outcome: string | null;
+  verification_detail: string | null;
+  verification_subject_sha: string | null;
+  verification_verifier_id: string | null;
+}
+
+function toChildState(row: ChildRow): ReportChildState {
+  return {
+    workItemId: row.work_item_id,
+    title: row.title,
+    resolution: FindingResolution.parse(row.resolution),
+    deliveryFailed: row.delivery === "delivery_failed",
+    publicationFailed: row.publication_error !== null,
+    occurrenceId: row.occurrence_id,
+    issue: toIssueRef(row.external_number, row.external_id, row.external_url),
+    proposal:
+      row.proposal_id === null
+        ? null
+        : {
+            proposalId: row.proposal_id,
+            delivery: ProposalDelivery.parse(row.delivery),
+            ci: ProposalCiState.parse(row.ci),
+            ciHeadSha: row.ci_head_sha,
+            merge: ProposalMergeState.parse(row.merge_state),
+            pr: row.pr_number === null || row.pr_url === null ? null : { number: row.pr_number, url: row.pr_url },
+            deliveryError: row.delivery_error,
+          },
+    // `dismissed_at` is the fact; actor and reason are whatever GitHub was willing
+    // to tell us, and a dismissal with neither is still a dismissal.
+    dismissal:
+      row.dismissed_at === null
+        ? null
+        : ExternalDismissal.parse({ actor: row.dismissal_actor, stateReason: row.dismissal_reason, at: row.dismissed_at }),
+    verification:
+      row.verification_outcome === null || row.verification_subject_sha === null
+        ? null
+        : FindingVerification.parse({
+            outcome: row.verification_outcome,
+            detail: row.verification_detail,
+            subjectSha: row.verification_subject_sha,
+            verifierId: row.verification_verifier_id,
+          }),
+  };
 }
 
 function toIssueRef(number: number | null, id: string | null, url: string | null): IssueExternalRef | null {

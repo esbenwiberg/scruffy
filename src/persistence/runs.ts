@@ -714,8 +714,9 @@ export class RunStore implements NightlyRunStore {
       if (proposal !== null) {
         const authoritative = await client.query<{ delivery: ProposalDelivery; ci: ProposalCiState; merge_state: ProposalMergeState }>(
           `insert into nightly_fix_proposals
-             (proposal_id, occurrence_id, provenance, branch, edits, delivery, ci, merge_state, created_at, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+             (proposal_id, occurrence_id, provenance, branch, edits, delivery, ci, merge_state,
+              repository, base_branch, reviewed_head_sha, reviewed_base_sha, created_at, updated_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $10, $11, $12, $13, $9, $9)
            on conflict (proposal_id) do update set updated_at = nightly_fix_proposals.updated_at
            returning delivery, ci, merge_state`,
           [
@@ -728,6 +729,13 @@ export class RunStore implements NightlyRunStore {
             proposal.ci,
             proposal.merge,
             now,
+            // The delivery target, frozen at commit time. Reconciliation reads these
+            // rather than re-deriving them from a watermark or a default branch that
+            // may have moved: the PR belongs to the candidate that was reviewed.
+            identity.repository,
+            identity.branch,
+            identity.headSha,
+            identity.baseSha,
           ],
         );
         const onRecord = authoritative.rows[0]!;
@@ -777,6 +785,22 @@ export class RunStore implements NightlyRunStore {
          values ($1, 0, 'resolution', null, $2, 'work item created', $3)
          on conflict (work_item_id, seq) do nothing`,
         [item.workItemId, item.resolution, now],
+      );
+    }
+
+    // SECOND PASS, and it has to be: `nightly_fix_proposals.work_item_id` is a
+    // foreign key into `nightly_work_items`, but the proposal rows are written above
+    // (they in turn depend on the finding rows), so the target row does not exist
+    // yet at insert time. Linking here — from the graph, keyed on occurrence — is
+    // what lets lifecycle reconciliation get from a merged PR to the child issue it
+    // must move, without re-planning the graph.
+    for (const item of items) {
+      if (item.kind !== "finding" || item.occurrenceId === null) continue;
+      await client.query(
+        `update nightly_fix_proposals
+            set work_item_id = $2, updated_at = $3
+          where occurrence_id = $1 and work_item_id is distinct from $2`,
+        [item.occurrenceId, item.workItemId, now],
       );
     }
 

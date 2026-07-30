@@ -55,6 +55,18 @@ export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckCo
  * Rendering from the durable report (rather than the in-flight decision) keeps the
  * check and the persisted truth in agreement by construction.
  */
+/**
+ * The idempotency key of a nightly run's check.
+ *
+ * Shared so the gate's first post, the publication refresh, and lifecycle
+ * reconciliation all address ONE check run on the reviewed candidate instead of
+ * competing checks that each tell a partial story. Bound to the candidate sha, so
+ * a later candidate gets its own check rather than overwriting history.
+ */
+export function nightlyCheckExternalId(repository: string, commitSha: string): string {
+  return `nightly:${repository}:${commitSha}`;
+}
+
 export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
   const { surfaced, suppressed, proposals } = report.summary;
   const gaps = requiredCoverageGaps(report.coverage);

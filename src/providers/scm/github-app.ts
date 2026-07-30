@@ -411,6 +411,11 @@ export class GithubAppScmWriter implements ScmWriter {
         title: input.title,
         body,
         labels: [...input.labels],
+        // Only sent when the caller explicitly asked for a state. Omitting the key
+        // leaves GitHub's current state untouched, which is what a body refresh of a
+        // human-closed issue must do.
+        ...(input.state !== undefined ? { state: input.state } : {}),
+        ...(input.state === "closed" && input.stateReason !== undefined ? { state_reason: input.stateReason } : {}),
       });
       // Re-parse the PATCH response rather than reusing the listed row: the update
       // is the authoritative post-write view of the issue.

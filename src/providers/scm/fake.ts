@@ -26,6 +26,8 @@ export interface FakeIssue {
   repository: string;
   ref: IssueUpsertResult;
   input: IssueUpsertInput;
+  /** Provider-side state. Only a caller that ASKED for a state ever changes it. */
+  state: "open" | "closed";
 }
 
 /**
@@ -218,10 +220,13 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
   }
 
   async getIssueState(_repository: string, number: number): Promise<ExternalIssueObservation | null> {
+    // An explicitly simulated HUMAN closure wins: it carries an actor and reason,
+    // which is exactly what distinguishes a dismissal from Scruffy's own close.
     const closed = this.#issueState.get(number);
     if (closed !== undefined) return closed;
-    const known = this.#issues.some((issue) => issue.ref.number === number);
-    return known ? { number, state: "open", stateReason: null, closedBy: null } : null;
+    const known = this.#issues.find((issue) => issue.ref.number === number);
+    if (known === undefined) return null;
+    return { number, state: known.state, stateReason: null, closedBy: null };
   }
 
   /** Seed a pre-existing branch (collision/crash-resume cases). */
@@ -302,6 +307,9 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
       this.#issueByMarker(input.repository, input.marker);
     if (existing) {
       existing.input = { ...input, body };
+      // Omitted state leaves the issue exactly as it is — a body refresh must never
+      // reopen something a human closed.
+      if (input.state !== undefined) existing.state = input.state;
       return { ...existing.ref, created: false };
     }
     this.#issueSeq += 1;
@@ -315,7 +323,9 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
       url: `https://github.com/${input.repository}/issues/${this.#issueSeq}`,
       created: true,
     };
-    this.#issues.push({ repository: input.repository, ref, input: { ...input, body } });
+    // Never closed on create, whatever the caller asked for: publishing an issue
+    // already closed would hide brand-new work from the humans it is meant for.
+    this.#issues.push({ repository: input.repository, ref, input: { ...input, body }, state: "open" });
     return ref;
   }
 

@@ -7,7 +7,7 @@ import type { Fixer } from "../../providers/fixers/port.js";
 import type { ModelProvider } from "../../providers/models/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
 import type { NightlyRunStore, OutboxEffect } from "../../persistence/runs.js";
-import { NIGHTLY_CHECK_NAME, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import { NIGHTLY_CHECK_NAME, nightlyCheckExternalId, nightlyToCheck, type CheckRunPayload } from "../../effects/check-run.js";
 import { planIssuePublicationEffects } from "../../effects/publication-plan.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { findingKey } from "../../domain/findings/identity.js";
@@ -341,6 +341,6 @@ export class NightlyService {
   }
 
   #externalId(run: EvaluationRun): string {
-    return `nightly:${run.subject.repository}:${run.subject.commitSha}`;
+    return nightlyCheckExternalId(run.subject.repository, run.subject.commitSha);
   }
 }

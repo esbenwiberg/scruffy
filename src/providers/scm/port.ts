@@ -232,6 +232,18 @@ export interface IssueUpsertInput {
    * standing between a retry and a duplicate, so it still runs.
    */
   knownRef?: IssueRef;
+  /**
+   * Desired issue state. Absent means "leave whatever state it is in" — the
+   * default, because Scruffy must not reopen an issue a human deliberately closed
+   * every time it refreshes a body.
+   *
+   * `closed` is only ever requested for work Scruffy has durably decided is
+   * terminal (a verified/dismissed child, or a parent whose children are all
+   * terminal and whose coverage is complete). An adapter MUST NOT close on create.
+   */
+  state?: "open" | "closed";
+  /** Provider close reason where supported. Ignored unless `state` is `closed`. */
+  stateReason?: "completed" | "not_planned";
 }
 
 export interface IssueUpsertResult extends IssueRef {
