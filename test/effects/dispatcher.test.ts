@@ -183,6 +183,10 @@ describeDb("EffectsDispatcher error isolation", () => {
         subject: SUBJECT,
         externalId: "pr-1",
         branch: "scruffy/fix-1",
+        // A legacy row carries no proposal identity, so the externalId stands in
+        // as the manifest token, and absent draft means "ready for review".
+        proposalId: "pr-1",
+        draft: false,
         title: "Fix the thing",
         body: "This PR fixes the thing.",
         edits: [

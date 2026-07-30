@@ -45,17 +45,6 @@ export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckCo
 }
 
 /**
- * Summarize a nightly REPORT for its check run. Nightly NEVER blocks, so the
- * conclusion is always `neutral` — it is a report, not a required gate.
- *
- * The one thing this function must never do is call a run clean that was not
- * completely reviewed. A quiet analyzer that could not look produces the same
- * empty finding list as a genuinely clean range, so the title is driven by
- * coverage FIRST and finding counts second; the gaps are then named in the body.
- * Rendering from the durable report (rather than the in-flight decision) keeps the
- * check and the persisted truth in agreement by construction.
- */
-/**
  * The idempotency key of a nightly run's check.
  *
  * Shared so the gate's first post, the publication refresh, and lifecycle
@@ -67,6 +56,17 @@ export function nightlyCheckExternalId(repository: string, commitSha: string): s
   return `nightly:${repository}:${commitSha}`;
 }
 
+/**
+ * Summarize a nightly REPORT for its check run. Nightly NEVER blocks, so the
+ * conclusion is always `neutral` — it is a report, not a required gate.
+ *
+ * The one thing this function must never do is call a run clean that was not
+ * completely reviewed. A quiet analyzer that could not look produces the same
+ * empty finding list as a genuinely clean range, so the title is driven by
+ * coverage FIRST and finding counts second; the gaps are then named in the body.
+ * Rendering from the durable report (rather than the in-flight decision) keeps the
+ * check and the persisted truth in agreement by construction.
+ */
 export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
   const { surfaced, suppressed, proposals } = report.summary;
   const gaps = requiredCoverageGaps(report.coverage);

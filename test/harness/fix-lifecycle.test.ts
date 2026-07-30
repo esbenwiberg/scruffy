@@ -750,7 +750,20 @@ describeDb("fix lifecycle durability (Postgres)", () => {
     expect(record!.baseBranch).toBe(BRANCH);
     expect(record!.reviewedHeadSha).toBe(DB_HEAD);
     expect(record!.branch).toContain(DB_HEAD.slice(0, 12));
-    expect(record!.edits[0]).toMatchObject({ path: FIX_PATH, expectedOriginal: expect.stringContaining("rejectUnauthorized") });
+    // The patch itself round-trips, because post-merge verification is
+    // finding-specific: it re-reads this path and looks for THIS replacement, and
+    // it cannot do that from a state enum.
+    expect(record!.edits).toEqual([
+      {
+        path: FIX_PATH,
+        startLine: 3,
+        endLine: 3,
+        // The deterministic fixer rewrites the analyzer's snippet, so the stored
+        // replacement is snippet-shaped rather than the full source line.
+        replacement: "rejectUnauthorized: true",
+        rationale: expect.stringContaining("Re-enable"),
+      },
+    ]);
 
     // The verification is keyed to its immutable subject sha and to nothing else:
     // a restart must not let an answer about one commit stand in for another.

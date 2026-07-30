@@ -344,8 +344,19 @@ describeDb("nightly report/work graph durability", () => {
     // A later brief (PR publication + CI + merge) progresses the AUTHORITATIVE
     // proposal row far past the fresh-report defaults of queued/unknown/open.
     await pool.query(
-      `update nightly_fix_proposals set delivery = 'ready_open', ci = 'passed', merge_state = 'merged' where proposal_id = $1`,
-      [proposalId],
+      // The lifecycle columns move as a set, and the SQL enforces it: a CI verdict
+      // needs the commit it was observed on, and nothing is merged without a PR.
+      `update nightly_fix_proposals
+          set delivery    = 'ready_open',
+              ci          = 'passed',
+              ci_head_sha = $2,
+              merge_state = 'merged',
+              pr_number   = 4242,
+              pr_url      = $3,
+              pr_head_sha = $2,
+              pr_draft    = false
+        where proposal_id = $1`,
+      [proposalId, "c".repeat(40), `https://github.com/${REPO}/pull/4242`],
     );
 
     // A retry/successor attempt recomputes the SAME report identity from scratch —
