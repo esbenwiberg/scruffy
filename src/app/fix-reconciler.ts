@@ -312,7 +312,7 @@ export class FixReconciler {
       title: parent.title,
       body: `${parent.body}\n\n${status}`,
       knownRef: { number: parent.issue.number, id: parent.issue.externalId, url: parent.issue.url },
-      ...(close ? ({ state: "closed", stateReason: "completed" } as const) : ({ state: "open" } as const)),
+      ...(close ? ({ state: "closed", stateReason: "completed" } as const) : {}),
     });
   }
 
