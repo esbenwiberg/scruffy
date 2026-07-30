@@ -4,6 +4,7 @@ import type { CheckConclusion, CheckRunInput } from "../providers/scm/port.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { ReleaseDecision } from "../gates/release/decision.js";
 import { requiredCoverageGaps, type NightlyReport } from "../domain/findings/work-graph.js";
+import { nightlyReviewTitle } from "../domain/findings/morning-summary.js";
 
 export const CHECK_NAME = "scruffy/poison";
 export const NIGHTLY_CHECK_NAME = "scruffy/nightly";
@@ -70,14 +71,17 @@ export function nightlyCheckExternalId(repository: string, commitSha: string): s
 export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
   const { surfaced, suppressed, proposals } = report.summary;
   const gaps = requiredCoverageGaps(report.coverage);
-  const fixes = proposals > 0 ? ` (${proposals} fix${proposals === 1 ? "" : "es"} proposed)` : "";
 
-  const title = !report.requiredCoverageComplete
-    ? `Nightly review: INCOMPLETE — ${gaps.length} coverage gap${gaps.length === 1 ? "" : "s"}, ` +
-      `${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`
-    : surfaced === 0
-      ? "Nightly review: clean"
-      : `Nightly review: ${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`;
+  // The SAME title formatter the refreshed morning check uses, with `openItems: null`
+  // because no lifecycle exists yet at gate time. Sharing it is what stops the first
+  // post and the morning refresh from describing one run in two different vocabularies.
+  const title = nightlyReviewTitle({
+    requiredCoverageComplete: report.requiredCoverageComplete,
+    requiredGaps: gaps.length,
+    surfaced,
+    proposals,
+    openItems: null,
+  });
 
   const findingLines = report.findings
     .filter((f) => f.visibility === "surfaced")

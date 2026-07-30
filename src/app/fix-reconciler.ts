@@ -7,10 +7,15 @@ import {
   deriveParentClosure,
   isTerminalResolution,
   renderFixLifecycle,
-  renderParentClosure,
   type ExternalDismissal,
   type FindingVerification,
+  type ParentClosure,
 } from "../domain/fixes/lifecycle.js";
+import {
+  renderMorningSummary,
+  type MorningSummary,
+  type MorningSummaryInput,
+} from "../domain/findings/morning-summary.js";
 import { issueLabelsFor, workItemIssueMarker } from "../domain/findings/work-publication.js";
 import type { FindingResolution } from "../domain/findings/work-graph.js";
 import type { PostMergeVerifier } from "../gates/nightly/verify.js";
@@ -209,8 +214,13 @@ export class FixReconciler {
         children: settled,
       });
 
-      await this.#refreshParent(view, renderParentClosure(closure), closure.close);
-      await this.#refreshCheck(view, closure.blockers, closure.close);
+      // ONE render, BOTH surfaces. The parent issue body and the advisory check are
+      // the operator's two morning views of the same run; deriving them from one
+      // value over one persisted view is what makes them congruent by construction
+      // rather than by whoever edits them next remembering to change both.
+      const morning = renderMorningSummary(morningInput(view, settled, closure));
+      await this.#refreshParent(view, morning.body, closure.close);
+      await this.#refreshCheck(view, morning);
 
       if (closure.close) {
         await this.deps.lifecycle.closeParent(
@@ -302,7 +312,7 @@ export class FixReconciler {
     });
   }
 
-  async #refreshParent(view: ReportClosureView, status: string, close: boolean): Promise<void> {
+  async #refreshParent(view: ReportClosureView, summary: string, close: boolean): Promise<void> {
     const parent = view.parent;
     if (parent === null || parent.issue === null) return;
     await this.deps.writer.upsertIssue({
@@ -310,7 +320,7 @@ export class FixReconciler {
       marker: workItemIssueMarker(parent.workItemId),
       labels: issueLabelsFor("nightly_run"),
       title: parent.title,
-      body: `${parent.body}\n\n${status}`,
+      body: `${parent.body}\n\n${summary}`,
       knownRef: { number: parent.issue.number, id: parent.issue.externalId, url: parent.issue.url },
       ...(close ? ({ state: "closed", stateReason: "completed" } as const) : {}),
     });
@@ -321,20 +331,69 @@ export class FixReconciler {
    *
    * Same external id and same candidate as the gate's original post, so this
    * updates one check run rather than adding a competing one. Always `neutral`:
-   * nightly checks are shadow/advisory and must never gate a merge.
+   * nightly checks are shadow/advisory and must never gate a merge. The title and
+   * summary are the morning render — the same bytes the parent issue carries.
    */
-  async #refreshCheck(view: ReportClosureView, blockers: readonly string[], close: boolean): Promise<void> {
+  async #refreshCheck(view: ReportClosureView, morning: MorningSummary): Promise<void> {
     await this.deps.writer.upsertCheckRun({
       subject: { repository: view.repository, commitSha: view.headSha },
       externalId: nightlyCheckExternalId(view.repository, view.headSha),
       name: NIGHTLY_CHECK_NAME,
       conclusion: "neutral",
-      title: close
-        ? "Nightly review: all items resolved or dismissed"
-        : `Nightly review: ${blockers.length} open item${blockers.length === 1 ? "" : "s"}`,
-      summary: renderParentClosure({ close, blockers: [...blockers] }),
+      title: morning.title,
+      summary: morning.body,
     });
   }
+}
+
+/**
+ * Project one persisted closure view onto the morning-summary input.
+ *
+ * Mapping rather than passing the view straight through keeps the renderer free of
+ * any persistence type: it takes provider-neutral handles, so a second SCM adapter
+ * (or a future non-issue surface) needs no change to it.
+ */
+function morningInput(view: ReportClosureView, children: readonly ReportChildState[], closure: ParentClosure): MorningSummaryInput {
+  return {
+    repository: view.repository,
+    branch: view.branch,
+    headSha: view.headSha,
+    baseSha: view.baseSha,
+    reportId: view.reportId,
+    requiredCoverageComplete: view.requiredCoverageComplete,
+    coverage: view.coverage,
+    summary: view.summary,
+    parent:
+      view.parent === null
+        ? null
+        : {
+            workItemId: view.parent.workItemId,
+            issue: view.parent.issue === null ? null : { number: view.parent.issue.number, url: view.parent.issue.url },
+          },
+    children: children.map((child) => ({
+      workItemId: child.workItemId,
+      kind: child.kind,
+      title: child.title,
+      resolution: child.resolution,
+      issue: child.issue === null ? null : { number: child.issue.number, url: child.issue.url },
+      publicationError: child.publicationError,
+      remediation: child.remediation,
+      proposal:
+        child.proposal === null
+          ? null
+          : {
+              delivery: child.proposal.delivery,
+              ci: child.proposal.ci,
+              ciHeadSha: child.proposal.ciHeadSha,
+              merge: child.proposal.merge,
+              pr: child.proposal.pr,
+              deliveryError: child.proposal.deliveryError,
+            },
+      verification: child.verification,
+      dismissal: child.dismissal,
+    })),
+    closure,
+  };
 }
 
 function reasonFor(child: ReportChildState, dismissal: ExternalDismissal | null, resolution: FindingResolution): string {

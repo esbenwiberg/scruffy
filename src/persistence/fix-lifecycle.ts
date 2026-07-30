@@ -8,11 +8,15 @@ import {
 } from "../domain/fixes/lifecycle.js";
 import {
   FindingResolution,
+  NightlyReportSummary,
   NightlyWorkItemKind,
   ProposalCiState,
   ProposalDelivery,
   ProposalMergeState,
+  RemediationRecord,
+  type RemediationState,
 } from "../domain/findings/work-graph.js";
+import { AnalysisCoverage } from "../domain/evidence/coverage.js";
 import { IssueExternalRef } from "../domain/findings/work-publication.js";
 import type { Pool } from "./db.js";
 import { withTransaction } from "./db.js";
@@ -125,6 +129,15 @@ export interface ReportChildState extends ParentChildState {
   body: string;
   occurrenceId: string | null;
   issue: IssueExternalRef | null;
+  /** Why the child's own issue could not be published, when it could not be. */
+  publicationError: string | null;
+  /**
+   * The remediation attempt recorded for this occurrence — the fact that explains a
+   * finding with NO pull request. Null for a coverage gap (nothing to remediate).
+   * Read from the durable finding row so the morning summary can say "no patch,
+   * because no model was configured" instead of leaving a silent gap.
+   */
+  remediation: { state: RemediationState; reason: string } | null;
   proposal: ChildProposalState | null;
   /** A human's recorded external closure, or null. */
   dismissal: ExternalDismissal | null;
@@ -138,7 +151,20 @@ export interface ReportClosureView {
   branch: string;
   /** The reviewed candidate — the check run this report owns is bound to it. */
   headSha: string;
+  /** The immutable lower bound of the reviewed range; null on a first review. */
+  baseSha: string | null;
   requiredCoverageComplete: boolean;
+  /**
+   * Persisted analyzer coverage and finding counts for this report.
+   *
+   * Carried on the closure view so the morning surfaces (parent issue + nightly
+   * check) render coverage and counts from the SAME row that decided
+   * `requiredCoverageComplete`. Re-reading them from a second query — or worse,
+   * re-deriving them from the children — is how a refreshed check silently drops the
+   * coverage gap the original post had.
+   */
+  coverage: AnalysisCoverage;
+  summary: NightlyReportSummary;
   parent: { workItemId: string; title: string; body: string; issue: IssueExternalRef | null } | null;
   children: ReportChildState[];
 }
@@ -466,8 +492,11 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
       report_id: string;
       repository: string;
       branch: string;
+      base_sha: string | null;
       head_sha: string;
       required_coverage_complete: boolean;
+      coverage: unknown;
+      summary: unknown;
       work_item_id: string;
       title: string;
       body: string;
@@ -475,7 +504,8 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
       external_id: string | null;
       external_url: string | null;
     }>(
-      `select r.report_id, r.repository, r.branch, r.head_sha, r.required_coverage_complete,
+      `select r.report_id, r.repository, r.branch, r.base_sha, r.head_sha, r.required_coverage_complete,
+              r.coverage, r.summary,
               w.work_item_id, w.title, w.body,
               pub.external_number, pub.external_id, pub.external_url
          from nightly_work_items w
@@ -495,12 +525,14 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
         // the current answer is the newest one — never an older, more convenient one.
         `select w.work_item_id, w.kind, w.title, w.body, w.resolution, w.occurrence_id,
                 w.dismissal_actor, w.dismissal_reason, w.dismissed_at,
+                f.remediation,
                 p.proposal_id, p.delivery, p.ci, p.ci_head_sha, p.merge_state,
                 p.pr_number, p.pr_url, p.delivery_error,
                 pub.publication_error, pub.external_number, pub.external_id, pub.external_url,
                 v.outcome as verification_outcome, v.detail as verification_detail,
                 v.subject_sha as verification_subject_sha, v.verifier_id as verification_verifier_id
            from nightly_work_items w
+           left join nightly_report_findings f on f.occurrence_id = w.occurrence_id
            left join nightly_fix_proposals p on p.work_item_id = w.work_item_id
            left join nightly_work_item_publications pub on pub.work_item_id = w.work_item_id
            left join lateral (
@@ -518,8 +550,14 @@ export class FixLifecycleStore implements NightlyFixLifecyclePort {
         reportId: parent.report_id,
         repository: parent.repository,
         branch: parent.branch,
+        baseSha: parent.base_sha,
         headSha: parent.head_sha,
         requiredCoverageComplete: parent.required_coverage_complete,
+        // Parsed, not cast: these two jsonb payloads drive what an operator is told
+        // about coverage, so a half-written row must fail loudly here rather than
+        // render as a complete review.
+        coverage: AnalysisCoverage.parse(parent.coverage),
+        summary: NightlyReportSummary.parse(parent.summary),
         parent: {
           workItemId: parent.work_item_id,
           title: parent.title,
@@ -618,6 +656,7 @@ interface ChildRow {
   dismissal_actor: string | null;
   dismissal_reason: string | null;
   dismissed_at: Date | null;
+  remediation: unknown;
   proposal_id: string | null;
   delivery: string | null;
   ci: string | null;
@@ -636,6 +675,18 @@ interface ChildRow {
   verification_verifier_id: string | null;
 }
 
+/**
+ * The remediation state/reason a morning summary needs, from the persisted
+ * `remediation` jsonb. Parsed through the domain schema — the whole record, not just
+ * the two fields — so an inconsistent row (state `proposed` with no proposal) is a
+ * loud failure rather than a summary that claims a patch nobody generated.
+ */
+function toRemediationSummary(raw: unknown): { state: RemediationState; reason: string } | null {
+  if (raw === null || raw === undefined) return null;
+  const record = RemediationRecord.parse(raw);
+  return { state: record.state, reason: record.reason };
+}
+
 function toChildState(row: ChildRow): ReportChildState {
   return {
     workItemId: row.work_item_id,
@@ -647,6 +698,8 @@ function toChildState(row: ChildRow): ReportChildState {
     publicationFailed: row.publication_error !== null,
     occurrenceId: row.occurrence_id,
     issue: toIssueRef(row.external_number, row.external_id, row.external_url),
+    publicationError: row.publication_error,
+    remediation: toRemediationSummary(row.remediation),
     proposal:
       row.proposal_id === null
         ? null

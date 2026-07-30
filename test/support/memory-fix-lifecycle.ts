@@ -1,6 +1,12 @@
 import type { Clock } from "../../src/platform/clock.js";
+import { COMPLETE_COVERAGE, coverageFrom, type AnalysisCoverage } from "../../src/domain/evidence/coverage.js";
 import type { ExternalDismissal, FindingVerification } from "../../src/domain/fixes/lifecycle.js";
-import type { FindingResolution, NightlyWorkItemKind } from "../../src/domain/findings/work-graph.js";
+import type {
+  FindingResolution,
+  NightlyReportSummary,
+  NightlyWorkItemKind,
+  RemediationState,
+} from "../../src/domain/findings/work-graph.js";
 import type { IssueExternalRef } from "../../src/domain/findings/work-publication.js";
 import { FixDeliveryRecord } from "../../src/persistence/fix-lifecycle.js";
 import type {
@@ -66,6 +72,7 @@ export interface SeedChild {
   resolution?: FindingResolution;
   issue?: IssueExternalRef | null;
   publicationError?: string | null;
+  remediation?: { state: RemediationState; reason: string } | null;
 }
 
 export interface SeedReport {
@@ -73,7 +80,16 @@ export interface SeedReport {
   repository: string;
   branch: string;
   headSha: string;
+  baseSha?: string | null;
   requiredCoverageComplete: boolean;
+  /**
+   * Optional so lifecycle-focused tests stay about lifecycle. When omitted, coverage
+   * is derived from `requiredCoverageComplete` rather than defaulted to complete —
+   * an incomplete report with complete coverage is a state the real store cannot
+   * produce, and a double that can produce it teaches the wrong thing.
+   */
+  coverage?: AnalysisCoverage;
+  summary?: NightlyReportSummary;
   parent: { workItemId: string; title: string; body: string; issue: IssueExternalRef | null };
   children: SeedChild[];
 }
@@ -99,10 +115,14 @@ interface StoredChild extends SeedChild {
   resolution: FindingResolution;
   issue: IssueExternalRef | null;
   publicationError: string | null;
+  remediation: { state: RemediationState; reason: string } | null;
   dismissal: ExternalDismissal | null;
 }
 
 interface StoredReport extends Omit<SeedReport, "children"> {
+  baseSha: string | null;
+  coverage: AnalysisCoverage;
+  summary: NightlyReportSummary;
   children: StoredChild[];
   parentResolution: FindingResolution;
 }
@@ -124,16 +144,31 @@ export class MemoryFixLifecycleStore implements NightlyFixLifecyclePort {
   // ── Seeding (tests only) ───────────────────────────────────────────────────
 
   seedReport(report: SeedReport): void {
+    const coverage =
+      report.coverage ??
+      (report.requiredCoverageComplete
+        ? COMPLETE_COVERAGE
+        : coverageFrom([{ analyzerId: "model-analyzer", code: "provider_unavailable", detail: "seeded gap" }]));
+    const children = report.children.map((child) => ({
+      ...child,
+      resolution: child.resolution ?? "open",
+      issue: child.issue ?? null,
+      publicationError: child.publicationError ?? null,
+      remediation: child.remediation ?? null,
+      dismissal: null,
+    }));
     this.#reports.push({
       ...report,
+      baseSha: report.baseSha ?? null,
+      coverage,
+      summary: report.summary ?? {
+        surfaced: children.filter((c) => c.kind === "finding").length,
+        suppressed: 0,
+        proposals: 0,
+        requiredGaps: coverage.gaps.length,
+      },
       parentResolution: "open",
-      children: report.children.map((child) => ({
-        ...child,
-        resolution: child.resolution ?? "open",
-        issue: child.issue ?? null,
-        publicationError: child.publicationError ?? null,
-        dismissal: null,
-      })),
+      children,
     });
   }
 
@@ -307,7 +342,10 @@ export class MemoryFixLifecycleStore implements NightlyFixLifecyclePort {
         repository: report.repository,
         branch: report.branch,
         headSha: report.headSha,
+        baseSha: report.baseSha,
         requiredCoverageComplete: report.requiredCoverageComplete,
+        coverage: report.coverage,
+        summary: report.summary,
         parent: report.parent,
         children: report.children.map((child) => this.#toChildState(child)),
       }));
@@ -347,6 +385,8 @@ export class MemoryFixLifecycleStore implements NightlyFixLifecyclePort {
       publicationFailed: child.publicationError !== null,
       occurrenceId: child.occurrenceId,
       issue: child.issue,
+      publicationError: child.publicationError,
+      remediation: child.remediation,
       proposal: state,
       dismissal: child.dismissal,
       // Newest verification wins — each post-merge head is its own subject, and the
