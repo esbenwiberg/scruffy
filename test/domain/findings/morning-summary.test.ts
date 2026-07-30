@@ -209,7 +209,7 @@ describe("renderMorningSummary", () => {
         children: [
           child({
             resolution: "dismissed",
-            dismissal: { actor: "octocat", stateReason: "not_planned", closedAt: new Date("2026-07-15T09:00:00.000Z") },
+            dismissal: { actor: "octocat", stateReason: "not_planned", at: new Date("2026-07-15T09:00:00.000Z") },
           }),
         ],
       }),

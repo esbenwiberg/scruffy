@@ -12,6 +12,10 @@ import {
   resolveScmWriterBackend,
 } from "../src/providers/scm/factory.js";
 import { defaultAnalyzers, defaultValidator, defaultFixers, defaultPolicy } from "../src/providers/registry.js";
+import { renderMorningForReport } from "../src/app/fix-reconciler.js";
+import { nightlyReviewTitle } from "../src/domain/findings/morning-summary.js";
+import type { MorningSummary } from "../src/domain/findings/morning-summary.js";
+import type { NightlyEvidenceSnapshot } from "../src/app/nightly-evidence-query.js";
 import { withPool } from "./review-pr.js";
 
 /**
@@ -91,6 +95,96 @@ function usage(): never {
   process.exit(2);
 }
 
+export interface ManualNightlyReport {
+  /** The hosted morning render for this candidate, when the run planned work. */
+  morning: MorningSummary | null;
+  /** Durable nightly evidence for this candidate, through the read-only query. */
+  snapshot: NightlyEvidenceSnapshot;
+  headSha: string;
+  runState: string;
+  /** The last COMPLETE review head for the branch, or null while none exists. */
+  completeWatermark: string | null;
+  flushed: number;
+  /** Outbox rows that exhausted their retries (all repositories). */
+  deadLettered: number;
+  writerBackend: string;
+}
+
+/**
+ * The manual command's output, rendered from the SAME durable state and the SAME
+ * renderer the hosted path uses.
+ *
+ * Congruence is the point. A controlled run or a backfill must not tell an operator
+ * a different story from the scheduled run that follows it, so whenever the night
+ * produced a work graph this prints the parent/check bytes verbatim — coverage
+ * first, every issue and PR linked, failures loud — and only adds the operational
+ * facts a terminal has that GitHub does not (which watermark moved, how many effects
+ * dispatched, what dead-lettered).
+ *
+ * With no work graph (a complete night that found nothing) there is nothing to link,
+ * so the summary is built from the evidence snapshot instead — still coverage first,
+ * and still incapable of titling an incomplete range as clean, because
+ * `nightlyReviewTitle` is the same function the check uses.
+ */
+export function renderManualNightly(report: ManualNightlyReport): string[] {
+  const lines: string[] = [];
+  if (report.morning !== null) {
+    lines.push(report.morning.title, "", report.morning.body);
+  } else {
+    const { snapshot } = report;
+    const gaps = snapshot.reports.flatMap((r) => r.coverageGaps);
+    const proposals = snapshot.reports.reduce((total, r) => total + r.summary.proposals, 0);
+    lines.push(
+      nightlyReviewTitle({
+        requiredCoverageComplete: snapshot.requiredCoverageComplete,
+        requiredGaps: gaps.length,
+        surfaced: snapshot.surfacedFindings,
+        proposals,
+        openItems: snapshot.openFindings + snapshot.awaitingVerification,
+      }),
+      "",
+      "## Coverage",
+      "",
+      snapshot.requiredCoverageComplete
+        ? "Required analyzer coverage is **complete** for this range."
+        : `Required analyzer coverage is **INCOMPLETE** — ${gaps.map((g) => `${g.analyzerId}: ${g.code}`).join("; ")}` +
+          " (the complete-review watermark is HELD; this range stays owed).",
+      "",
+      "## Findings",
+      "",
+      `- surfaced (human work): ${snapshot.surfacedFindings}`,
+      `- fix proposals: ${proposals}`,
+      "",
+      "## Work items",
+      "",
+      snapshot.reports.length === 0
+        ? "- No durable nightly report exists for this candidate."
+        : "- None: this run planned no work items, so no issue was created.",
+    );
+  }
+
+  lines.push(
+    "",
+    "## Run",
+    "",
+    `- Reviewed candidate: \`${report.headSha}\` (run state \`${report.runState}\`)`,
+    // The watermark is the honest answer to "is this range done": an incomplete run
+    // leaves it behind the head it just attempted.
+    report.completeWatermark === null
+      ? "- Complete-review watermark: none yet — no range has been completely reviewed on this branch."
+      : `- Complete-review watermark: \`${report.completeWatermark}\`` +
+        (report.completeWatermark === report.headSha ? " (advanced to this candidate)" : " (HELD behind this candidate)"),
+    `- Effects dispatched: ${report.flushed} (writer: ${report.writerBackend})`,
+  );
+  if (report.deadLettered > 0) {
+    lines.push(
+      `- **${report.deadLettered} outbox row(s) dead-lettered** (all repositories) — some GitHub work was NOT delivered;` +
+        " the durable report above still describes what Scruffy intended.",
+    );
+  }
+  return lines;
+}
+
 async function main(): Promise<void> {
   const [repo, branch, headArg] = process.argv.slice(2);
   if (!repo || !repo.includes("/") || !branch || !isSafeRef(branch)) usage();
@@ -136,41 +230,31 @@ async function main(): Promise<void> {
     const run = result.run;
     const flushed = await scruffy.flushEffects();
 
-    const { rows } = await pool.query<{ dispositions: unknown; summary: unknown; coverage: unknown }>(
-      "select dispositions, summary, coverage from nightly_decisions where run_id = $1",
-      [run.id],
-    );
-    const summary = rows[0]?.summary as { reported?: number; proposedFixes?: number; suppressed?: number } | undefined;
-    const coverage = rows[0]?.coverage as { complete?: boolean; gaps?: { analyzerId: string; code: string }[] } | undefined;
+    // Everything printed below comes from the DURABLE report and lifecycle state —
+    // the same rows the hosted parent issue and `scruffy/nightly` check are rendered
+    // from — rather than from this process's in-memory decision.
+    const view = (await scruffy.fixes.openReports(50)).find((candidate) => candidate.headSha === headSha) ?? null;
+    const snapshot = await scruffy.nightlyEvidence.forCandidate(repo, headSha);
+    const progress = await scruffy.runs.getReviewProgress(repo, branch);
 
     console.log("");
-    console.log(`Range     : ${run.baseSha ? run.baseSha.slice(0, 12) : "(first review)"} … ${headSha.slice(0, 12)}`);
-    console.log(`Run state : ${run.state}`);
-    if (summary) {
-      console.log(
-        `Dispositions: report ${summary.reported ?? 0}, propose_fix ${summary.proposedFixes ?? 0}, suppress ${summary.suppressed ?? 0}`,
-      );
-    } else if (run.state === "indeterminate") {
-      console.log("Dispositions: none — analysis could not run (abstained; watermark held for re-review).");
+    for (const line of renderManualNightly({
+      morning: view === null ? null : renderMorningForReport(view),
+      snapshot,
+      headSha,
+      runState: run.state,
+      completeWatermark: progress?.lastCompleteHead ?? null,
+      flushed,
+      deadLettered: await scruffy.outbox.countFailed(),
+      writerBackend,
+    })) {
+      console.log(line);
     }
-    // Coverage is the difference between "reviewed and clean" and "could not look".
-    // Print it plainly: an incomplete run holds the complete-review watermark, so a
-    // quiet output here must never read as a clean night.
-    if (coverage) {
-      const gaps = coverage.gaps ?? [];
-      console.log(
-        gaps.length === 0
-          ? "Coverage  : complete"
-          : `Coverage  : INCOMPLETE — ${gaps.map((g) => `${g.analyzerId}: ${g.code}`).join("; ")} ` +
-            `(complete-review watermark held; range stays owed)`,
-      );
-    }
-    console.log(`Effects   : ${flushed} dispatched to GitHub (writer: ${writerBackend})`);
-    console.log(`Branch    : ${htmlUrl}`);
+    console.log(`\nBranch    : ${htmlUrl}`);
 
     // Honesty: a proposed fix wants a REAL PR, which the gh-cli writer cannot open.
     // That effect will have failed to dispatch and dead-lettered — say so plainly.
-    const proposedFixes = summary?.proposedFixes ?? 0;
+    const proposedFixes = snapshot.reports.reduce((total, r) => total + r.summary.proposals, 0);
     if (writerBackend === "gh-cli" && proposedFixes > 0) {
       console.error(
         `\nWARNING: ${proposedFixes} fix PR(s) were proposed but the gh-cli writer cannot open PRs ` +

@@ -347,6 +347,19 @@ export class FixReconciler {
 }
 
 /**
+ * The morning render for one persisted report view, closure included.
+ *
+ * Exported so every operator surface goes through this one function: the hosted
+ * reconciler uses it for the parent issue and the advisory check, and the manual
+ * `scruffy:nightly` command prints exactly the same bytes. A controlled run and a
+ * scheduled run must not describe the same night differently.
+ */
+export function renderMorningForReport(view: ReportClosureView): MorningSummary {
+  const closure = deriveParentClosure({ requiredCoverageComplete: view.requiredCoverageComplete, children: view.children });
+  return renderMorningSummary(morningInput(view, view.children, closure));
+}
+
+/**
  * Project one persisted closure view onto the morning-summary input.
  *
  * Mapping rather than passing the view straight through keeps the renderer free of
