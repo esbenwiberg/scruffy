@@ -64,6 +64,10 @@ function scmWithContent(files: Record<string, FileContentResult>): ScmReader {
     getChangedFiles: async () => [],
     getChangedFilesInRange: async () => [],
     getFileContent: async (_subject, path) => files[path] ?? { complete: false, path, reason: "not_found" },
+    // Remediation never reads candidate CI; fail loudly if a future path calls it.
+    getCandidateCi: async () => {
+      throw new Error("candidate CI read not used in remediation tests");
+    },
   };
 }
 

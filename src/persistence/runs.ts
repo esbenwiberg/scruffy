@@ -4,6 +4,7 @@ import type { Finding, SubjectRevision } from "../domain/evidence/types.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
 import type { ReleaseDecision } from "../gates/release/decision.js";
+import type { ReleaseRiskReport } from "../domain/release/report.js";
 import { findingKey } from "../domain/findings/identity.js";
 import {
   isCompleteReview,
@@ -666,6 +667,12 @@ export class RunStore implements NightlyRunStore {
 
       const proposal = finding.remediation?.proposal ?? null;
 
+      // The occurrence row goes in FIRST: `nightly_fix_proposals.occurrence_id`
+      // references it, so writing the proposal before its occurrence violates that
+      // foreign key on the very first commit of a proposed-fix finding. The
+      // recomputed remediation written here may still carry the stale
+      // `queued/unknown/open` defaults; the proposal round-trip below reconciles it
+      // inside this same transaction, so no reader ever observes the stale copy.
       await client.query(
         `insert into nightly_report_findings
            (occurrence_id, report_id, finding_key, rule_id, defect_class, path, start_line, end_line,
@@ -832,11 +839,16 @@ export class RunStore implements NightlyRunStore {
 
   /**
    * Atomically, for a release run: move analyzing -> terminal, record the
-   * decision and its findings, and enqueue the outbox effect. All-or-nothing —
-   * an external effect can never be recorded without its state change. Mirrors
-   * commitDecision (poison): one aggregate outcome, one advisory check effect.
-   * Release owns no watermark (it is triggered per candidate), so there is
-   * nothing to advance here.
+   * first-class report, the (denormalized) decision and its findings, and enqueue
+   * the outbox check effect — ALL in one transaction. An external effect can never
+   * be recorded without its state change, and a terminal report can never land
+   * without its effect (or vice versa). Mirrors commitDecision (poison): one
+   * aggregate outcome, one advisory check effect. Release owns no watermark (it is
+   * triggered per candidate), so there is nothing to advance here.
+   *
+   * Both the report (keyed by run_id) and the outbox row (keyed by
+   * run_id/external_id) dedupe with `on conflict ... do nothing`, so re-driving one
+   * idempotent run persists at most one report and one effect.
    */
   async commitReleaseDecision(params: {
     runId: string;
@@ -844,6 +856,7 @@ export class RunStore implements NightlyRunStore {
     to: RunState;
     reason: string;
     decision: ReleaseDecision;
+    report: ReleaseRiskReport;
     findings: Finding[];
     effect: OutboxEffect;
     /** Fencing token from the claim; the commit only lands if the lease still matches. */
@@ -854,6 +867,29 @@ export class RunStore implements NightlyRunStore {
       if (!applied) return false;
 
       const now = this.clock.now();
+      const report = params.report;
+      // Serialize the effect payload FIRST: a payload that cannot be serialized
+      // must abort the whole transaction (rolling back the transition/report/
+      // decision) rather than leaving a terminal report with no effect.
+      const effectPayload = JSON.stringify(params.effect.payload);
+      await client.query(
+        `insert into release_reports
+           (run_id, report_id, report_version, repository, previous_release_sha, candidate_sha, policy_version, report, generated_at, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         on conflict (run_id) do nothing`,
+        [
+          params.runId,
+          report.reportId,
+          report.reportVersion,
+          report.subject.repository,
+          report.subject.previousReleaseSha,
+          report.subject.candidateSha,
+          report.policyVersion,
+          JSON.stringify(report),
+          report.generatedAt,
+          now,
+        ],
+      );
       await client.query(
         `insert into release_decisions (run_id, outcome, reasons, dispositions, findings, summary, decided_at)
          values ($1, $2, $3, $4, $5, $6, $7)
@@ -877,7 +913,7 @@ export class RunStore implements NightlyRunStore {
           params.runId,
           params.effect.effectType,
           params.effect.externalId,
-          JSON.stringify(params.effect.payload),
+          effectPayload,
           now,
         ],
       );

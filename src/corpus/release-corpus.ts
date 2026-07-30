@@ -1,4 +1,5 @@
 import type { ReleaseCorpus } from "./release-types.js";
+import { RELEASE_REQUIRED_CI_CONTEXTS } from "../providers/registry.js";
 
 /**
  * Seeded release ranges. Invented identifiers, no real-repo lineage. These
@@ -17,6 +18,16 @@ function newFile(lines: string[]): string {
 
 function sha(n: number): string {
   return ("f" + n.toString(16)).padStart(40, "0");
+}
+
+/**
+ * Fake AKIA-shaped keys are assembled from split halves so repository secret
+ * scanners do not flag these fixtures as real leaked credentials. The runtime
+ * value is byte-identical to the literal, so what the secret-scan analyzer sees
+ * — and therefore every expected corpus outcome — is unchanged.
+ */
+function fakeAwsKey(body: string): string {
+  return ["AKIA", body].join("");
 }
 
 export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
@@ -49,7 +60,7 @@ export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
     id: "release-stop-secret",
     description: "range that ships a live-looking AWS key (irreversible: the secret is burned) — the gate must stop",
     range: { repository: "shop/checkout", baseSha: sha(3), headSha: sha(4) },
-    files: [{ path: "src/config.ts", patch: newFile(["export const AWS_KEY = 'AKIAIJKLMNOP12345678';"]) }],
+    files: [{ path: "src/config.ts", patch: newFile([`export const AWS_KEY = '${fakeAwsKey("IJKLMNOP12345678")}';`]) }],
     truthOutcome: "stop",
     expectedOutcome: "stop",
     provenance: PROV,
@@ -80,7 +91,7 @@ export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
       {
         path: "src/config/credentials.ts",
         patch: newFile([
-          "export const OBJECT_STORE_ACCESS_KEY_ID = 'AKIA7F3QX9RLZ2WK8MTV';",
+          `export const OBJECT_STORE_ACCESS_KEY_ID = '${fakeAwsKey("7F3QX9RLZ2WK8MTV")}';`,
           "export const OBJECT_STORE_REGION = 'eu-north-1';",
         ]),
       },
@@ -117,5 +128,131 @@ export const SEEDED_RELEASE_CORPUS: ReleaseCorpus = [
     truthOutcome: "ship",
     expectedOutcome: "ship",
     provenance: PROV24,
+  },
+];
+
+// ── Campaign pressure corpus ──────────────────────────────────────────────────
+//
+// These cases exercise the CONTROLLED shadow posture where all three evidence
+// lanes (source-analysis, release-risk-llm, candidate-ci) are REQUIRED. Every case
+// shares one CLEAN source range (no deterministic finding) so the ONLY variable is
+// the injected lane evidence — each unsafe case alters EXACTLY ONE condition from a
+// complete-clean baseline. The clean baseline seeds all three lanes complete and
+// must ship; every altered case must AVOID ship. Fake evidence is explicit (a
+// scripted analyst + normalized CI records), never a bypassed lane.
+
+const CAMPAIGN_PROV = { source: "seeded-mutation", author: "ewi", createdAt: "2026-07-29" } as const;
+
+const CAMPAIGN_CLEAN_FILES = [
+  { path: "src/feature.ts", patch: newFile(["export const feature = (x: number): number => x * 2;"]) },
+];
+
+const [CI_BUILD, CI_TEST] = RELEASE_REQUIRED_CI_CONTEXTS;
+
+/** Every required context passing — the only clean candidate-CI shape. */
+const CI_ALL_PASS = [
+  { context: CI_BUILD, state: "success" as const },
+  { context: CI_TEST, state: "success" as const },
+];
+
+/** The complete-clean LLM lane: whole range reviewed, no risks, no gaps. */
+const LLM_CLEAN = { risks: [], gaps: [], reviewedLines: 1, totalLines: 1 };
+
+function campaignRange(n: number) {
+  return { repository: "shop/checkout", baseSha: sha(0x30), headSha: sha(0x30 + n) };
+}
+
+export const CAMPAIGN_RELEASE_CORPUS: ReleaseCorpus = [
+  {
+    id: "release-campaign-clean",
+    description: "clean range with all three required lanes complete — source clean, LLM clean, every CI context passing — ships",
+    range: campaignRange(1),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "ship",
+    expectedOutcome: "ship",
+    campaign: { llm: { ...LLM_CLEAN }, ci: CI_ALL_PASS },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-model-risk",
+    description: "clean baseline but the range-level LLM retains one cited data-integrity risk — every model risk is unresolved, so the gate must escalate (never ship, never stop)",
+    range: campaignRange(2),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: {
+      llm: {
+        risks: [
+          {
+            category: "data-integrity",
+            scenario: "the new doubling helper is applied to an already-scaled quantity, corrupting stored totals",
+            affectedSurface: "src/feature.ts",
+            impact: "persisted order totals double on the next write",
+            citations: [{ path: "src/feature.ts", line: 1 }],
+          },
+        ],
+        gaps: [],
+        reviewedLines: 1,
+        totalLines: 1,
+      },
+      ci: CI_ALL_PASS,
+    },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-model-failure",
+    description: "clean baseline but the release-risk model provider failed — a blind LLM lane is not clean, so the gate must escalate (blind ≠ reviewed)",
+    range: campaignRange(3),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: {
+      llm: { risks: [], gaps: [{ code: "provider_unavailable", detail: "model provider timed out" }], reviewedLines: 0, totalLines: 1 },
+      ci: CI_ALL_PASS,
+    },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-truncation",
+    description: "clean baseline but the LLM only reviewed a prefix of the range (input truncated) — partial coverage is not complete, so the gate must escalate",
+    range: campaignRange(4),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: {
+      llm: { risks: [], gaps: [{ code: "input_truncated", detail: "range exceeded the model context; remainder unreviewed" }], reviewedLines: 1, totalLines: 6 },
+      ci: CI_ALL_PASS,
+    },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-ci-missing",
+    description: "clean baseline but a required CI context (ci/build) never reported for the candidate — a missing required check is blind, so the gate must escalate",
+    range: campaignRange(5),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: { llm: { ...LLM_CLEAN }, ci: [{ context: CI_TEST, state: "success" }] },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-ci-failure",
+    description: "clean baseline but a required CI context (ci/build) reported failure — a non-success required check cannot ship, so the gate must escalate",
+    range: campaignRange(6),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: { llm: { ...LLM_CLEAN }, ci: [{ context: CI_BUILD, state: "failure" }, { context: CI_TEST, state: "success" }] },
+    provenance: CAMPAIGN_PROV,
+  },
+  {
+    id: "release-campaign-llm-unsupported",
+    description: "clean baseline but NO release-risk analyst is wired while policy requires the lane — unsupported required evidence is blind, so the gate must escalate",
+    range: campaignRange(7),
+    files: CAMPAIGN_CLEAN_FILES,
+    truthOutcome: "sign-off-required",
+    expectedOutcome: "sign-off-required",
+    campaign: { llm: null, ci: CI_ALL_PASS },
+    provenance: CAMPAIGN_PROV,
   },
 ];

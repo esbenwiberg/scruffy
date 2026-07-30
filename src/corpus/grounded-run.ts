@@ -3,6 +3,7 @@ import {
   defaultValidator,
   defaultFixers,
   modelAnalyzers,
+  releaseOfflineEvidence,
   POISON_BLOCKABLE_CLASSES,
   NIGHTLY_REPORTABLE_CLASSES,
   NIGHTLY_FIXABLE_CLASSES,
@@ -36,7 +37,11 @@ const NIGHTLY_POLICY: NightlyPolicy = {
   reportableDefectClasses: [...NIGHTLY_REPORTABLE_CLASSES],
   fixableDefectClasses: [...NIGHTLY_FIXABLE_CLASSES],
 };
-const RELEASE_POLICY: ReleasePolicy = { stopDefectClasses: [...RELEASE_STOP_CLASSES], signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES] };
+const RELEASE_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
+};
 
 /** A nightly case is "MISHANDLED" unless it matched its one expected finding and surfaced nothing benign. */
 export function nightlyOutcomeLabel(n: { correct: number; falseSurface: number }): "report" | "MISHANDLED" {

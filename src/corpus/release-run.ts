@@ -1,8 +1,15 @@
-import { defaultAnalyzers, defaultValidator, RELEASE_STOP_CLASSES, RELEASE_SIGNOFF_CLASSES } from "../providers/registry.js";
+import {
+  defaultAnalyzers,
+  defaultValidator,
+  releaseOfflineEvidence,
+  releaseCampaignEvidence,
+  RELEASE_STOP_CLASSES,
+  RELEASE_SIGNOFF_CLASSES,
+} from "../providers/registry.js";
 import type { ReleasePolicy } from "../domain/policy/types.js";
 import { pathToFileURL } from "node:url";
 import { replayReleaseCorpus, type ReleaseReplayReport } from "./release-replay.js";
-import { SEEDED_RELEASE_CORPUS } from "./release-corpus.js";
+import { SEEDED_RELEASE_CORPUS, CAMPAIGN_RELEASE_CORPUS } from "./release-corpus.js";
 
 /**
  * `npm run corpus:release` — replays the seeded release corpus and prints outcome
@@ -14,6 +21,14 @@ import { SEEDED_RELEASE_CORPUS } from "./release-corpus.js";
 const POLICY: ReleasePolicy = {
   stopDefectClasses: [...RELEASE_STOP_CLASSES],
   signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseOfflineEvidence(),
+};
+
+/** All-lanes-required policy for the campaign pressure cases (see release-corpus.ts). */
+const CAMPAIGN_POLICY: ReleasePolicy = {
+  stopDefectClasses: [...RELEASE_STOP_CLASSES],
+  signoffDefectClasses: [...RELEASE_SIGNOFF_CLASSES],
+  evidence: releaseCampaignEvidence(),
 };
 
 function pct(n: number | null): string {
@@ -59,10 +74,11 @@ export function summarizeRelease(report: ReleaseReplayReport): { lines: string[]
 }
 
 async function main(): Promise<void> {
-  const report = await replayReleaseCorpus(SEEDED_RELEASE_CORPUS, {
+  const report = await replayReleaseCorpus([...SEEDED_RELEASE_CORPUS, ...CAMPAIGN_RELEASE_CORPUS], {
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     policy: POLICY,
+    campaignPolicy: CAMPAIGN_POLICY,
   });
 
   const { lines, exitCode } = summarizeRelease(report);
