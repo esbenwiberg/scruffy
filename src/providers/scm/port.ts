@@ -66,6 +66,61 @@ export interface ScmReader {
   getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult>;
 }
 
+/**
+ * One repository the configured installation can see.
+ *
+ * `defaultBranch` is the PROVIDER's answer, never a guess. A scheduler that
+ * assumed `main` would silently review nothing on a `trunk`/`develop` repository
+ * and — worse — would report that nothing as a clean night, so the branch name is
+ * part of the adapter's contract rather than a config default.
+ *
+ * `archived`/`disabled` are carried because an installation legitimately contains
+ * repositories nobody can push a fix to. Filtering them is the CALLER's decision
+ * (it is a scheduling policy, not a provider fact), so the adapter reports them
+ * rather than dropping them.
+ */
+export interface InstalledRepository {
+  /** `owner/name`, the form every other port method takes. */
+  repository: string;
+  /** Provider-side stable record id, as text. */
+  externalId: string;
+  /** The repository's default branch, as the provider reports it. */
+  defaultBranch: string;
+  archived: boolean;
+  disabled: boolean;
+}
+
+/**
+ * ENROLLMENT + immutable head resolution: the two reads a central scheduler needs
+ * and nothing else.
+ *
+ * Deliberately a separate capability from `ScmReader`. Listing an installation's
+ * repositories is a strictly larger authority than reading one commit a webhook
+ * already named, and only an App-authenticated deployment has it. A backend
+ * without it must say so at wiring time (see `createScmInstallationReader`)
+ * instead of degrading into a hardcoded repository/branch list.
+ *
+ * ERROR DISCIPLINE, load-bearing: `listInstalledRepositories` THROWS on any
+ * provider fault and never returns a short or empty list. An empty list means "the
+ * installation genuinely has no repositories"; a fault that returned `[]` would
+ * present itself to a scheduler as "nothing to review tonight", which is the
+ * blind-run-rendered-clean failure this whole series exists to prevent.
+ */
+export interface ScmInstallationReader {
+  /**
+   * Every repository visible to the configured installation. Pagination is the
+   * adapter's problem, not the caller's; an adapter that cannot prove it read the
+   * whole listing must throw rather than return a partial one.
+   */
+  listInstalledRepositories(): Promise<InstalledRepository[]>;
+  /**
+   * The immutable head sha of `branch`, or null when the branch has no commits or
+   * no longer exists. Null is a real, recordable answer ("nothing to review");
+   * a provider fault still throws.
+   */
+  resolveBranchHead(repository: string, branch: string): Promise<string | null>;
+}
+
 export type CheckConclusion = "success" | "failure" | "neutral";
 
 export interface CheckRunInput {

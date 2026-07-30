@@ -8,11 +8,13 @@ import type {
   FileContentResult,
   IssueLinkInput,
   IssueLinkResult,
+  InstalledRepository,
   IssueUpsertInput,
   IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
+  ScmInstallationReader,
   ScmLifecycleReader,
   ScmReader,
   ScmWriter,
@@ -55,7 +57,7 @@ export interface FakePullRequest {
   input: PullRequestInput;
 }
 
-export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
+export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmInstallationReader {
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #fileContent = new Map<string, FileContentResult>();
@@ -69,6 +71,11 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
   /** `repository#parentNumber` -> child database id -> child number. */
   readonly #subIssues = new Map<string, Map<number, number>>();
   readonly #issueState = new Map<number, ExternalIssueObservation>();
+  /** Repositories the "installation" can see, in seeded order. */
+  #installed: InstalledRepository[] | null = null;
+  /** When set, the next listing throws it — a provider fault, never an empty list. */
+  #installationFault: Error | null = null;
+  #installationListings = 0;
   #idSeq = 0;
   #prSeq = 0;
   #issueSeq = 0;
@@ -227,6 +234,63 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader {
     const known = this.#issues.find((issue) => issue.ref.number === number);
     if (known === undefined) return null;
     return { number, state: known.state, stateReason: null, closedBy: null };
+  }
+
+  // ── Installation reader ─────────────────────────────────────────────────────
+
+  /**
+   * Seed the repositories the "installation" can see, each with its OWN default
+   * branch. Repositories that are not seeded are not installed, which is what lets
+   * a scheduler test prove it never reaches outside the installation.
+   */
+  seedInstalledRepositories(repositories: readonly Partial<InstalledRepository>[]): void {
+    this.#installed = repositories.map((repo, index) => ({
+      repository: repo.repository ?? `acme/repo-${index}`,
+      externalId: repo.externalId ?? String(900_000 + index),
+      // NO DEFAULT OF `main`. A test that forgot to say which branch a repository
+      // uses must not be silently handed the one name the product is forbidden to
+      // assume.
+      defaultBranch: repo.defaultBranch ?? `branch-${index}`,
+      archived: repo.archived ?? false,
+      disabled: repo.disabled ?? false,
+    }));
+  }
+
+  /**
+   * Make the next installation listing FAIL. Mirrors the real adapter's discipline:
+   * a fault throws and never degrades into an empty list, because "the installation
+   * has no repositories" and "we could not ask" must not look the same to a
+   * scheduler.
+   */
+  failInstallationListing(reason: string): void {
+    this.#installationFault = new Error(reason);
+  }
+
+  async listInstalledRepositories(): Promise<InstalledRepository[]> {
+    this.#installationListings += 1;
+    if (this.#installationFault !== null) {
+      const fault = this.#installationFault;
+      // One-shot, so a test can prove the NEXT tick recovers rather than needing a
+      // second fake.
+      this.#installationFault = null;
+      throw fault;
+    }
+    if (this.#installed === null) {
+      throw new Error("fake-scm: no installed repositories seeded — call seedInstalledRepositories() first");
+    }
+    return this.#installed.map((repo) => ({ ...repo }));
+  }
+
+  async resolveBranchHead(repository: string, branch: string): Promise<string | null> {
+    // Same store as `getBranchHead`: one branch head per repository/branch, so a
+    // test cannot accidentally seed a scheduler head that disagrees with the head
+    // post-merge verification later reads.
+    return this.getBranchHead(repository, branch);
+  }
+
+  /** How many times the installation listing was read (cadence assertions). */
+  installationListingCount(): number {
+    return this.#installationListings;
   }
 
   /** Seed a pre-existing branch (collision/crash-resume cases). */

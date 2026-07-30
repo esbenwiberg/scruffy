@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
-import type { ChangedFile, FileContentResult, RevisionRange, ScmReader } from "./port.js";
+import type {
+  ChangedFile,
+  FileContentResult,
+  InstalledRepository,
+  RevisionRange,
+  ScmInstallationReader,
+  ScmReader,
+} from "./port.js";
 import type { GhApi } from "./github-app.js";
 
 /**
@@ -56,6 +63,36 @@ const ContentsResponse = z.object({
   content: z.string().optional(),
 });
 
+/**
+ * `GET /installation/repositories`. `total_count` is the endpoint's own claim about
+ * how many repositories the installation has, and we CHECK the accumulated list
+ * against it: that is the only available proof that pagination read everything
+ * rather than stopping early on a truncated page.
+ */
+const InstallationRepositories = z.object({
+  total_count: z.number().int().nonnegative(),
+  repositories: z.array(
+    z.object({
+      id: z.number().int(),
+      full_name: z.string().min(1),
+      default_branch: z.string().min(1),
+      archived: z.boolean().optional(),
+      disabled: z.boolean().optional(),
+    }),
+  ),
+});
+
+const BranchResponse = z.object({ commit: z.object({ sha: z.string().min(1) }) });
+
+/**
+ * Hard bound on installation-listing pages. The accepted deployment addresses one
+ * App installation with fewer than 20 repositories; 100-per-page × 20 pages is two
+ * orders of magnitude of headroom, and hitting it means something is wrong (a
+ * non-advancing cursor) rather than that the installation is genuinely that large —
+ * which is why the cap THROWS instead of returning what it has.
+ */
+const MAX_INSTALLATION_PAGES = 20;
+
 /** Anchoring a multi-megabyte file is never a mechanical, low-ambiguity edit;
  * refuse rather than read it in and silently balloon memory/patch size. */
 const MAX_CONTENT_BYTES = 1_000_000;
@@ -64,11 +101,80 @@ export interface GithubAppScmReaderOptions {
   api: GhApi;
 }
 
-export class GithubAppScmReader implements ScmReader {
+export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
   readonly #api: GhApi;
 
   constructor(options: GithubAppScmReaderOptions) {
     this.#api = options.api;
+  }
+
+  /**
+   * Every repository the configured installation can see, read across pages and
+   * deduplicated by full name.
+   *
+   * THREE WAYS THIS REFUSES TO UNDER-REPORT, because a short listing means a
+   * repository silently goes unreviewed and nothing downstream can detect it:
+   *  - a page whose shape we did not expect throws (via `#parse`);
+   *  - the accumulated count is checked against the endpoint's own `total_count`;
+   *  - exhausting the page cap throws rather than returning a partial list.
+   * Any API error propagates untouched — `[]` is reserved for an installation that
+   * genuinely has no repositories.
+   */
+  async listInstalledRepositories(): Promise<InstalledRepository[]> {
+    const byName = new Map<string, InstalledRepository>();
+    let total: number | null = null;
+
+    for (let page = 1; page <= MAX_INSTALLATION_PAGES; page += 1) {
+      const res = await this.#api("GET /installation/repositories", { per_page: PER_PAGE, page });
+      const parsed = this.#parse(InstallationRepositories, res.data, `installation repositories page ${page}`);
+      total = parsed.total_count;
+
+      for (const repo of parsed.repositories) {
+        byName.set(repo.full_name, {
+          repository: repo.full_name,
+          externalId: String(repo.id),
+          defaultBranch: repo.default_branch,
+          archived: repo.archived ?? false,
+          disabled: repo.disabled ?? false,
+        });
+      }
+
+      if (byName.size >= total) break;
+      // A page that returned nothing new (or nothing at all) while the endpoint still
+      // claims more repositories is a broken cursor, not the end of the listing.
+      if (parsed.repositories.length === 0) {
+        throw new Error(
+          `github-app: installation listing stalled at ${byName.size} of ${total} repositories (page ${page} was empty) — refusing a partial installation view`,
+        );
+      }
+    }
+
+    if (total !== null && byName.size < total) {
+      throw new Error(
+        `github-app: installation listing read ${byName.size} of ${total} repositories within ${MAX_INSTALLATION_PAGES} pages — refusing a partial installation view`,
+      );
+    }
+    return [...byName.values()];
+  }
+
+  /**
+   * A branch's immutable head sha. 404 -> null (the branch does not exist, or has
+   * no commits: a real answer meaning "nothing to review"). Every other failure
+   * throws, so a scheduler can never mistake an outage for an empty branch.
+   */
+  async resolveBranchHead(repository: string, branch: string): Promise<string | null> {
+    let res: { status: number; data: unknown };
+    try {
+      res = await this.#api(`GET /repos/${repository}/branches/${encodeURIComponent(branch)}`);
+    } catch (err) {
+      if (statusOf(err) === 404) return null;
+      throw err;
+    }
+    const parsed = this.#parse(BranchResponse, res.data, `branch ${repository}#${branch}`);
+    if (!/^[0-9a-f]{40}$/.test(parsed.commit.sha)) {
+      throw new Error(`github-app: branch ${repository}#${branch} head '${parsed.commit.sha}' is not a full commit sha`);
+    }
+    return parsed.commit.sha;
   }
 
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createScmInstallationReader,
   createScmReader,
   createScmWriter,
   resolveScmReaderBackend,
@@ -79,5 +80,15 @@ describe("githubAppConfigFromEnv", () => {
         SCRUFFY_GH_APP_PRIVATE_KEY: "ghp_notakey",
       }),
     ).toThrow(/PEM/);
+  });
+});
+
+describe("createScmInstallationReader", () => {
+  it("returns null for gh-cli — a developer session cannot enumerate an App installation", () => {
+    // Null, not a throwing stub: a shadow-status-only deployment is legitimate, and
+    // the CORRECT consequence is that the nightly scheduler is not started at all.
+    // The alternative — inventing a repository list, or defaulting the branch to
+    // `main` — would review the wrong thing and call the result a night's work.
+    expect(createScmInstallationReader("gh-cli")).toBeNull();
   });
 });

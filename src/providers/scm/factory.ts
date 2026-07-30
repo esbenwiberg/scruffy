@@ -1,4 +1,4 @@
-import type { ScmLifecycleReader, ScmReader, ScmWriter } from "./port.js";
+import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "./port.js";
 import { GhCliScm } from "./gh-cli.js";
 import { GithubAppScmWriter } from "./github-app.js";
 import { GithubAppScmReader } from "./github-app-reader.js";
@@ -94,6 +94,35 @@ export function createScmLifecycleReader(backend: ScmReaderBackend = resolveScmR
       return null;
     case "github-app":
       return new GithubAppLifecycleReader({ api: createGithubAppApi(githubAppConfigFromEnv()) });
+    default: {
+      const _exhaustive: never = backend;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * ENROLLMENT: the installed-repository listing and default-branch head resolution a
+ * central nightly scheduler runs on. Same null-for-gh-cli shape as
+ * `createScmLifecycleReader`, and for a stronger reason.
+ *
+ * App INSTALLATION IS ENROLLMENT, so this listing is the only legitimate source of
+ * "which repositories does Scruffy review tonight". A developer's `gh` session
+ * cannot answer that question — `/installation/repositories` needs an installation
+ * token — and the alternatives are all worse than saying so: a hardcoded repository
+ * list, or a hardcoded `main`, both of which would review the wrong thing (or
+ * nothing) and report the result as a night's work.
+ *
+ * Returning null makes that visible at wiring time. The scheduler is then simply
+ * not started, and the manual `scruffy:nightly` command remains the supported way
+ * to drive a controlled run on a gh-cli deployment.
+ */
+export function createScmInstallationReader(backend: ScmReaderBackend = resolveScmReaderBackend()): ScmInstallationReader | null {
+  switch (backend) {
+    case "gh-cli":
+      return null;
+    case "github-app":
+      return new GithubAppScmReader({ api: createGithubAppApi(githubAppConfigFromEnv()) });
     default: {
       const _exhaustive: never = backend;
       return _exhaustive;

@@ -170,3 +170,152 @@ describe("GithubAppScmReader error discipline", () => {
     await expect(reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/unexpected/);
   });
 });
+
+// ── Installation enrollment ───────────────────────────────────────────────────
+//
+// App installation IS enrollment, so this listing decides which repositories get
+// reviewed at all. Its failure mode is asymmetric: a listing that reports FEWER
+// repositories than the installation has makes one silently go unreviewed, and
+// nothing downstream can detect the omission. These tests pin the three refusals
+// that make that impossible — a short page, a stalled cursor, and a fault — plus
+// the default-branch/head resolution a scheduler must never guess.
+
+const isInstallation = (r: string) => r === "GET /installation/repositories";
+const isBranch = (r: string) => r.includes("/branches/");
+
+const installedRepo = (name: string, defaultBranch: string, extra: Record<string, unknown> = {}) => ({
+  id: 100 + name.length,
+  full_name: name,
+  default_branch: defaultBranch,
+  ...extra,
+});
+
+describe("GithubAppScmReader listInstalledRepositories", () => {
+  it("pages the installation listing and reports each repository's OWN default branch", async () => {
+    const pages: Record<number, unknown[]> = {
+      1: [installedRepo("acme/widgets", "main"), installedRepo("acme/legacy", "trunk")],
+      2: [installedRepo("acme/labs", "develop", { archived: true, disabled: false })],
+    };
+    const { api, calls } = stub([
+      {
+        match: isInstallation,
+        reply: (call) => ok({ total_count: 3, repositories: pages[Number(call.params?.page ?? 1)] ?? [] }),
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    const repos = await reader.listInstalledRepositories();
+
+    expect(repos.map((r) => `${r.repository}@${r.defaultBranch}`)).toEqual([
+      "acme/widgets@main",
+      "acme/legacy@trunk",
+      "acme/labs@develop",
+    ]);
+    // Archived state is reported, not filtered: whether to schedule an archived
+    // repository is a policy decision that belongs to the caller.
+    expect(repos.find((r) => r.repository === "acme/labs")?.archived).toBe(true);
+    expect(repos.every((r) => r.externalId.length > 0)).toBe(true);
+    expect(calls.filter((c) => isInstallation(c.route)).map((c) => c.params?.page)).toEqual([1, 2]);
+  });
+
+  it("stops after one page when the first page already holds every repository", async () => {
+    const { api, calls } = stub([
+      { match: isInstallation, reply: () => ok({ total_count: 1, repositories: [installedRepo("acme/widgets", "main")] }) },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    expect(await reader.listInstalledRepositories()).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("returns [] for an installation that genuinely has no repositories", async () => {
+    const { api } = stub([{ match: isInstallation, reply: () => ok({ total_count: 0, repositories: [] }) }]);
+    const reader = new GithubAppScmReader({ api });
+
+    expect(await reader.listInstalledRepositories()).toEqual([]);
+  });
+
+  it("THROWS on a stalled cursor rather than returning a partial installation view", async () => {
+    // total_count claims 5 but page 2 comes back empty: the listing cannot prove it
+    // read everything, so it must refuse instead of under-scheduling 3 repositories.
+    const { api } = stub([
+      {
+        match: isInstallation,
+        reply: (call) =>
+          ok({
+            total_count: 5,
+            repositories: Number(call.params?.page ?? 1) === 1 ? [installedRepo("acme/widgets", "main")] : [],
+          }),
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    await expect(reader.listInstalledRepositories()).rejects.toThrow(/partial installation view/);
+  });
+
+  it("propagates a provider fault (NEVER an empty list — that would read as 'nothing to review tonight')", async () => {
+    const { api } = stub([
+      {
+        match: isInstallation,
+        reply: () => {
+          throw httpError(503);
+        },
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    await expect(reader.listInstalledRepositories()).rejects.toThrow(/503/);
+  });
+
+  it("THROWS on an unexpected listing shape", async () => {
+    const { api } = stub([{ match: isInstallation, reply: () => ok({ repositories: [{ full_name: "acme/widgets" }] }) }]);
+    const reader = new GithubAppScmReader({ api });
+
+    await expect(reader.listInstalledRepositories()).rejects.toThrow(/unexpected installation repositories/);
+  });
+});
+
+describe("GithubAppScmReader resolveBranchHead", () => {
+  it("resolves a branch's immutable head sha", async () => {
+    const { api, calls } = stub([{ match: isBranch, reply: () => ok({ commit: { sha: HEAD } }) }]);
+    const reader = new GithubAppScmReader({ api });
+
+    expect(await reader.resolveBranchHead(REPO, "trunk")).toBe(HEAD);
+    expect(calls[0]?.route).toBe(`GET /repos/${REPO}/branches/trunk`);
+  });
+
+  it("returns null for a branch the provider does not have (a real 'nothing to review')", async () => {
+    const { api } = stub([
+      {
+        match: isBranch,
+        reply: () => {
+          throw httpError(404);
+        },
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    expect(await reader.resolveBranchHead(REPO, "gone")).toBeNull();
+  });
+
+  it("THROWS on a provider fault so an outage is never mistaken for an empty branch", async () => {
+    const { api } = stub([
+      {
+        match: isBranch,
+        reply: () => {
+          throw httpError(500);
+        },
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    await expect(reader.resolveBranchHead(REPO, "main")).rejects.toThrow(/500/);
+  });
+
+  it("THROWS on an abbreviated head sha (a range must be bound to a full immutable candidate)", async () => {
+    const { api } = stub([{ match: isBranch, reply: () => ok({ commit: { sha: "abc1234" } }) }]);
+    const reader = new GithubAppScmReader({ api });
+
+    await expect(reader.resolveBranchHead(REPO, "main")).rejects.toThrow(/not a full commit sha/);
+  });
+});
