@@ -12,6 +12,7 @@ import {
   NIGHTLY_FIXABLE_CLASSES,
   RELEASE_STOP_CLASSES,
   RELEASE_SIGNOFF_CLASSES,
+  DEFAULT_REMEDIATION_POLICY,
 } from "../../src/providers/registry.js";
 import type { EffectivePolicy } from "../../src/domain/policy/types.js";
 import type { ReleaseRiskAnalyst } from "../../src/providers/release-risk/port.js";
@@ -48,6 +49,12 @@ export const HARNESS_POLICY: EffectivePolicy = {
       "release-risk-llm": { applicable: false, required: false },
       "candidate-ci": { applicable: true, required: true, requiredContexts: [...HARNESS_REQUIRED_CI_CONTEXTS] },
     },
+  },
+  remediation: {
+    maxFiles: DEFAULT_REMEDIATION_POLICY.maxFiles,
+    maxTotalLines: DEFAULT_REMEDIATION_POLICY.maxTotalLines,
+    maxTotalBytes: DEFAULT_REMEDIATION_POLICY.maxTotalBytes,
+    protectedPaths: [...DEFAULT_REMEDIATION_POLICY.protectedPaths],
   },
 };
 

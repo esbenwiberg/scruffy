@@ -2,9 +2,18 @@ import type { Clock, IdGenerator } from "../platform/clock.js";
 import type { Pool } from "../persistence/db.js";
 import { RunStore } from "../persistence/runs.js";
 import { OutboxStore } from "../persistence/outbox.js";
+import { PublicationStore } from "../persistence/publications.js";
+import { FixLifecycleStore } from "../persistence/fix-lifecycle.js";
+import { NightlyScheduleStore } from "../persistence/nightly-schedule.js";
+import { NightlyEvidenceStore } from "../persistence/nightly-evidence.js";
+import { NightlyScheduler, type NightlyTickResult } from "./nightly-scheduler.js";
+import { NightlyEvidenceQuery } from "./nightly-evidence-query.js";
 import { EffectsDispatcher } from "../effects/dispatcher.js";
+import { FixReconciler, type FixReconcileResult } from "./fix-reconciler.js";
+import { PatchAppliedVerifier, type PostMergeVerifier } from "../gates/nightly/verify.js";
 import { PoisonService } from "../gates/poison/service.js";
 import { NightlyService, type ReviewResult } from "../gates/nightly/service.js";
+import type { RemediationDeps } from "../gates/nightly/remediation.js";
 import { ReleaseService } from "../gates/release/service.js";
 import { Reconciler } from "./reconciler.js";
 import type { EvaluationRun } from "../domain/evaluation/types.js";
@@ -14,7 +23,8 @@ import type { Analyzer } from "../providers/analyzers/port.js";
 import type { ReleaseRiskAnalyst } from "../providers/release-risk/port.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "../providers/fixers/port.js";
-import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
+import type { ModelProvider } from "../providers/models/port.js";
+import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "../providers/scm/port.js";
 import { verifyAndParseWebhook } from "../ingest/webhook.js";
 
 /**
@@ -34,6 +44,51 @@ export interface ScruffyDeps {
   /** Fixers indexed by defect class, for nightly fix-PR generation. */
   fixers: Record<string, Fixer>;
   /**
+   * Absent = no LLM backend configured (`SCRUFFY_MODEL_BACKEND` unset/`fake`
+   * upstream of this constructor). Forwarded to the nightly gate, which gives
+   * EVERY surviving finding one remediation attempt: deterministic where a fixer is
+   * registered, this model otherwise. A missing model is reported as an explicit
+   * `unavailable` remediation, never as "no fix was needed".
+   */
+  model?: ModelProvider;
+  /**
+   * Read side of the fix lifecycle (PR state, sha-bound CI, branch heads, issue
+   * state). Absent = this deployment cannot observe what happens to a fix PR, so
+   * `reconcileFixes` is an explicit no-op instead of a loop that silently records
+   * nothing. `FakeScm` and the GitHub App lifecycle reader both satisfy it; the
+   * gh-cli shadow adapter does not.
+   */
+  scmLifecycleReader?: ScmLifecycleReader;
+  /**
+   * How a merged fix is checked against the immutable post-merge candidate.
+   * Defaults to the preimage/replacement verifier over `scmReader`; injectable so
+   * a later brief can add an adversarial verifier without changing this wiring.
+   */
+  postMergeVerifier?: PostMergeVerifier;
+  /**
+   * Enrollment side of the read provider: which repositories the configured App
+   * installation can see, and each one's default-branch head. Absent = this
+   * deployment cannot enumerate its own installation (the gh-cli shadow adapter),
+   * so `scheduleNightly` is an explicit no-op and nightly runs are triggered by the
+   * manual `scruffy:nightly` command instead.
+   */
+  scmInstallationReader?: ScmInstallationReader;
+  /**
+   * Central nightly cadence. Absent = no hosted schedule (nothing is triggered
+   * automatically); present WITH an installation reader = the hosted process
+   * reviews every installed repository's default branch on this cadence.
+   */
+  nightlySchedule?: {
+    /** Minimum interval between two scheduled attempts for one branch. */
+    cadenceMs: number;
+    /** Attempt lease duration. Default 30 minutes. */
+    leaseMs?: number;
+    /** Repositories driven per tick. Default 20. */
+    batchSize?: number;
+    /** Recorded lease owner. Default "nightly-scheduler". */
+    owner?: string;
+  };
+  /**
    * Optional range-level LLM release-risk analyst. Wired only when a model
    * backend is configured; kept out of the deterministic default so tests and
    * corpus replay never make a model call.
@@ -45,18 +100,46 @@ export interface ScruffyDeps {
   maxAttempts?: number;
 }
 
+/**
+ * Default attempt lease for one scheduled branch. Long enough for a full analyze +
+ * remediate + publish pass on a large range, short enough that a crashed process
+ * does not hold a branch hostage for a whole cadence window.
+ */
+const DEFAULT_SCHEDULE_LEASE_MS = 30 * 60_000;
+
 export class Scruffy {
   readonly runs: RunStore;
   readonly outbox: OutboxStore;
+  readonly publications: PublicationStore;
+  readonly fixes: FixLifecycleStore;
+  readonly schedule: NightlyScheduleStore;
+  /**
+   * Provider-neutral, READ-ONLY view of durable nightly evidence by repository and
+   * candidate. Exposed for later release-report aggregation; nothing in the release
+   * gate consumes it today and this class never writes through it.
+   */
+  readonly nightlyEvidence: NightlyEvidenceQuery;
   readonly poison: PoisonService;
   readonly nightly: NightlyService;
   readonly release: ReleaseService;
   readonly dispatcher: EffectsDispatcher;
   readonly reconciler: Reconciler;
+  /** Null when no lifecycle reader was supplied — see `ScruffyDeps.scmLifecycleReader`. */
+  readonly fixReconciler: FixReconciler | null;
+  /**
+   * Null unless BOTH an installation reader and a cadence were configured. Null is
+   * the honest state for a deployment that cannot enumerate its installation: a
+   * scheduler that silently reviewed nothing would look like a quiet night.
+   */
+  readonly nightlyScheduler: NightlyScheduler | null;
 
   constructor(private readonly deps: ScruffyDeps) {
     this.runs = new RunStore(deps.pool, deps.clock, deps.ids);
     this.outbox = new OutboxStore(deps.pool, deps.clock);
+    this.publications = new PublicationStore(deps.pool, deps.clock);
+    this.fixes = new FixLifecycleStore(deps.pool, deps.clock);
+    this.schedule = new NightlyScheduleStore(deps.pool);
+    this.nightlyEvidence = new NightlyEvidenceQuery(new NightlyEvidenceStore(deps.pool));
     this.poison = new PoisonService({
       runs: this.runs,
       scm: deps.scmReader,
@@ -72,6 +155,9 @@ export class Scruffy {
       analyzers: deps.analyzers,
       validator: deps.validator,
       fixers: deps.fixers,
+      // Every surviving finding earns one attempt; without this the model-only half
+      // of the remediation contract could never run in the hosted path.
+      ...(deps.model !== undefined ? { model: deps.model } : {}),
       policy: deps.policy,
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
@@ -87,13 +173,89 @@ export class Scruffy {
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });
-    this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter);
+    this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter, this.publications, this.fixes);
     this.reconciler = new Reconciler(this.runs, this.poison, this.nightly, this.release);
+    this.fixReconciler =
+      deps.scmLifecycleReader === undefined
+        ? null
+        : new FixReconciler({
+            lifecycle: this.fixes,
+            reader: deps.scmLifecycleReader,
+            writer: deps.scmWriter,
+            verifier: deps.postMergeVerifier ?? new PatchAppliedVerifier(deps.scmReader),
+            clock: deps.clock,
+          });
+    this.nightlyScheduler =
+      deps.scmInstallationReader === undefined || deps.nightlySchedule === undefined
+        ? null
+        : new NightlyScheduler({
+            installations: deps.scmInstallationReader,
+            schedule: this.schedule,
+            trigger: this,
+            clock: deps.clock,
+            cadenceMs: deps.nightlySchedule.cadenceMs,
+            leaseMs: deps.nightlySchedule.leaseMs ?? DEFAULT_SCHEDULE_LEASE_MS,
+            owner: deps.nightlySchedule.owner ?? "nightly-scheduler",
+            ...(deps.nightlySchedule.batchSize !== undefined ? { batchSize: deps.nightlySchedule.batchSize } : {}),
+          });
+  }
+
+  /**
+   * One nightly scheduling pass over the App installation. Returns a tick result
+   * that scheduled nothing (with `listingError` set to the reason) when no scheduler
+   * is wired, so the engine loop can call this unconditionally without a
+   * deployment-shaped branch — and an operator still sees WHY nothing ran.
+   */
+  async scheduleNightly(): Promise<NightlyTickResult> {
+    if (this.nightlyScheduler === null) {
+      return {
+        listed: 0,
+        eligible: 0,
+        claimed: 0,
+        reviewed: 0,
+        outcomes: [],
+        listingError: "no nightly schedule configured (needs an installation-capable SCM reader and a cadence)",
+      };
+    }
+    return this.nightlyScheduler.tick();
   }
 
   /** One reconciliation pass; returns runs acted on. */
   async reconcile(limit = 50): Promise<number> {
     return this.reconciler.reconcileOnce(limit);
+  }
+
+  /**
+   * One fix-lifecycle pass: observe delivered PRs (state, sha-bound CI, merge),
+   * verify merged remediation against the immutable post-merge head, fold in human
+   * dismissals, and close parents whose children are all terminal. Writes nothing
+   * to code and never merges.
+   *
+   * Returns all-zero counts when no lifecycle reader is wired, so a caller can run
+   * this unconditionally in the engine loop.
+   */
+  async reconcileFixes(): Promise<FixReconcileResult> {
+    if (this.fixReconciler === null) {
+      return { proposalsObserved: 0, verificationsRecorded: 0, dismissalsRecorded: 0, resolutionsChanged: 0, parentsClosed: 0 };
+    }
+    return this.fixReconciler.reconcile();
+  }
+
+  /**
+   * Assembles `gates/nightly/remediation.ts`'s `RemediationDeps` from this
+   * instance's own wiring, so a caller (a later brief's service code, or a
+   * script) never has to re-derive fixers/model/scmReader/policy by hand.
+   * `model` is undefined whenever no LLM backend was configured — the
+   * remediation boundary treats that as "unavailable", never a silent
+   * "no fix needed" (see `attemptRemediation`'s `no_fixer_no_model` reason).
+   */
+  remediationDeps(): RemediationDeps {
+    return {
+      fixers: this.deps.fixers,
+      ...(this.deps.model !== undefined ? { model: this.deps.model } : {}),
+      scmReader: this.deps.scmReader,
+      policy: this.deps.policy.remediation,
+    };
   }
 
   /**

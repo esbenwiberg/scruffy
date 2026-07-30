@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createScmBackends } from "../../src/server/main.js";
+import { createScmBackends, resolveNightlySchedule } from "../../src/server/main.js";
 import { GhCliScm } from "../../src/providers/scm/gh-cli.js";
 import { GithubAppScmReader } from "../../src/providers/scm/github-app-reader.js";
 import { GithubAppScmWriter } from "../../src/providers/scm/github-app.js";
@@ -85,5 +85,63 @@ describe("createScmBackends", () => {
     expect(() => createScmBackends({ SCRUFFY_SCM_READER: "github-app" })).toThrow(
       /SCRUFFY_GH_APP_ID/,
     );
+  });
+
+  it("exposes the installation reader only on the App backend — gh-cli cannot enumerate an installation", () => {
+    expect(createScmBackends({}).scmInstallationReader).toBeNull();
+    for (const key of APP_KEYS) process.env[key] = APP_ENV[key];
+    expect(createScmBackends({ SCRUFFY_SCM_READER: "github-app" }).scmInstallationReader).toBeInstanceOf(
+      GithubAppScmReader,
+    );
+  });
+});
+
+describe("resolveNightlySchedule", () => {
+  it("returns null with no cadence configured — the hosted schedule is opt-in", () => {
+    expect(resolveNightlySchedule({}, true)).toBeNull();
+  });
+
+  it("resolves the cadence with defaults for the rest", () => {
+    const schedule = resolveNightlySchedule({ SCRUFFY_NIGHTLY_CADENCE_MS: "86400000" }, true);
+    expect(schedule).toMatchObject({ cadenceMs: 86_400_000, tickMs: 300_000, leaseMs: 1_800_000, batchSize: 20 });
+    expect(schedule?.owner).toMatch(/^nightly-scheduler:/);
+  });
+
+  it("honours explicit tick, lease, batch and owner values", () => {
+    expect(
+      resolveNightlySchedule(
+        {
+          SCRUFFY_NIGHTLY_CADENCE_MS: "3600000",
+          SCRUFFY_NIGHTLY_TICK_MS: "60000",
+          SCRUFFY_NIGHTLY_LEASE_MS: "900000",
+          SCRUFFY_NIGHTLY_BATCH_SIZE: "5",
+          SCRUFFY_NIGHTLY_OWNER: "pod-1",
+        },
+        true,
+      ),
+    ).toEqual({ cadenceMs: 3_600_000, tickMs: 60_000, leaseMs: 900_000, batchSize: 5, owner: "pod-1" });
+  });
+
+  it("refuses a cadence on a reader that cannot enumerate its installation", () => {
+    // Silently accepting this is the failure mode the whole series exists to stop: a
+    // schedule that reviews nothing every night looks exactly like a quiet repository.
+    expect(() => resolveNightlySchedule({ SCRUFFY_NIGHTLY_CADENCE_MS: "86400000" }, false)).toThrow(
+      /cannot enumerate the App installation/,
+    );
+  });
+
+  it("refuses a poll interval longer than the cadence it drives", () => {
+    expect(() =>
+      resolveNightlySchedule({ SCRUFFY_NIGHTLY_CADENCE_MS: "60000", SCRUFFY_NIGHTLY_TICK_MS: "300000" }, true),
+    ).toThrow(/longer than SCRUFFY_NIGHTLY_CADENCE_MS/);
+  });
+
+  it("refuses a non-positive-integer interval instead of defaulting past the typo", () => {
+    expect(() => resolveNightlySchedule({ SCRUFFY_NIGHTLY_CADENCE_MS: "nightly" }, true)).toThrow(
+      /SCRUFFY_NIGHTLY_CADENCE_MS='nightly' is not a positive integer/,
+    );
+    expect(() =>
+      resolveNightlySchedule({ SCRUFFY_NIGHTLY_CADENCE_MS: "86400000", SCRUFFY_NIGHTLY_BATCH_SIZE: "0" }, true),
+    ).toThrow(/SCRUFFY_NIGHTLY_BATCH_SIZE='0' is not a positive integer/);
   });
 });

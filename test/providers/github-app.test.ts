@@ -156,30 +156,56 @@ describe("GithubAppScmWriter check runs", () => {
 });
 
 describe("GithubAppScmWriter fix pull requests", () => {
-  const BRANCH = "scruffy/fix/disabled-tls-verification/src-http-ts-deadbeef-L3";
+  const PROPOSAL = "nfp_1234567890abcdef";
+  const BRANCH = `scruffy/fix/disabled-tls-verification/${HEAD.slice(0, 12)}/1234567890abcdef`;
   const FILE = ["import https from 'https';", "const agent = new https.Agent({", "  rejectUnauthorized: false,", "});"].join("\n");
+  const PARENT_TREE = "t".repeat(40);
 
   const input: PullRequestInput = {
     subject: SUBJECT,
-    externalId: BRANCH,
+    externalId: `nightly-fix-pr:${PROPOSAL}`,
     branch: BRANCH,
     baseBranch: "develop",
     title: "Fix disabled-tls-verification in src/http.ts",
     body: "proposal",
     edits: [{ path: "src/http.ts", startLine: 3, endLine: 3, replacement: "  rejectUnauthorized: true," }],
+    draft: false,
+    proposalId: PROPOSAL,
   };
 
   const isPullsList = (r: string) => r.startsWith("GET") && r.endsWith("/pulls");
   const isRefGet = (r: string) => r.startsWith("GET") && r.includes("/git/ref/heads/");
   const isRefCreate = (r: string) => r.startsWith("POST") && r.endsWith("/git/refs");
+  const isCommitGet = (r: string) => r.startsWith("GET") && r.includes("/git/commits/");
+  const isTreeGet = (r: string) => r.startsWith("GET") && r.includes("/git/trees/");
+  const isBlobCreate = (r: string) => r.startsWith("POST") && r.endsWith("/git/blobs");
+  const isTreeCreate = (r: string) => r.startsWith("POST") && r.endsWith("/git/trees");
+  const isCommitCreate = (r: string) => r.startsWith("POST") && r.endsWith("/git/commits");
   const isContentsGet = (r: string) => r.startsWith("GET") && r.includes("/contents/");
-  const isContentsPut = (r: string) => r.startsWith("PUT") && r.includes("/contents/");
   const isPullCreate = (r: string) => r.startsWith("POST") && r.endsWith("/pulls");
   const isRepoGet = (r: string) => /^GET \/repos\/[^/]+\/[^/]+$/.test(r);
 
   const contents = (content: string) => ok({ content: Buffer.from(content, "utf8").toString("base64"), encoding: "base64", sha: "filesha" });
+  const pull = (number: number, extra: Record<string, unknown> = {}) =>
+    ok({ number, html_url: `https://github.test/${REPO}/pull/${number}`, head: { sha: "b".repeat(40) }, ...extra });
 
-  it("fresh flow: creates the branch at the subject sha, commits the edit, opens the PR against baseBranch", async () => {
+  /** The git-data handlers a successful proposal commit needs, in route order. */
+  const gitData = () => [
+    { match: isCommitGet, reply: () => ok({ sha: HEAD, message: "reviewed head", tree: { sha: PARENT_TREE } }) },
+    { match: isContentsGet, reply: () => contents(FILE) },
+    {
+      match: isTreeGet,
+      reply: ({ route }: Call) =>
+        route.includes(PARENT_TREE)
+          ? ok({ tree: [{ path: "src", mode: "040000", type: "tree", sha: "s".repeat(40) }] })
+          : ok({ tree: [{ path: "http.ts", mode: "100755", type: "blob", sha: "f".repeat(40) }] }),
+    },
+    { match: isBlobCreate, reply: () => ok({ sha: "e".repeat(40) }) },
+    { match: isTreeCreate, reply: () => ok({ sha: "d".repeat(40) }) },
+    { match: isCommitCreate, reply: () => ok({ sha: "c".repeat(40), message: "committed", tree: { sha: "d".repeat(40) } }) },
+  ];
+
+  it("fresh flow: commits the edit onto the reviewed sha, creates the branch at it, opens the PR against baseBranch", async () => {
     const { api, calls } = stub([
       { match: isPullsList, reply: () => ok([]) },
       {
@@ -188,73 +214,84 @@ describe("GithubAppScmWriter fix pull requests", () => {
           throw httpError(404);
         },
       },
+      ...gitData(),
       { match: isRefCreate, reply: () => ok({ ref: `refs/heads/${BRANCH}` }) },
-      { match: isContentsGet, reply: () => contents(FILE) },
-      { match: isContentsPut, reply: () => ok({ commit: { sha: "newsha" } }) },
-      { match: isPullCreate, reply: () => ok({ number: 55 }) },
+      { match: isPullCreate, reply: () => pull(55) },
     ]);
     const scm = new GithubAppScmWriter({ api });
 
     const result = await scm.openPullRequest(input);
 
-    expect(result).toEqual({ number: 55, created: true });
-    expect(calls.find((c) => isRefCreate(c.route))!.params).toMatchObject({ ref: `refs/heads/${BRANCH}`, sha: HEAD });
-    const put = calls.find((c) => isContentsPut(c.route))!;
-    const pushed = Buffer.from(put.params!.content as string, "base64").toString("utf8");
+    expect(result).toEqual({ number: 55, url: `https://github.test/${REPO}/pull/55`, headSha: "b".repeat(40), draft: false, created: true });
+
+    const blob = calls.find((c) => isBlobCreate(c.route))!;
+    const pushed = Buffer.from(blob.params!.content as string, "base64").toString("utf8");
     expect(pushed).toContain("rejectUnauthorized: true,");
     expect(pushed).not.toContain("rejectUnauthorized: false");
-    expect(put.params).toMatchObject({ sha: "filesha", branch: BRANCH });
-    expect(calls.find((c) => isPullCreate(c.route))!.params).toMatchObject({ head: BRANCH, base: "develop" });
+    // The file's existing mode is preserved — a fix must not un-executable a script.
+    expect(calls.find((c) => isTreeCreate(c.route))!.params).toMatchObject({
+      base_tree: PARENT_TREE,
+      tree: [{ path: "src/http.ts", mode: "100755", type: "blob", sha: "e".repeat(40) }],
+    });
+    // Parented on the REVIEWED sha, and carrying the manifest trailer.
+    const commit = calls.find((c) => isCommitCreate(c.route))!;
+    expect(commit.params).toMatchObject({ parents: [HEAD] });
+    expect(commit.params!.message).toContain(`Scruffy-Fix-Proposal: ${PROPOSAL}`);
+    // The ref is created only AFTER the whole commit exists.
+    expect(calls.find((c) => isRefCreate(c.route))!.params).toMatchObject({ ref: `refs/heads/${BRANCH}`, sha: "c".repeat(40) });
+    expect(calls.findIndex((c) => isRefCreate(c.route))).toBeGreaterThan(calls.findIndex((c) => isCommitCreate(c.route)));
+    expect(calls.find((c) => isPullCreate(c.route))!.params).toMatchObject({ head: BRANCH, base: "develop", draft: false });
   });
 
   it("idempotent: an existing PR for the head branch (any state) short-circuits with NO writes", async () => {
-    const { api, calls } = stub([{ match: isPullsList, reply: () => ok([{ number: 31 }]) }]);
+    const { api, calls } = stub([{ match: isPullsList, reply: () => ok([pull(31, { draft: true }).data]) }]);
     const scm = new GithubAppScmWriter({ api });
 
     const result = await scm.openPullRequest(input);
 
-    expect(result).toEqual({ number: 31, created: false });
+    expect(result).toEqual({ number: 31, url: `https://github.test/${REPO}/pull/31`, headSha: "b".repeat(40), draft: true, created: false });
     expect(calls).toHaveLength(1); // the list — nothing else
   });
 
-  it("crash-resume: branch exists still AT the subject sha — edits are applied, then the PR opens", async () => {
-    const { api, calls } = stub([
-      { match: isPullsList, reply: () => ok([]) },
-      { match: isRefGet, reply: () => ok({ object: { sha: HEAD } }) },
-      { match: isContentsGet, reply: () => contents(FILE) },
-      { match: isContentsPut, reply: () => ok({}) },
-      { match: isPullCreate, reply: () => ok({ number: 56 }) },
-    ]);
-    const scm = new GithubAppScmWriter({ api });
-
-    const result = await scm.openPullRequest(input);
-
-    expect(result).toEqual({ number: 56, created: true });
-    expect(calls.some((c) => isRefCreate(c.route))).toBe(false); // branch reused
-    expect(calls.some((c) => isContentsPut(c.route))).toBe(true);
-  });
-
-  it("crash-resume: branch has ADVANCED past the subject sha — edits were already committed, must NOT re-apply", async () => {
+  it("crash-resume: an existing branch whose head DECLARES this proposal is accepted without re-committing", async () => {
     const { api, calls } = stub([
       { match: isPullsList, reply: () => ok([]) },
       { match: isRefGet, reply: () => ok({ object: { sha: "c".repeat(40) } }) },
-      { match: isPullCreate, reply: () => ok({ number: 57 }) },
+      {
+        match: isCommitGet,
+        reply: () => ok({ sha: "c".repeat(40), message: `t\n\nScruffy-Fix-Proposal: ${PROPOSAL}`, tree: { sha: "d".repeat(40) } }),
+      },
+      { match: isPullCreate, reply: () => pull(56) },
     ]);
     const scm = new GithubAppScmWriter({ api });
 
-    const result = await scm.openPullRequest(input);
+    expect((await scm.openPullRequest(input)).number).toBe(56);
+    // No blob/tree/commit writes: the manifest already proves the patch is there.
+    expect(calls.some((c) => c.route.startsWith("POST") && c.route.includes("/git/"))).toBe(false);
+  });
 
-    expect(result).toEqual({ number: 57, created: true });
-    // Re-applying line edits to the already-fixed file would corrupt it.
-    expect(calls.some((c) => isContentsGet(c.route) || c.route.startsWith("PUT"))).toBe(false);
+  it("REFUSES an existing branch that merely advanced — 'advanced' is not proof our patch landed", async () => {
+    const { api, calls } = stub([
+      { match: isPullsList, reply: () => ok([]) },
+      { match: isRefGet, reply: () => ok({ object: { sha: "9".repeat(40) } }) },
+      { match: isCommitGet, reply: () => ok({ sha: "9".repeat(40), message: "someone else's commit", tree: { sha: "d".repeat(40) } }) },
+    ]);
+    const scm = new GithubAppScmWriter({ api });
+
+    await expect(scm.openPullRequest(input)).rejects.toThrow(/does not declare fix proposal/);
+    expect(calls.some((c) => isPullCreate(c.route))).toBe(false);
   });
 
   it("resolves the repository default branch when baseBranch is absent (older persisted effects)", async () => {
     const { api, calls } = stub([
       { match: isPullsList, reply: () => ok([]) },
       { match: isRefGet, reply: () => ok({ object: { sha: "c".repeat(40) } }) },
+      {
+        match: isCommitGet,
+        reply: () => ok({ sha: "c".repeat(40), message: `t\n\nScruffy-Fix-Proposal: ${PROPOSAL}`, tree: { sha: "d".repeat(40) } }),
+      },
       { match: isRepoGet, reply: () => ok({ default_branch: "main" }) },
-      { match: isPullCreate, reply: () => ok({ number: 58 }) },
+      { match: isPullCreate, reply: () => pull(58) },
     ]);
     const scm = new GithubAppScmWriter({ api });
 
@@ -272,10 +309,14 @@ describe("GithubAppScmWriter fix pull requests", () => {
         match: isPullsList,
         reply: () => {
           listCalls += 1;
-          return listCalls === 1 ? ok([]) : ok([{ number: 59 }]);
+          return listCalls === 1 ? ok([]) : ok([pull(59).data]);
         },
       },
       { match: isRefGet, reply: () => ok({ object: { sha: "c".repeat(40) } }) },
+      {
+        match: isCommitGet,
+        reply: () => ok({ sha: "c".repeat(40), message: `t\n\nScruffy-Fix-Proposal: ${PROPOSAL}`, tree: { sha: "d".repeat(40) } }),
+      },
       {
         match: isPullCreate,
         reply: () => {
@@ -285,14 +326,19 @@ describe("GithubAppScmWriter fix pull requests", () => {
     ]);
     const scm = new GithubAppScmWriter({ api });
 
-    const result = await scm.openPullRequest(input);
-    expect(result).toEqual({ number: 59, created: false });
+    expect(await scm.openPullRequest(input)).toMatchObject({ number: 59, created: false });
   });
 
   it("refuses to edit a file the contents API cannot return (encoding 'none' — too large)", async () => {
     const { api } = stub([
       { match: isPullsList, reply: () => ok([]) },
-      { match: isRefGet, reply: () => ok({ object: { sha: HEAD } }) },
+      {
+        match: isRefGet,
+        reply: () => {
+          throw httpError(404);
+        },
+      },
+      { match: isCommitGet, reply: () => ok({ sha: HEAD, message: "reviewed head", tree: { sha: PARENT_TREE } }) },
       { match: isContentsGet, reply: () => ok({ content: "", encoding: "none", sha: "filesha" }) },
     ]);
     const scm = new GithubAppScmWriter({ api });
@@ -311,5 +357,19 @@ describe("GithubAppScmWriter fix pull requests", () => {
     ]);
     const scm = new GithubAppScmWriter({ api });
     await expect(scm.openPullRequest(input)).rejects.toThrow(/500/);
+  });
+
+  it("THROWS on an unexpected pull-request response shape (external boundary is schema-parsed)", async () => {
+    const { api } = stub([
+      { match: isPullsList, reply: () => ok([]) },
+      { match: isRefGet, reply: () => ok({ object: { sha: "c".repeat(40) } }) },
+      {
+        match: isCommitGet,
+        reply: () => ok({ sha: "c".repeat(40), message: `t\n\nScruffy-Fix-Proposal: ${PROPOSAL}`, tree: { sha: "d".repeat(40) } }),
+      },
+      { match: isPullCreate, reply: () => ok({ number: 60 }) }, // no html_url, no head
+    ]);
+    const scm = new GithubAppScmWriter({ api });
+    await expect(scm.openPullRequest(input)).rejects.toThrow(/unexpected created pull response shape/);
   });
 });

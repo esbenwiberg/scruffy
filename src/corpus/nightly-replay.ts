@@ -85,6 +85,7 @@ export async function replayNightlyCorpus(
     const scm: ScmReader = {
       getChangedFiles: async () => c.files,
       getChangedFilesInRange: async () => c.files,
+      getFileContent: async (_subject, path) => ({ complete: false, path, reason: "not_found" }),
       // Nightly never reads candidate CI; fail loudly if a future path calls it.
       getCandidateCi: async () => {
         throw new Error("candidate CI read not supported in nightly corpus replay");

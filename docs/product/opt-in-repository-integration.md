@@ -107,18 +107,84 @@ Nightly reviews the day's merged changes on the repository's default integration
 branch. The branch is resolved from GitHub rather than hardcoded as `main`, so
 repositories using `master`, `develop`, or another default are supported.
 
-The initial trigger may be a centrally maintained scheduled workflow or a small
-Scruffy scheduler over installed repositories. In either case:
+The implemented trigger is a small Scruffy scheduler over installed repositories,
+enabled centrally by one cadence setting (`SCRUFFY_NIGHTLY_CADENCE_MS`; see
+`docs/product/github-app-setup.md`). There is no per-repository enrollment record
+and no administrative UI:
 
-- App installation is the repository list;
+- App installation is the repository list, read through the installation's own
+  paginated repository endpoint;
 - GitHub is the source of the current default branch and immutable head SHA;
-- the durable watermark remains keyed by repository and branch;
+- the durable watermark remains keyed by repository and branch, and each range
+  starts at the last **completely reviewed** head — never at the last attempted
+  one;
+- each attempt holds a per-repository/branch lease, so overlapping ticks, a second
+  process, or a restart mid-run cannot duplicate a run, an issue graph, a
+  remediation attempt, or a pull request;
+- a listing failure schedules nothing and is reported as a failure; it is never
+  converted into a clean run;
 - nightly never blocks and never auto-merges;
 - fix PRs run through the repository's normal CI.
 
 Manual branch selection remains useful for development and explicit backfills,
 but normal scheduled operation targets one default integration branch per
-repository.
+repository. The manual command prints the same summary the scheduled run
+publishes, so a controlled run and a scheduled run cannot describe the same night
+differently.
+
+### Self-review and fixing loop
+
+Each scheduled range runs the whole loop, and every step is durable before any
+GitHub write:
+
+1. analyze the immutable `(last complete head, head]` range, adversarially
+   validate findings, and deduplicate them;
+2. persist the report, its coverage, and the intended work graph;
+3. publish **one parent issue** per range that has actionable work, with a native
+   child sub-issue for **every surviving finding** and **every required coverage
+   gap**. A complete, clean night publishes no issue at all — only its check;
+4. attempt a fix for every surviving finding: a registered deterministic fixer
+   when one applies, otherwise a schema-constrained model proposal validated
+   against real file content at the reviewed SHA and reviewed by a critic;
+5. open a linked pull request when a bounded patch can be applied safely —
+   **ready for review** when the proposal is independently confirmed, **draft**
+   when it is structurally safe and policy-compliant but unconfirmed. Malformed,
+   conflicting, stale, or policy-weakening output opens no PR and leaves the child
+   issue actionable with an explicit reason;
+6. reconcile repository CI, human merges, and human issue closures; a merged fix
+   moves its child to *awaiting verification*, and only a verification against the
+   immutable post-merge head clears it;
+7. close the parent only when required coverage is complete and every child is
+   verified resolved or explicitly dismissed.
+
+A refuted finding stays in the audit record and never becomes an issue. A required
+coverage gap holds the complete-review watermark, so a partially reviewed range
+stays owed and is re-reviewed by a later bounded attempt instead of being titled
+as clean.
+
+### The morning process (human)
+
+A maintainer arriving in the morning has two surfaces, rendered from the same
+persisted state: the **parent nightly issue** and the advisory `scruffy/nightly`
+check. Both lead with coverage, then finding counts, then every child issue and
+pull request with its delivery, CI, and merge state, and then any work Scruffy
+failed to do.
+
+The human decisions are:
+
+- **merge** a fix PR you agree with (read it first — a draft PR is explicitly
+  marked as not independently confirmed). Scruffy never merges its own PRs and
+  never changes branch protection;
+- **close** a fix PR you do not want. The child issue stays actionable;
+- **dismiss** an item by closing its child issue. Scruffy records the GitHub actor
+  and state reason as an explicit human dismissal and does not relabel it as a
+  verified fix;
+- **fix by hand** anything no patch was proposed for; the next verified range
+  clears it.
+
+Merging is not resolution. Green CI is supporting evidence, not proof: a merged
+fix clears its finding only after Scruffy verifies the defect is gone at the
+immutable post-merge head, and an indeterminate verification keeps the item open.
 
 ## Release workflow
 
@@ -207,7 +273,9 @@ cannot satisfy.
    measurements.
 3. Wire optional model analysis into deeper gates without putting it on poison's
    deterministic critical path.
-4. Add default-branch nightly scheduling for installed repositories.
+4. Add default-branch nightly scheduling for installed repositories. *(Built:
+   the scheduler, the durable self-review/fix lifecycle, and the morning
+   parent/check summary. Not yet exercised against a live GitHub installation.)*
 5. Build the controlled release workflow and protected-environment sign-off.
 6. Grant authority only after the corresponding shadow evidence meets the product
    thresholds.

@@ -62,6 +62,20 @@ export const RELEASE_STOP_CLASSES = ["leaked-credential", "destructive-schema-ch
 export const RELEASE_SIGNOFF_CLASSES = ["disabled-tls-verification", ...MODEL_DEFECT_CLASSES] as const;
 
 /**
+ * Service-owned bounds on every proposed patch, deterministic or model-sourced.
+ * Narrow on purpose: a nightly fix PR is a small, mechanical, low-ambiguity
+ * change, never a repository-wide rewrite. Protected paths cover the gate's
+ * own policy/prompt sources and common CI/lockfile surfaces a patch must never
+ * touch regardless of what a finding or model claims.
+ */
+export const DEFAULT_REMEDIATION_POLICY = {
+  maxFiles: 3,
+  maxTotalLines: 60,
+  maxTotalBytes: 4096,
+  protectedPaths: [".github/", "src/domain/policy/", "src/providers/prompts/", "package-lock.json", "package.json"],
+} as const;
+
+/**
  * The exact GitHub check/status contexts a controlled candidate must pass for the
  * candidate-CI lane. Deliberately NON-Scruffy — the gate never depends on its own
  * `scruffy/release` context (that self-dependency is rejected at policy parsing).
@@ -141,6 +155,12 @@ export function defaultPolicy(version = "policy-v1"): EffectivePolicy {
           requiredContexts: [...RELEASE_EVIDENCE_POLICY["candidate-ci"].requiredContexts],
         },
       },
+    },
+    remediation: {
+      maxFiles: DEFAULT_REMEDIATION_POLICY.maxFiles,
+      maxTotalLines: DEFAULT_REMEDIATION_POLICY.maxTotalLines,
+      maxTotalBytes: DEFAULT_REMEDIATION_POLICY.maxTotalBytes,
+      protectedPaths: [...DEFAULT_REMEDIATION_POLICY.protectedPaths],
     },
   };
 }

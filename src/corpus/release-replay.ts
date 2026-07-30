@@ -112,6 +112,7 @@ export async function replayReleaseCorpus(
     const scm: ScmReader = {
       getChangedFiles: async () => c.files,
       getChangedFilesInRange: async () => c.files,
+      getFileContent: async (_subject, path) => ({ complete: false, path, reason: "not_found" }),
       // Legacy offline cases mark candidate CI not-applicable, so this returns an
       // empty (CI-less) set. A campaign case injects explicit normalized records
       // bound to the exact candidate SHA — honest fake evidence, never a bypass.

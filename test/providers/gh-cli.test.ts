@@ -255,7 +255,16 @@ describe("GhCliScm writer (check-run effect -> commit status)", () => {
   it("hard-throws on openPullRequest — a stray PR effect must fail loudly, not silently no-op", async () => {
     const scm = new GhCliScm({ runGh: async () => "{}" });
     await expect(
-      scm.openPullRequest({ subject: SUBJECT, externalId: "x", branch: "b", title: "t", body: "b", edits: [] }),
+      scm.openPullRequest({
+        subject: SUBJECT,
+        externalId: "x",
+        branch: "b",
+        title: "t",
+        body: "b",
+        edits: [],
+        draft: false,
+        proposalId: "nfp_x",
+      }),
     ).rejects.toThrow(/not enabled/);
   });
 });

@@ -77,6 +77,8 @@ const PROPOSAL = {
   provenance: deterministicFixerProvenance("disabled-tls-verification"),
   branch: "scruffy/fix/x",
   edits: [{ path: "src/http.ts", startLine: 5, endLine: 5, replacement: "safe", rationale: "revert the flag" }],
+  readiness: "ready" as const,
+  validationReason: "deterministic_patch_ready",
   delivery: "queued" as const,
   ci: "unknown" as const,
   merge: "open" as const,

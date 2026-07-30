@@ -9,6 +9,10 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
@@ -67,7 +71,20 @@ class FlakyWriter implements ScmWriter {
   async openPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     if (this.throwOn.has(input.externalId)) throw new Error(`boom on ${input.externalId}`);
     this.pullRequests.push(input);
-    return { number: this.pullRequests.length, created: true };
+    const number = this.pullRequests.length;
+    return {
+      number,
+      url: `https://github.test/${input.subject.repository}/pull/${number}`,
+      headSha: "a".repeat(40),
+      draft: input.draft,
+      created: true,
+    };
+  }
+  async upsertIssue(_input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    throw new Error("this writer publishes no issues");
+  }
+  async linkChildIssue(_input: IssueLinkInput): Promise<IssueLinkResult> {
+    throw new Error("this writer publishes no issues");
   }
   async getChangedFiles(_s: SubjectRevision): Promise<ChangedFile[]> {
     return [];
@@ -166,6 +183,10 @@ describeDb("EffectsDispatcher error isolation", () => {
         subject: SUBJECT,
         externalId: "pr-1",
         branch: "scruffy/fix-1",
+        // A legacy row carries no proposal identity, so the externalId stands in
+        // as the manifest token, and absent draft means "ready for review".
+        proposalId: "pr-1",
+        draft: false,
         title: "Fix the thing",
         body: "This PR fixes the thing.",
         edits: [

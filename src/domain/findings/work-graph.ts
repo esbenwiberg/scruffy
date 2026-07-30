@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AnalysisCoverage, type CoverageGap, type CoverageGapCode } from "../evidence/coverage.js";
 import { ValidationOutcome } from "../evidence/types.js";
-import { ProposedEdit } from "../fixes/types.js";
+import { FixDeliveryReadiness, PreconditionedEdit } from "../fixes/delivery.js";
 import { NightlyReportIdentity, RemediationProvenance, coverageWorkItemId, findingWorkItemId, runWorkItemId } from "./work-identity.js";
 
 /**
@@ -73,8 +73,23 @@ export const RemediationReason = z.enum([
   "attempt_owed",
   /** A deterministic fixer produced a patch. */
   "deterministic_patch_ready",
+  /**
+   * The LLM remediation provider produced a patch that survived structural,
+   * preimage and policy validation. Distinct from `deterministic_patch_ready`
+   * because the trust argument is different: one is service-owned pure code, the
+   * other is untrusted output that was anchored and (maybe) critic-reviewed. The
+   * proposal's own `readiness` says whether it opens ready or as a draft.
+   */
+  "model_patch_proposed",
   /** Policy considers the class fixable but no registered fixer could patch it. */
   "fixer_declined",
+  /**
+   * A patch was produced and then REFUSED — protected path, size/scope limit,
+   * unanchorable preimage, or a critic that refuted it. Not the same as
+   * `fixer_declined` ("nobody had anything to say"): something was said and the
+   * service rejected it, so the finding stays actionable with a stated reason.
+   */
+  "patch_refused",
   /** The attempt ran and failed (provider error, malformed output). */
   "attempt_failed",
 ]);
@@ -191,7 +206,24 @@ export const FixProposalRecord = z.object({
   occurrenceId: z.string().min(1),
   provenance: RemediationProvenance,
   branch: z.string().min(1),
-  edits: z.array(ProposedEdit).min(1),
+  /** Preimage-carrying where the producer could honestly claim one. */
+  edits: z.array(PreconditionedEdit).min(1),
+  /**
+   * How much confidence the proposal carries into the SCM. `ready` = independently
+   * confirmed (a service-owned deterministic fixer, or a critic-confirmed model
+   * patch); `draft` = structurally safe but semantically UNCONFIRMED. The
+   * distinction is a safety property, not presentation: it decides whether a human
+   * is handed a pull request to review or a suggestion clearly marked as one.
+   * Defaulted so rows persisted before delivery existed still parse as `ready`,
+   * which is what they were (deterministic patches were the only kind).
+   */
+  readiness: FixDeliveryReadiness.default("ready"),
+  /**
+   * Stable reason code from the remediation attempt that produced this proposal
+   * (`deterministic_patch_ready`, `critic_confirmed`, `critic_indeterminate`, ...).
+   * Rendered into the PR body so a reviewer can see WHY it is ready or draft.
+   */
+  validationReason: z.string().min(1).default("unspecified"),
   delivery: ProposalDelivery,
   ci: ProposalCiState,
   merge: ProposalMergeState,
@@ -515,20 +547,27 @@ export function planNightlyWorkGraph(report: NightlyReport): NightlyWorkGraph {
     occurrenceId: null,
     coverageGap: null,
     title: `Nightly review ${identity.repository}@${identity.branch} ${rangeLabel(identity)}: ${surfaced.length} finding(s), ${gaps.length} coverage gap(s)`,
+    // COVERAGE BEFORE COUNTS, deliberately. A reader who sees "0 findings" first
+    // has already formed a conclusion by the time they reach the caveat; a finding
+    // count is only interpretable once you know whether anything was actually read.
     body: [
-      `Scruffy reviewed \`${identity.repository}\` branch \`${identity.branch}\` over \`${rangeLabel(identity)}\`.`,
+      `Scruffy reviewed \`${identity.repository}\` branch \`${identity.branch}\` over the immutable range \`${rangeLabel(identity)}\`.`,
+      "",
+      `- base: ${identity.baseSha === null ? "_(first review of this branch)_" : `\`${identity.baseSha}\``}`,
+      `- head: \`${identity.headSha}\``,
+      "",
+      report.requiredCoverageComplete
+        ? "**Coverage: complete.** Every analyzer reviewed this whole range."
+        : "**Coverage: INCOMPLETE — this run is not a clean bill of health.** The range stays unreviewed until every required gap is closed, so the complete-review watermark is held here.",
+      "",
+      `- required coverage gaps: ${gaps.length}`,
+      `- surfaced findings: ${surfaced.length}`,
+      `- suppressed (audit only, no issue): ${report.summary.suppressed}`,
       "",
       `- report: \`${report.reportId}\``,
       `- policy: \`${identity.policyVersion}\` (report schema \`${identity.schemaVersion}\`)`,
-      `- surfaced findings: ${surfaced.length}`,
-      `- required coverage gaps: ${gaps.length}`,
-      `- suppressed (audit only): ${report.summary.suppressed}`,
       "",
-      report.requiredCoverageComplete
-        ? "Coverage was complete for this range."
-        : "**Coverage was incomplete — this run is not a clean bill of health.** The range stays unreviewed until every required gap is closed.",
-      "",
-      "Each item below is tracked as its own child. This parent closes only when every child is verified resolved or explicitly dismissed and required coverage is complete.",
+      "Each item above is tracked as its own child issue. This parent closes only when required coverage is complete and every child is verified resolved or explicitly dismissed.",
     ].join("\n"),
     resolution: "open",
   };

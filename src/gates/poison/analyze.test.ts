@@ -25,6 +25,9 @@ const scm: ScmReader = {
   async getChangedFilesInRange(_range: RevisionRange): Promise<ChangedFile[]> {
     return [];
   },
+  async getFileContent(_subject, path) {
+    return { complete: false, path, reason: "not_found" };
+  },
   async getCandidateCi() {
     throw new Error("candidate CI read not used in poison analyze tests");
   },

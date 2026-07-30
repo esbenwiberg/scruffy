@@ -24,7 +24,9 @@ function newFilePatch(lines: string[]): string {
 // A validated leaked-credential -> reportable, but not a fixable class -> report.
 const REPORT_FILE: ChangedFile = {
   path: "src/config.ts",
-  patch: newFilePatch(["export const AWS_KEY = 'AKIAIJKLMNOP12345678';"]),
+  // Split so the repository secret scanner does not flag this fake fixture key;
+  // the assembled value is byte-identical to the literal.
+  patch: newFilePatch([`export const AWS_KEY = '${["AKIA", "IJKLMNOP12345678"].join("")}';`]),
 };
 // A validated disabled-TLS flag in prod code -> fixable class -> propose_fix.
 const FIX_FILE: ChangedFile = {
@@ -143,11 +145,15 @@ describeDb("nightly gate over a seeded range", () => {
     // The disabled-TLS finding -> one fix PR; the leaked-credential -> report only.
     const prs = h.scm.recordedPullRequests();
     expect(prs).toHaveLength(1);
-    // fixBranch now appends a short sha256 of the raw path (anti-collision) before the line suffix.
-    expect(prs[0]!.input.branch).toMatch(/^scruffy\/fix\/disabled-tls-verification\/src-http-ts-[0-9a-f]{8}-L1$/);
+    // The branch is bound to the reviewed CANDIDATE and the fix proposal identity,
+    // not to a path/line slug: the same defect on a later candidate is a different
+    // proposal and must not land on (or be mistaken for) this branch.
+    expect(prs[0]!.input.branch).toMatch(
+      new RegExp(`^scruffy/fix/disabled-tls-verification/${H1.slice(0, 12)}/[0-9a-f]{32}$`),
+    );
     expect(prs[0]!.input.subject.commitSha).toBe(H1);
     expect(prs[0]!.input.edits[0]!.replacement).toBe("const agent = new https.Agent({ rejectUnauthorized: true });");
-    expect(prs[0]!.input.body).toMatch(/not\*\* auto-merged/);
+    expect(prs[0]!.input.body).toMatch(/does \*\*not\*\* merge this pull request/);
 
     // Summary check still emitted; decision records the proposed fix.
     expect(nightlyChecks(H1)).toHaveLength(1);

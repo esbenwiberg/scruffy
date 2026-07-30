@@ -3,8 +3,10 @@ import { SystemClock, UuidIdGenerator } from "../platform/clock.js";
 import { createPool } from "../persistence/db.js";
 import { migrate } from "../persistence/migrate.js";
 import { Scruffy } from "../app/scruffy.js";
-import type { ScmReader, ScmWriter } from "../providers/scm/port.js";
+import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "../providers/scm/port.js";
 import {
+  createScmInstallationReader,
+  createScmLifecycleReader,
   createScmReader,
   createScmWriter,
   resolveScmReaderBackend,
@@ -18,6 +20,7 @@ import {
   defaultPolicy,
   defaultValidator,
 } from "../providers/registry.js";
+import { createModelProvider, resolveBackend } from "../providers/models/factory.js";
 import { createWebhookServer } from "./http.js";
 
 /**
@@ -28,7 +31,9 @@ import { createWebhookServer } from "./http.js";
  *   - a reconcile-and-flush interval — the actual work engine. The webhook only
  *     records runs durably; this loop (and the immediate post-ack drive) does
  *     the analysis and dispatches outbox effects, and it recovers anything a
- *     crash left behind.
+ *     crash left behind. The same tick then reconciles the fix lifecycle —
+ *     repository CI, human merges/closures, and post-merge verification — which
+ *     is a no-op unless the reader backend can observe it (github-app).
  *
  * Config (env only, no secrets in files):
  *   SCRUFFY_WEBHOOK_SECRET          — required; GitHub webhook HMAC secret
@@ -37,6 +42,13 @@ import { createWebhookServer } from "./http.js";
  *   DATABASE_URL                    — Postgres (persistence default otherwise)
  *   SCRUFFY_SCM_READER              — gh-cli (default) | github-app (+ its env)
  *   SCRUFFY_SCM_WRITER              — gh-cli (default) | github-app (+ its env)
+ *   SCRUFFY_MODEL_BACKEND           — fake (default) | claude-cli | anthropic | azure (+ its env)
+ *   SCRUFFY_NIGHTLY_CADENCE_MS      — nightly cadence per repository/branch; UNSET = no
+ *                                     hosted schedule (manual `scruffy:nightly` only)
+ *   SCRUFFY_NIGHTLY_TICK_MS         — how often the schedule is polled (default 5min)
+ *   SCRUFFY_NIGHTLY_LEASE_MS        — attempt lease (default 30min)
+ *   SCRUFFY_NIGHTLY_BATCH_SIZE      — repositories driven per tick (default 20)
+ *   SCRUFFY_NIGHTLY_OWNER           — recorded lease owner (default hostname/pid)
  *
  * Reads and writes are selected INDEPENDENTLY through the factory (ADR-0001:
  * separate credentials). The default stays gh-cli for both — a developer's own
@@ -49,6 +61,18 @@ import { createWebhookServer } from "./http.js";
 export interface ResolvedScmBackends {
   scmReader: ScmReader;
   scmWriter: ScmWriter;
+  /**
+   * Null on the gh-cli reader, which cannot observe PR/CI/issue lifecycle state.
+   * The fix-lifecycle loop is then an explicit no-op rather than a loop that
+   * quietly records nothing.
+   */
+  scmLifecycleReader: ScmLifecycleReader | null;
+  /**
+   * Null on the gh-cli reader, which cannot enumerate the App installation. The
+   * hosted nightly schedule is then unavailable BY CONSTRUCTION rather than
+   * silently reviewing nothing (see `resolveNightlySchedule`).
+   */
+  scmInstallationReader: ScmInstallationReader | null;
   readerBackend: ScmReaderBackend;
   writerBackend: ScmWriterBackend;
 }
@@ -69,7 +93,72 @@ export function createScmBackends(
     writerBackend,
     scmReader: createScmReader(readerBackend),
     scmWriter: createScmWriter(writerBackend),
+    scmLifecycleReader: createScmLifecycleReader(readerBackend),
+    scmInstallationReader: createScmInstallationReader(readerBackend),
   };
+}
+
+/** The hosted nightly schedule, as resolved from env. */
+export interface ResolvedNightlySchedule {
+  cadenceMs: number;
+  leaseMs: number;
+  batchSize: number;
+  owner: string;
+  /** How often the scheduler polls; smaller than the cadence, which gates the work. */
+  tickMs: number;
+}
+
+/**
+ * Resolve the hosted nightly cadence from env, or null when none is configured.
+ *
+ * `SCRUFFY_NIGHTLY_CADENCE_MS` is the single switch: unset means this deployment has
+ * no hosted schedule and nightly runs come from the manual `scruffy:nightly` command.
+ * When it IS set, the reader must be installation-capable — a cadence configured
+ * against the gh-cli reader can never enumerate its own installation, and a schedule
+ * that reviews nothing every night is indistinguishable from a quiet repository. That
+ * is a boot-time configuration error, so it throws here rather than degrading.
+ *
+ * Exported (and env-injectable) so this resolution is testable without booting.
+ */
+export function resolveNightlySchedule(
+  env: Record<string, string | undefined>,
+  installationCapable: boolean,
+): ResolvedNightlySchedule | null {
+  const cadenceMs = positiveInt(env, "SCRUFFY_NIGHTLY_CADENCE_MS");
+  if (cadenceMs === null) return null;
+  if (!installationCapable) {
+    throw new Error(
+      "SCRUFFY_NIGHTLY_CADENCE_MS is set but SCRUFFY_SCM_READER cannot enumerate the App installation — " +
+        "set SCRUFFY_SCM_READER=github-app, or unset the cadence and use the manual scruffy:nightly command",
+    );
+  }
+  const tickMs = positiveInt(env, "SCRUFFY_NIGHTLY_TICK_MS") ?? 5 * 60_000;
+  if (tickMs > cadenceMs) {
+    // A poll slower than the cadence silently stretches the cadence; an operator who
+    // asked for hourly reviews would get them every tick instead.
+    throw new Error(
+      `SCRUFFY_NIGHTLY_TICK_MS=${tickMs} is longer than SCRUFFY_NIGHTLY_CADENCE_MS=${cadenceMs} — ` +
+        "the poll interval must be shorter than the cadence it drives",
+    );
+  }
+  return {
+    cadenceMs,
+    tickMs,
+    leaseMs: positiveInt(env, "SCRUFFY_NIGHTLY_LEASE_MS") ?? 30 * 60_000,
+    batchSize: positiveInt(env, "SCRUFFY_NIGHTLY_BATCH_SIZE") ?? 20,
+    // Distinct per process so a multi-replica deployment's lease owners are
+    // attributable in the schedule audit row.
+    owner: env.SCRUFFY_NIGHTLY_OWNER ?? `nightly-scheduler:${process.pid}`,
+  };
+}
+
+/** A positive integer env value, null when unset. Throws on a typo — never defaults past it. */
+function positiveInt(env: Record<string, string | undefined>, name: string): number | null {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name}='${raw}' is not a positive integer`);
+  return value;
 }
 
 async function main(): Promise<void> {
@@ -84,7 +173,24 @@ async function main(): Promise<void> {
   // SCRUFFY_SCM_READER/_WRITER (or missing App credential) fails at boot rather
   // than mid-run. With both set to github-app the server runs fully
   // App-authenticated — no gh login or GH_TOKEN required.
-  const { scmReader, scmWriter, readerBackend, writerBackend } = createScmBackends();
+  const { scmReader, scmWriter, scmLifecycleReader, scmInstallationReader, readerBackend, writerBackend } =
+    createScmBackends();
+  // Resolved before the DB too: a cadence that cannot possibly run (or a typo in one
+  // of its intervals) must stop the boot, not produce silent empty nights.
+  let nightlySchedule: ResolvedNightlySchedule | null;
+  try {
+    nightlySchedule = resolveNightlySchedule(process.env, scmInstallationReader !== null);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+  // Only wire a REAL model into remediation when SCRUFFY_MODEL_BACKEND explicitly
+  // asks for one. Leaving `model` undefined (the "fake"/unset default) makes the
+  // remediation boundary report an honest, explicit "unavailable" for any
+  // non-deterministic finding rather than silently routing production findings
+  // through the deterministic fake's canned non-answers.
+  const modelBackend = resolveBackend();
+  const model = modelBackend === "fake" ? undefined : await createModelProvider(modelBackend);
 
   const pool = createPool();
   await migrate(pool);
@@ -99,6 +205,19 @@ async function main(): Promise<void> {
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     fixers: defaultFixers(),
+    ...(model !== undefined ? { model } : {}),
+    ...(scmLifecycleReader !== null ? { scmLifecycleReader } : {}),
+    ...(scmInstallationReader !== null ? { scmInstallationReader } : {}),
+    ...(nightlySchedule !== null
+      ? {
+          nightlySchedule: {
+            cadenceMs: nightlySchedule.cadenceMs,
+            leaseMs: nightlySchedule.leaseMs,
+            batchSize: nightlySchedule.batchSize,
+            owner: nightlySchedule.owner,
+          },
+        }
+      : {}),
     webhookSecret: secret,
   });
 
@@ -118,6 +237,10 @@ async function main(): Promise<void> {
       try {
         await scruffy.reconcile();
         await scruffy.flushEffects();
+        // AFTER the flush: a PR opened by this very tick is then observable on the
+        // next one, and a fix PR that was just delivered already has its durable
+        // number/head sha to reconcile against.
+        await scruffy.reconcileFixes();
       } catch (err) {
         console.error(
           `reconcile loop failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`,
@@ -128,9 +251,46 @@ async function main(): Promise<void> {
     })();
   }, reconcileIntervalMs);
 
+  // The nightly trigger, on its OWN timer. Kept separate from the reconcile loop
+  // because the two cadences are unrelated (seconds vs hours) and a long nightly
+  // pass must not stall CI/merge/verification reconciliation — the morning state
+  // stays current while the night's analysis is still running. Overlap is handled
+  // durably by the per-branch schedule lease, so `scheduling` here is only an
+  // in-process courtesy against a pass that outlasts its own tick.
+  let scheduling = false;
+  const nightlyTimer =
+    nightlySchedule === null
+      ? null
+      : setInterval(() => {
+          if (scheduling) return;
+          scheduling = true;
+          void (async () => {
+            try {
+              const tick = await scruffy.scheduleNightly();
+              if (tick.listingError !== null) {
+                console.error(`nightly schedule: ${tick.listingError}`);
+              } else if (tick.claimed > 0) {
+                console.error(
+                  `nightly schedule: listed ${tick.listed}, eligible ${tick.eligible}, claimed ${tick.claimed}, reviewed ${tick.reviewed}`,
+                );
+              }
+            } catch (err) {
+              console.error(
+                `nightly schedule tick failed (next tick retries): ${err instanceof Error ? err.message : String(err)}`,
+              );
+            } finally {
+              scheduling = false;
+            }
+          })();
+        }, nightlySchedule.tickMs);
+
   server.listen(port, () => {
+    const schedule =
+      nightlySchedule === null
+        ? "nightly schedule: off (manual scruffy:nightly only)"
+        : `nightly cadence ${nightlySchedule.cadenceMs}ms, polled every ${nightlySchedule.tickMs}ms, ${nightlySchedule.batchSize} repos/tick`;
     console.error(
-      `scruffy listening on :${port} (reader: ${readerBackend}, writer: ${writerBackend}, reconcile every ${reconcileIntervalMs}ms)`,
+      `scruffy listening on :${port} (reader: ${readerBackend}, writer: ${writerBackend}, model: ${modelBackend}, reconcile every ${reconcileIntervalMs}ms, ${schedule})`,
     );
   });
 
@@ -140,6 +300,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.error(`${signal} received — draining`);
     clearInterval(timer);
+    if (nightlyTimer !== null) clearInterval(nightlyTimer);
     server.close(() => {
       // In-flight background drives hold pool clients; end() waits for them.
       void pool.end().then(() => process.exit(0));

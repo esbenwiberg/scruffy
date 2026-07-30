@@ -21,16 +21,21 @@ The gate must prove its precision, severe-case coverage, latency, and cost in sh
 
 ## Gate 2: Nightly deep review and fix
 
-Runs over the day's merged changes.
+Runs on a central cadence over every repository in the App installation, at each repository's resolved default branch, covering the range since that branch was last **completely** reviewed.
 
 - Uses broader repository context and multiple analysis strategies.
 - Attempts to falsify findings through adversarial validation.
 - Deduplicates and ranks surviving findings.
-- Opens narrowly scoped fix PRs when evidence and policy permit.
-- Lets each repository's normal CI build and test generated fixes.
-- Does not initially auto-merge fixes.
+- Turns surviving findings and required coverage gaps into durable work: one parent issue per reviewed range, with a native child issue per finding and per gap. A refuted finding stays in the audit record and reaches no human.
+- Attempts a fix for every surviving finding — a deterministic fixer when one applies, otherwise a schema-constrained, critic-reviewed model proposal bounded by service-owned patch limits.
+- Opens narrowly scoped fix PRs when evidence and policy permit: ready for review when independently confirmed, and clearly marked **draft** when structurally safe but unconfirmed.
+- Lets each repository's normal CI build and test generated fixes, and binds every CI verdict to the exact commit it was read at.
+- Does not auto-merge fixes, and does not treat a merge as a fix: a merged patch clears its finding only after verification against the immutable post-merge head.
+- Holds the complete-review watermark whenever required analyzer coverage is incomplete, so blindness is never published as a clean night.
 
 Its value is measured by incremental severe findings and net reviewer time saved—not by finding or comment volume.
+
+The morning surfaces (parent issue and advisory check) and the human merge/dismissal process are described in `docs/product/opt-in-repository-integration.md`.
 
 ## Gate 3: Release gate
 

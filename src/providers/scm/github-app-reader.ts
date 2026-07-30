@@ -1,6 +1,15 @@
 import { z } from "zod";
 import type { SubjectRevision } from "../../domain/evidence/types.js";
-import type { CandidateCiEvidence, CandidateCiRecord, ChangedFile, RevisionRange, ScmReader } from "./port.js";
+import type {
+  CandidateCiEvidence,
+  CandidateCiRecord,
+  ChangedFile,
+  FileContentResult,
+  InstalledRepository,
+  RevisionRange,
+  ScmInstallationReader,
+  ScmReader,
+} from "./port.js";
 import type { GhApi } from "./github-app.js";
 import { normalizeCheckRunConclusion, normalizeCommitStatusState } from "./candidate-ci.js";
 
@@ -51,6 +60,46 @@ const CommitPulls = z.array(
   }),
 );
 
+const ContentsResponse = z.object({
+  type: z.string(),
+  encoding: z.string().optional(),
+  content: z.string().optional(),
+});
+
+/**
+ * `GET /installation/repositories`. `total_count` is the endpoint's own claim about
+ * how many repositories the installation has, and we CHECK the accumulated list
+ * against it: that is the only available proof that pagination read everything
+ * rather than stopping early on a truncated page.
+ */
+const InstallationRepositories = z.object({
+  total_count: z.number().int().nonnegative(),
+  repositories: z.array(
+    z.object({
+      id: z.number().int(),
+      full_name: z.string().min(1),
+      default_branch: z.string().min(1),
+      archived: z.boolean().optional(),
+      disabled: z.boolean().optional(),
+    }),
+  ),
+});
+
+const BranchResponse = z.object({ commit: z.object({ sha: z.string().min(1) }) });
+
+/**
+ * Hard bound on installation-listing pages. The accepted deployment addresses one
+ * App installation with fewer than 20 repositories; 100-per-page × 20 pages is two
+ * orders of magnitude of headroom, and hitting it means something is wrong (a
+ * non-advancing cursor) rather than that the installation is genuinely that large —
+ * which is why the cap THROWS instead of returning what it has.
+ */
+const MAX_INSTALLATION_PAGES = 20;
+
+/** Anchoring a multi-megabyte file is never a mechanical, low-ambiguity edit;
+ * refuse rather than read it in and silently balloon memory/patch size. */
+const MAX_CONTENT_BYTES = 1_000_000;
+
 const CheckRunsCi = z.object({
   check_runs: z
     .array(
@@ -78,11 +127,80 @@ export interface GithubAppScmReaderOptions {
   api: GhApi;
 }
 
-export class GithubAppScmReader implements ScmReader {
+export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
   readonly #api: GhApi;
 
   constructor(options: GithubAppScmReaderOptions) {
     this.#api = options.api;
+  }
+
+  /**
+   * Every repository the configured installation can see, read across pages and
+   * deduplicated by full name.
+   *
+   * THREE WAYS THIS REFUSES TO UNDER-REPORT, because a short listing means a
+   * repository silently goes unreviewed and nothing downstream can detect it:
+   *  - a page whose shape we did not expect throws (via `#parse`);
+   *  - the accumulated count is checked against the endpoint's own `total_count`;
+   *  - exhausting the page cap throws rather than returning a partial list.
+   * Any API error propagates untouched — `[]` is reserved for an installation that
+   * genuinely has no repositories.
+   */
+  async listInstalledRepositories(): Promise<InstalledRepository[]> {
+    const byName = new Map<string, InstalledRepository>();
+    let total: number | null = null;
+
+    for (let page = 1; page <= MAX_INSTALLATION_PAGES; page += 1) {
+      const res = await this.#api("GET /installation/repositories", { per_page: PER_PAGE, page });
+      const parsed = this.#parse(InstallationRepositories, res.data, `installation repositories page ${page}`);
+      total = parsed.total_count;
+
+      for (const repo of parsed.repositories) {
+        byName.set(repo.full_name, {
+          repository: repo.full_name,
+          externalId: String(repo.id),
+          defaultBranch: repo.default_branch,
+          archived: repo.archived ?? false,
+          disabled: repo.disabled ?? false,
+        });
+      }
+
+      if (byName.size >= total) break;
+      // A page that returned nothing new (or nothing at all) while the endpoint still
+      // claims more repositories is a broken cursor, not the end of the listing.
+      if (parsed.repositories.length === 0) {
+        throw new Error(
+          `github-app: installation listing stalled at ${byName.size} of ${total} repositories (page ${page} was empty) — refusing a partial installation view`,
+        );
+      }
+    }
+
+    if (total !== null && byName.size < total) {
+      throw new Error(
+        `github-app: installation listing read ${byName.size} of ${total} repositories within ${MAX_INSTALLATION_PAGES} pages — refusing a partial installation view`,
+      );
+    }
+    return [...byName.values()];
+  }
+
+  /**
+   * A branch's immutable head sha. 404 -> null (the branch does not exist, or has
+   * no commits: a real answer meaning "nothing to review"). Every other failure
+   * throws, so a scheduler can never mistake an outage for an empty branch.
+   */
+  async resolveBranchHead(repository: string, branch: string): Promise<string | null> {
+    let res: { status: number; data: unknown };
+    try {
+      res = await this.#api(`GET /repos/${repository}/branches/${encodeURIComponent(branch)}`);
+    } catch (err) {
+      if (statusOf(err) === 404) return null;
+      throw err;
+    }
+    const parsed = this.#parse(BranchResponse, res.data, `branch ${repository}#${branch}`);
+    if (!/^[0-9a-f]{40}$/.test(parsed.commit.sha)) {
+      throw new Error(`github-app: branch ${repository}#${branch} head '${parsed.commit.sha}' is not a full commit sha`);
+    }
+    return parsed.commit.sha;
   }
 
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {
@@ -162,6 +280,41 @@ export class GithubAppScmReader implements ScmReader {
   }
 
   /**
+   * Immutable full-file content at `subject.commitSha`. Reports `complete:
+   * false` with a stable reason for anything that is not a clean, safely
+   * anchorable text read — never throws for an ordinary "cannot serve this
+   * read" case, so one path's gap does not abort the caller's whole attempt.
+   */
+  async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
+    try {
+      const res = await this.#api(`GET /repos/${subject.repository}/contents/${path}`, { ref: subject.commitSha });
+      if (Array.isArray(res.data)) {
+        return { complete: false, path, reason: "not_found", detail: "path is a directory" };
+      }
+      const parsed = this.#parse(ContentsResponse, res.data, `contents of ${path}`);
+      if (parsed.type !== "file") {
+        return { complete: false, path, reason: "not_found", detail: `path is a ${parsed.type}` };
+      }
+      if (parsed.encoding !== "base64" || parsed.content === undefined) {
+        // >1 MiB files come back with encoding "none" and empty content — the
+        // API itself refuses to inline them; treat identically to oversized.
+        return { complete: false, path, reason: "oversized", detail: "content not inline (file too large for the contents API)" };
+      }
+      const buffer = Buffer.from(parsed.content, "base64");
+      if (buffer.byteLength > MAX_CONTENT_BYTES) {
+        return { complete: false, path, reason: "oversized" };
+      }
+      if (isBinary(buffer)) {
+        return { complete: false, path, reason: "binary" };
+      }
+      return { complete: true, path, content: buffer.toString("utf8") };
+    } catch (err) {
+      if (statusOf(err) === 404) return { complete: false, path, reason: "not_found" };
+      return { complete: false, path, reason: "provider_error", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * Normalized candidate-CI evidence for the EXACT candidate SHA — the App-auth
    * counterpart to the gh-cli reader. Reads both check runs and commit statuses
    * and normalizes them identically. Every API failure throws (the `#api` transport
@@ -205,6 +358,21 @@ export class GithubAppScmReader implements ScmReader {
     if (!parsed.success) throw new Error(`github-app: unexpected ${what} response shape: ${parsed.error.message}`);
     return parsed.data;
   }
+}
+
+/** A numeric `status` off an unknown error (Octokit's RequestError carries one), or null. */
+function statusOf(err: unknown): number | null {
+  if (typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number") {
+    return (err as { status: number }).status;
+  }
+  return null;
+}
+
+/** Heuristic binary sniff: a NUL byte in the first few KB never occurs in valid
+ * UTF-8 text, which is the same signal `git diff`/most editors use. */
+function isBinary(buffer: Buffer): boolean {
+  const probe = buffer.subarray(0, Math.min(buffer.length, 8192));
+  return probe.includes(0);
 }
 
 /** Map GitHub file entries to ChangedFile, refusing an incomplete diff. A file

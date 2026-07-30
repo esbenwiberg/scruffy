@@ -3,6 +3,7 @@ import { SubjectRevision } from "../domain/evidence/types.js";
 import type { CheckConclusion, CheckRunInput } from "../providers/scm/port.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import { requiredCoverageGaps, type NightlyReport } from "../domain/findings/work-graph.js";
+import { nightlyReviewTitle } from "../domain/findings/morning-summary.js";
 import type { ReleaseRiskReport } from "../domain/release/report.js";
 
 export const CHECK_NAME = "scruffy/poison";
@@ -45,6 +46,18 @@ export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckCo
 }
 
 /**
+ * The idempotency key of a nightly run's check.
+ *
+ * Shared so the gate's first post, the publication refresh, and lifecycle
+ * reconciliation all address ONE check run on the reviewed candidate instead of
+ * competing checks that each tell a partial story. Bound to the candidate sha, so
+ * a later candidate gets its own check rather than overwriting history.
+ */
+export function nightlyCheckExternalId(repository: string, commitSha: string): string {
+  return `nightly:${repository}:${commitSha}`;
+}
+
+/**
  * Summarize a nightly REPORT for its check run. Nightly NEVER blocks, so the
  * conclusion is always `neutral` — it is a report, not a required gate.
  *
@@ -58,14 +71,17 @@ export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckCo
 export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
   const { surfaced, suppressed, proposals } = report.summary;
   const gaps = requiredCoverageGaps(report.coverage);
-  const fixes = proposals > 0 ? ` (${proposals} fix${proposals === 1 ? "" : "es"} proposed)` : "";
 
-  const title = !report.requiredCoverageComplete
-    ? `Nightly review: INCOMPLETE — ${gaps.length} coverage gap${gaps.length === 1 ? "" : "s"}, ` +
-      `${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`
-    : surfaced === 0
-      ? "Nightly review: clean"
-      : `Nightly review: ${surfaced} finding${surfaced === 1 ? "" : "s"}${fixes}`;
+  // The SAME title formatter the refreshed morning check uses, with `openItems: null`
+  // because no lifecycle exists yet at gate time. Sharing it is what stops the first
+  // post and the morning refresh from describing one run in two different vocabularies.
+  const title = nightlyReviewTitle({
+    requiredCoverageComplete: report.requiredCoverageComplete,
+    requiredGaps: gaps.length,
+    surfaced,
+    proposals,
+    openItems: null,
+  });
 
   const findingLines = report.findings
     .filter((f) => f.visibility === "surfaced")

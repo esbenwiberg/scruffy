@@ -6,6 +6,11 @@ import type {
   ChangedFile,
   CheckRunInput,
   CheckRunResult,
+  FileContentResult,
+  IssueLinkInput,
+  IssueLinkResult,
+  IssueUpsertInput,
+  IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
   RevisionRange,
@@ -44,6 +49,10 @@ const COMPARE_FILE_CAP = 300;
 
 /** GitHub commit-status description max length. */
 const STATUS_DESC_MAX = 140;
+
+/** Anchoring a multi-megabyte file is never a mechanical, low-ambiguity edit;
+ * refuse rather than read it in and silently balloon memory/patch size. */
+const MAX_CONTENT_BYTES = 1_000_000;
 
 /** Hard wall-clock cap on a `gh` invocation. A wedged network must fail the read
  * (→ the gate abstains) rather than hang the blocking poison path forever. */
@@ -203,6 +212,43 @@ export class GhCliScm implements ScmReader, ScmWriter {
   }
 
   /**
+   * Immutable full-file content at `subject.commitSha`, via `gh api contents`.
+   * Reports `complete: false` with a stable reason for anything that is not a
+   * clean, safely anchorable text read — never throws for an ordinary
+   * "cannot serve this read" case, so one path's gap does not abort the
+   * caller's whole remediation attempt.
+   */
+  async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
+    try {
+      const raw = await this.#runGh(["api", `repos/${subject.repository}/contents/${path}`, "-f", `ref=${subject.commitSha}`]);
+      const data = this.#parseJson(raw) as { type?: unknown; encoding?: unknown; content?: unknown } | unknown[] | null;
+      if (Array.isArray(data)) {
+        return { complete: false, path, reason: "not_found", detail: "path is a directory" };
+      }
+      if (data === null || typeof data !== "object" || typeof data.type !== "string") {
+        throw new Error("gh contents: unexpected response shape");
+      }
+      if (data.type !== "file") {
+        return { complete: false, path, reason: "not_found", detail: `path is a ${data.type}` };
+      }
+      if (data.encoding !== "base64" || typeof data.content !== "string") {
+        return { complete: false, path, reason: "oversized", detail: "content not inline (file too large for the contents API)" };
+      }
+      const buffer = Buffer.from(data.content, "base64");
+      if (buffer.byteLength > MAX_CONTENT_BYTES) {
+        return { complete: false, path, reason: "oversized" };
+      }
+      if (isBinary(buffer)) {
+        return { complete: false, path, reason: "binary" };
+      }
+      return { complete: true, path, content: buffer.toString("utf8") };
+    } catch (err) {
+      if (isGhNotFound(err)) return { complete: false, path, reason: "not_found" };
+      return { complete: false, path, reason: "provider_error", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * Normalized candidate-CI evidence for the EXACT candidate SHA. Reads BOTH GitHub
    * check runs and commit statuses for the commit and normalizes each into one
    * record set. Every `gh` failure REJECTS (never []): a fault must not read as
@@ -284,6 +330,36 @@ export class GhCliScm implements ScmReader, ScmWriter {
     throw new Error("openPullRequest is not enabled in the gh-cli adapter (poison posts a commit status only)");
   }
 
+  // ── Writer (work-item issues) ────────────────────────────────────────────────
+  //
+  // NOT IMPLEMENTED, ON PURPOSE. This is the development adapter: it reuses a
+  // developer's `gh` session, which is a different (broader) credential from the
+  // App installation ADR-0001 reserves for effects, and it has no way to prove a
+  // marker lookup read the primary store rather than a lagging index. Publishing
+  // real, human-visible issues from a developer's own identity — or worse,
+  // duplicating a repository's nightly parent issue because the lookup missed — is
+  // not a tradeoff this adapter gets to make.
+  //
+  // Both methods THROW so a stray issue effect is retried and then dead-lettered
+  // with an honest reason. The one thing they must never do is return a fabricated
+  // reference: that would let the dispatcher record a publication that does not
+  // exist and mark the graph published. Set SCRUFFY_SCM_WRITER=github-app to
+  // publish issues.
+
+  async upsertIssue(_input: IssueUpsertInput): Promise<IssueUpsertResult> {
+    throw new Error(
+      "upsertIssue is not enabled in the gh-cli adapter — nightly issue publication requires the GitHub App writer " +
+        "(set SCRUFFY_SCM_WRITER=github-app)",
+    );
+  }
+
+  async linkChildIssue(_input: IssueLinkInput): Promise<IssueLinkResult> {
+    throw new Error(
+      "linkChildIssue is not enabled in the gh-cli adapter — native sub-issue attachment requires the GitHub App writer " +
+        "(set SCRUFFY_SCM_WRITER=github-app)",
+    );
+  }
+
   // ── Parsing helpers ──────────────────────────────────────────────────────────
 
   #parseJson(raw: string): unknown {
@@ -338,6 +414,19 @@ interface GhStatus {
   context: string;
   state: string;
   updated_at?: string;
+}
+
+/** True when a `gh api` rejection is GitHub's 404, as reported in `gh`'s stderr text
+ * (the CLI gives no structured status code, only "gh: Not Found (HTTP 404)"). */
+function isGhNotFound(err: unknown): boolean {
+  return err instanceof Error && /HTTP 404|Not Found/i.test(err.message);
+}
+
+/** Heuristic binary sniff: a NUL byte in the first few KB never occurs in valid
+ * UTF-8 text, which is the same signal `git diff`/most editors use. */
+function isBinary(buffer: Buffer): boolean {
+  const probe = buffer.subarray(0, Math.min(buffer.length, 8192));
+  return probe.includes(0);
 }
 
 /** Poison/gate conclusion -> commit-status state. Statuses have no `neutral`; an

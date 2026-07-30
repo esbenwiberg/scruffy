@@ -213,11 +213,35 @@ export const ReleasePolicy = z
   });
 export type ReleasePolicy = z.infer<typeof ReleasePolicy>;
 
+/**
+ * Remediation policy. Bounds every proposed patch — deterministic or LLM —
+ * regardless of what the reviewed repository or a model claims. Service-owned
+ * and immutable per version: a model can propose an edit outside these limits,
+ * but proposal-validation rejects it before it is ever eligible for a PR
+ * (never a repository- or model-controlled weakening).
+ */
+export const RemediationPolicy = z.object({
+  /** Maximum distinct files a single proposal may touch. */
+  maxFiles: z.number().int().positive(),
+  /** Maximum total changed lines (sum of replacement line counts) across a proposal. */
+  maxTotalLines: z.number().int().positive(),
+  /** Maximum total bytes of replacement content across a proposal. */
+  maxTotalBytes: z.number().int().positive(),
+  /**
+   * Path prefixes no proposal may edit (e.g. CI config, lockfiles, this gate's
+   * own policy/prompt sources). Checked against the proposal's paths, never
+   * configurable by repository content or model output.
+   */
+  protectedPaths: z.array(z.string().min(1)).readonly(),
+});
+export type RemediationPolicy = z.infer<typeof RemediationPolicy>;
+
 export const EffectivePolicy = z.object({
   /** Immutable version identity; every decision cites this. */
   version: z.string().min(1),
   poison: PoisonPolicy,
   nightly: NightlyPolicy,
   release: ReleasePolicy,
+  remediation: RemediationPolicy,
 });
 export type EffectivePolicy = z.infer<typeof EffectivePolicy>;

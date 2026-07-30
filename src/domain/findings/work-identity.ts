@@ -145,6 +145,25 @@ export function deterministicFixerProvenance(defectClass: string): RemediationPr
 }
 
 /**
+ * Provenance for a model-sourced remediation proposal. `modelId` is the
+ * responding model's self-reported id (recorded, never trusted as an identity
+ * input beyond this string) and `promptVersion` is the versioned remediation
+ * prompt that produced it — both part of the proposal identity, so a later
+ * prompt or model swap mints a NEW proposal rather than silently redefining
+ * an existing one.
+ */
+export function modelFixerProvenance(options: { fixerId: string; modelId: string; promptVersion: string }): RemediationProvenance {
+  return {
+    fixerKind: "model",
+    fixerId: options.fixerId,
+    fixerVersion: options.promptVersion,
+    modelId: options.modelId,
+    promptVersion: options.promptVersion,
+    proposalSchemaVersion: FIX_PROPOSAL_SCHEMA_VERSION,
+  };
+}
+
+/**
  * Work-item ids. A work item is the durable intent to publish something for a
  * human (brief 02 turns these into GitHub issues), so its id must be derivable
  * from the report/occurrence identity alone — that is what makes re-committing
