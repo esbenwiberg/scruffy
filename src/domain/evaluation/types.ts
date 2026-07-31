@@ -18,13 +18,7 @@ export type GateKind = z.infer<typeof GateKind>;
  *  - `superseded`   : the subject head moved before this run reached a decision.
  *  - `indeterminate`: analysis could not produce a safe decision (abstained).
  */
-export const RunState = z.enum([
-  "pending",
-  "analyzing",
-  "decided",
-  "superseded",
-  "indeterminate",
-]);
+export const RunState = z.enum(["pending", "analyzing", "decided", "superseded", "indeterminate"]);
 export type RunState = z.infer<typeof RunState>;
 
 export const EvaluationRun = z.object({
@@ -32,7 +26,10 @@ export const EvaluationRun = z.object({
   kind: GateKind,
   subject: SubjectRevision,
   /** Merge-group sha when the run evaluates a merge queue candidate. */
-  mergeGroupSha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
+  mergeGroupSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .nullable(),
   /**
    * Nightly range base: the last-reviewed head this run advances from. Null for
    * poison runs, and for a branch's first-ever nightly review. `subject.commitSha`
@@ -40,9 +37,23 @@ export const EvaluationRun = z.object({
    * self-contained, so reconciliation re-drives it against its frozen range
    * rather than a watermark that may have since moved.
    */
-  baseSha: z.string().regex(/^[0-9a-f]{40}$/).nullable(),
-  /** Branch the nightly range belongs to. Null for poison runs. */
+  baseSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .nullable(),
+  /** Branch the nightly range belongs to. Null for poison/release runs. */
   branch: z.string().min(1).nullable(),
+  /** Complete-envelope release fields. Null for non-release and historical v1 runs. */
+  releaseArtifactDigest: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/)
+    .nullable()
+    .optional(),
+  releaseTargetEnvironment: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
+    .nullable()
+    .optional(),
   policyVersion: z.string().min(1),
   state: RunState,
   attempt: z.number().int().nonnegative(),

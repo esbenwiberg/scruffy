@@ -5,9 +5,11 @@
 This runbook deploys Scruffy as a persistent, **shadow-only** GitHub App service.
 The deployment has a stable public HTTPS endpoint, one always-on Container App,
 and a private PostgreSQL Flexible Server. It does not make any Scruffy check
-required, invoke a live model, publish releases, or run repository-controlled
-code. The hosted nightly scheduler runs daily over the App installation; a
-shorter cadence may be used only during a controlled live test.
+required, publish releases, deploy application artifacts, or run repository-
+controlled code. The hosted nightly scheduler runs daily over the App
+installation; a shorter cadence may be used only during a controlled live test.
+A real Foundry backend and the hosted OIDC release protocol are now configurable,
+but neither is enabled or live-verified merely by merging the code.
 
 The initial repository is `esbenwiberg/capsule`. Install the GitHub App only on
 that repository until the outward webhook and check-run path has been observed.
@@ -131,6 +133,31 @@ export SCRUFFY_NIGHTLY_CADENCE_MS=86400000
 export SCRUFFY_NIGHTLY_TICK_MS=300000
 ```
 
+### Optional real-model and hosted-release configuration
+
+These settings consume an **existing**, separately approved Foundry resource and
+Claude deployment in `ewi-sandboxes`; the deployment script does not purchase a
+Marketplace offer or create a model deployment:
+
+```bash
+export SCRUFFY_MODEL_BACKEND=azure
+export AZURE_FOUNDRY_RESOURCE='<existing-foundry-resource>'
+export AZURE_FOUNDRY_DEPLOYMENT='<existing-claude-deployment>'
+
+export SCRUFFY_RELEASE_OIDC_AUDIENCE='scruffy-release'
+export SCRUFFY_RELEASE_OIDC_REPOSITORY='owner/disposable-repository'
+export SCRUFFY_RELEASE_OIDC_REPOSITORY_ID='<numeric-repository-id>'
+export SCRUFFY_RELEASE_OIDC_WORKFLOW_REF='owner/control/.github/workflows/release.yml@<full-40-character-commit-sha>'
+export SCRUFFY_RELEASE_TARGET_ENVIRONMENT='shadow-production'
+export SCRUFFY_RELEASE_APPROVAL_ENVIRONMENT='scruffy-production-signoff'
+```
+
+The Container App's dedicated identity receives `Cognitive Services User` on
+that same-resource-group Foundry account and requests Entra tokens for
+`https://ai.azure.com/.default`. No Foundry API key is created or stored. The
+GitHub App separately needs `Actions: read` to retrieve workflow-run approval
+history. Both RBAC and App permission changes are human gates.
+
 ## 4. Enable and verify the webhook
 
 The deployment prints an endpoint shaped like:
@@ -246,10 +273,13 @@ outputs and creates no commit status or check, keeping PRs lean. Disposable PR
 
 That run used an isolated local report database, so it honestly recorded that no
 durable nightly reports were available there; it did not pretend the separate
-Azure nightly database was empty. The remaining gaps are a hosted report page,
-an Azure-hosted real model backend, cross-database elimination through hosted
-release execution, controlled publication, protected-environment sign-off with
-mandatory rationale and approval audit records, and visual/deployment evidence.
+Azure nightly database was empty. Local code now implements full-envelope report
+v2, hosted OIDC report retrieval, durable mandatory-rationale attestations,
+actual reviewer lookup, terminal shadow authorization, and keyless Foundry
+configuration. Remaining evidence gaps are deployment of those paths, one real
+hosted model report, cross-database elimination in a live workflow, administrator-
+bypass removal, two disposable OIDC terminal runs, controlled publication, and
+visual/deployment evidence.
 
 ## Operations
 

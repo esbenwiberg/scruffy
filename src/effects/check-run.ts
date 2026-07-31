@@ -230,6 +230,8 @@ export function releaseToCheck(report: ReleaseRiskReport): {
   const reasons = decision.reasons.length > 0 ? decision.reasons.join(", ") : "(none)";
   const summary = [
     `candidate: ${report.subject.candidateSha}`,
+    `artifact: ${report.subject.artifactDigest}`,
+    `target environment: ${report.subject.targetEnvironment}`,
     `previous release: ${report.subject.previousReleaseSha ?? "(first release)"}`,
     `report: ${report.reportId} (v${report.reportVersion}, policy ${report.policyVersion})`,
     `outcome: ${decision.outcome} — reasons: ${reasons}.`,

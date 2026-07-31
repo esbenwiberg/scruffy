@@ -22,6 +22,15 @@ Optional environment:
   SCRUFFY_POSTGRES_SKU              defaults to Standard_B1ms
   SCRUFFY_NIGHTLY_CADENCE_MS        defaults to 86400000 (24 hours)
   SCRUFFY_NIGHTLY_TICK_MS           defaults to 300000 (5 minutes)
+  SCRUFFY_MODEL_BACKEND             fake (default) | azure
+  AZURE_FOUNDRY_RESOURCE            existing Foundry resource name (azure only)
+  AZURE_FOUNDRY_DEPLOYMENT          existing Claude deployment name (azure only)
+  SCRUFFY_RELEASE_OIDC_AUDIENCE     defaults to scruffy-release
+  SCRUFFY_RELEASE_OIDC_REPOSITORY   owner/repository (enables hosted release API)
+  SCRUFFY_RELEASE_OIDC_REPOSITORY_ID
+  SCRUFFY_RELEASE_OIDC_WORKFLOW_REF
+  SCRUFFY_RELEASE_TARGET_ENVIRONMENT
+  SCRUFFY_RELEASE_APPROVAL_ENVIRONMENT
 EOF
 }
 
@@ -85,6 +94,15 @@ ACR_PULL_IDENTITY="${AZURE_ACR_PULL_IDENTITY:-autopod-sandbox-acr-pull}"
 POSTGRES_SKU="${SCRUFFY_POSTGRES_SKU:-Standard_B1ms}"
 NIGHTLY_CADENCE_MS="${SCRUFFY_NIGHTLY_CADENCE_MS:-86400000}"
 NIGHTLY_TICK_MS="${SCRUFFY_NIGHTLY_TICK_MS:-300000}"
+MODEL_BACKEND="${SCRUFFY_MODEL_BACKEND:-fake}"
+FOUNDRY_RESOURCE="${AZURE_FOUNDRY_RESOURCE:-}"
+FOUNDRY_DEPLOYMENT="${AZURE_FOUNDRY_DEPLOYMENT:-}"
+RELEASE_OIDC_AUDIENCE="${SCRUFFY_RELEASE_OIDC_AUDIENCE:-scruffy-release}"
+RELEASE_OIDC_REPOSITORY="${SCRUFFY_RELEASE_OIDC_REPOSITORY:-}"
+RELEASE_OIDC_REPOSITORY_ID="${SCRUFFY_RELEASE_OIDC_REPOSITORY_ID:-}"
+RELEASE_OIDC_WORKFLOW_REF="${SCRUFFY_RELEASE_OIDC_WORKFLOW_REF:-}"
+RELEASE_TARGET_ENVIRONMENT="${SCRUFFY_RELEASE_TARGET_ENVIRONMENT:-}"
+RELEASE_APPROVAL_ENVIRONMENT="${SCRUFFY_RELEASE_APPROVAL_ENVIRONMENT:-}"
 DEPLOYMENT_NAME="scruffy-shadow"
 GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 ACR_LOGIN_SERVER="$(az acr show --subscription "$SUBSCRIPTION_ID" --resource-group "$ACR_RESOURCE_GROUP" --name "$ACR_NAME" --query loginServer -o tsv)"
@@ -97,6 +115,33 @@ if [[ ! "$NIGHTLY_CADENCE_MS" =~ ^[1-9][0-9]*$ || ! "$NIGHTLY_TICK_MS" =~ ^[1-9]
 fi
 if (( NIGHTLY_TICK_MS >= NIGHTLY_CADENCE_MS )); then
   echo "SCRUFFY_NIGHTLY_TICK_MS must be shorter than SCRUFFY_NIGHTLY_CADENCE_MS" >&2
+  exit 1
+fi
+if [[ "$MODEL_BACKEND" != "fake" && "$MODEL_BACKEND" != "azure" ]]; then
+  echo "SCRUFFY_MODEL_BACKEND must be fake or azure" >&2
+  exit 1
+fi
+if [[ "$MODEL_BACKEND" == "azure" && ( -z "$FOUNDRY_RESOURCE" || -z "$FOUNDRY_DEPLOYMENT" ) ]]; then
+  echo "AZURE_FOUNDRY_RESOURCE and AZURE_FOUNDRY_DEPLOYMENT are required for the azure backend" >&2
+  exit 1
+fi
+OIDC_VALUES=("$RELEASE_OIDC_REPOSITORY" "$RELEASE_OIDC_REPOSITORY_ID" "$RELEASE_OIDC_WORKFLOW_REF" "$RELEASE_TARGET_ENVIRONMENT" "$RELEASE_APPROVAL_ENVIRONMENT")
+oidc_set=0
+for value in "${OIDC_VALUES[@]}"; do [[ -n "$value" ]] && ((oidc_set+=1)); done
+if (( oidc_set != 0 && oidc_set != 5 )); then
+  echo "all SCRUFFY_RELEASE_OIDC_* identity fields and SCRUFFY_RELEASE_APPROVAL_ENVIRONMENT must be set together" >&2
+  exit 1
+fi
+if [[ -n "$RELEASE_OIDC_REPOSITORY_ID" && ! "$RELEASE_OIDC_REPOSITORY_ID" =~ ^[0-9]+$ ]]; then
+  echo "SCRUFFY_RELEASE_OIDC_REPOSITORY_ID must be numeric" >&2
+  exit 1
+fi
+if [[ -n "$RELEASE_TARGET_ENVIRONMENT" && ! "$RELEASE_TARGET_ENVIRONMENT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+  echo "SCRUFFY_RELEASE_TARGET_ENVIRONMENT is malformed" >&2
+  exit 1
+fi
+if [[ -n "$RELEASE_OIDC_WORKFLOW_REF" && ! "$RELEASE_OIDC_WORKFLOW_REF" =~ ^[^/]+/[^/]+/.+\.ya?ml@[0-9a-f]{40}$ ]]; then
+  echo "SCRUFFY_RELEASE_OIDC_WORKFLOW_REF must be pinned to a full commit SHA" >&2
   exit 1
 fi
 
@@ -146,6 +191,15 @@ write_parameters() {
     --arg postgresSkuName "$POSTGRES_SKU" \
     --arg nightlyCadenceMs "$NIGHTLY_CADENCE_MS" \
     --arg nightlyTickMs "$NIGHTLY_TICK_MS" \
+    --arg modelBackend "$MODEL_BACKEND" \
+    --arg foundryResourceName "$FOUNDRY_RESOURCE" \
+    --arg foundryDeploymentName "$FOUNDRY_DEPLOYMENT" \
+    --arg releaseOidcAudience "$RELEASE_OIDC_AUDIENCE" \
+    --arg releaseOidcRepository "$RELEASE_OIDC_REPOSITORY" \
+    --arg releaseOidcRepositoryId "$RELEASE_OIDC_REPOSITORY_ID" \
+    --arg releaseOidcWorkflowRef "$RELEASE_OIDC_WORKFLOW_REF" \
+    --arg releaseTargetEnvironment "$RELEASE_TARGET_ENVIRONMENT" \
+    --arg releaseApprovalEnvironment "$RELEASE_APPROVAL_ENVIRONMENT" \
     --arg operatorObjectId "$OPERATOR_OBJECT_ID" \
     --argjson deployContainerApp "$deploy_app" \
     '{
@@ -166,6 +220,15 @@ write_parameters() {
         postgresSkuName: {value: $postgresSkuName},
         nightlyCadenceMs: {value: $nightlyCadenceMs},
         nightlyTickMs: {value: $nightlyTickMs},
+        modelBackend: {value: $modelBackend},
+        foundryResourceName: {value: $foundryResourceName},
+        foundryDeploymentName: {value: $foundryDeploymentName},
+        releaseOidcAudience: {value: $releaseOidcAudience},
+        releaseOidcRepository: {value: $releaseOidcRepository},
+        releaseOidcRepositoryId: {value: $releaseOidcRepositoryId},
+        releaseOidcWorkflowRef: {value: $releaseOidcWorkflowRef},
+        releaseTargetEnvironment: {value: $releaseTargetEnvironment},
+        releaseApprovalEnvironment: {value: $releaseApprovalEnvironment},
         operatorObjectId: {value: $operatorObjectId}
       }
     }' >"$PARAMETERS_FILE"

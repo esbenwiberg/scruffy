@@ -4,7 +4,7 @@ import type { Finding, SubjectRevision } from "../domain/evidence/types.js";
 import type { PoisonDecision } from "../gates/poison/decision.js";
 import type { NightlyDecision } from "../gates/nightly/decision.js";
 import type { ReleaseDecision } from "../gates/release/decision.js";
-import type { ReleaseRiskReport } from "../domain/release/report.js";
+import { releaseEnvelopeLockKey, type ReleaseRiskReport } from "../domain/release/report.js";
 import { findingKey } from "../domain/findings/identity.js";
 import {
   isCompleteReview,
@@ -38,6 +38,8 @@ interface RunRow {
   merge_group_sha: string | null;
   base_sha: string | null;
   branch: string | null;
+  release_artifact_digest: string | null;
+  release_target_environment: string | null;
   policy_version: string;
   state: RunState;
   attempt: number;
@@ -54,6 +56,8 @@ function toRun(row: RunRow): EvaluationRun {
     mergeGroupSha: row.merge_group_sha,
     baseSha: row.base_sha,
     branch: row.branch,
+    releaseArtifactDigest: row.release_artifact_digest,
+    releaseTargetEnvironment: row.release_target_environment,
     policyVersion: row.policy_version,
     state: row.state,
     attempt: row.attempt,
@@ -162,14 +166,18 @@ export class RunStore implements NightlyRunStore {
    * creates a fresh `pending` one. A webhook is a prompt to reconcile — it must
    * not create a duplicate run on re-delivery.
    */
-  async ensureRun(subject: SubjectRevision, kind: GateKind, policyVersion: string): Promise<EvaluationRun> {
+  async ensureRun(
+    subject: SubjectRevision,
+    kind: Exclude<GateKind, "release">,
+    policyVersion: string,
+  ): Promise<EvaluationRun> {
     const now = this.clock.now();
     const id = this.ids.next("run");
     const result = await this.pool.query<RunRow>(
       `insert into evaluation_runs
          (id, kind, repository, commit_sha, merge_group_sha, policy_version, state, attempt, created_at, updated_at)
        values ($1, $2, $3, $4, null, $5, 'pending', 0, $6, $6)
-       on conflict (repository, commit_sha, kind) do update
+       on conflict (repository, commit_sha, kind) where kind <> 'release' do update
          set updated_at = evaluation_runs.updated_at
        returning *`,
       [id, kind, subject.repository, subject.commitSha, policyVersion, now],
@@ -194,7 +202,7 @@ export class RunStore implements NightlyRunStore {
       `insert into evaluation_runs
          (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch, policy_version, state, attempt, created_at, updated_at)
        values ($1, 'nightly', $2, $3, null, $4, $5, $6, 'pending', 0, $7, $7)
-       on conflict (repository, commit_sha, kind) do update
+       on conflict (repository, commit_sha, kind) where kind <> 'release' do update
          set updated_at = evaluation_runs.updated_at
        returning *`,
       [id, head.repository, head.commitSha, baseSha, branch, policyVersion, now],
@@ -216,18 +224,33 @@ export class RunStore implements NightlyRunStore {
   async ensureReleaseRun(
     candidate: SubjectRevision,
     prevReleaseSha: string | null,
+    artifactDigest: string,
+    targetEnvironment: string,
     policyVersion: string,
   ): Promise<EvaluationRun> {
     const now = this.clock.now();
     const id = this.ids.next("run");
     const result = await this.pool.query<RunRow>(
       `insert into evaluation_runs
-         (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch, policy_version, state, attempt, created_at, updated_at)
-       values ($1, 'release', $2, $3, null, $4, null, $5, 'pending', 0, $6, $6)
-       on conflict (repository, commit_sha, kind) do update
-         set updated_at = evaluation_runs.updated_at
+         (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch,
+          release_artifact_digest, release_target_environment,
+          policy_version, state, attempt, created_at, updated_at)
+       values ($1, 'release', $2, $3, null, $4, null, $5, $6, $7, 'pending', 0, $8, $8)
+       on conflict (repository, commit_sha, (coalesce(base_sha, '')), release_artifact_digest,
+                    release_target_environment, policy_version)
+         where kind = 'release' and release_artifact_digest is not null and release_target_environment is not null
+       do update set updated_at = evaluation_runs.updated_at
        returning *`,
-      [id, candidate.repository, candidate.commitSha, prevReleaseSha, policyVersion, now],
+      [
+        id,
+        candidate.repository,
+        candidate.commitSha,
+        prevReleaseSha,
+        artifactDigest,
+        targetEnvironment,
+        policyVersion,
+        now,
+      ],
     );
     return toRun(result.rows[0]!);
   }
@@ -239,13 +262,21 @@ export class RunStore implements NightlyRunStore {
    * the last head we actually finished reviewing, never from one we merely tried.
    */
   async getWatermark(repository: string, branch: string): Promise<ReviewWatermark | null> {
-    const result = await this.pool.query<{ repository: string; branch: string; last_reviewed_head: string | null }>(
+    const result = await this.pool.query<{
+      repository: string;
+      branch: string;
+      last_reviewed_head: string | null;
+    }>(
       `select repository, branch, last_reviewed_head from review_watermarks where repository = $1 and branch = $2`,
       [repository, branch],
     );
     const row = result.rows[0];
     if (!row || row.last_reviewed_head === null) return null;
-    return { repository: row.repository, branch: row.branch, lastReviewedHead: row.last_reviewed_head };
+    return {
+      repository: row.repository,
+      branch: row.branch,
+      lastReviewedHead: row.last_reviewed_head,
+    };
   }
 
   /** Both the complete and the attempted head for a branch, for audit/ops views. */
@@ -336,7 +367,9 @@ export class RunStore implements NightlyRunStore {
   }
 
   async getRun(id: string): Promise<EvaluationRun | null> {
-    const result = await this.pool.query<RunRow>("select * from evaluation_runs where id = $1", [id]);
+    const result = await this.pool.query<RunRow>("select * from evaluation_runs where id = $1", [
+      id,
+    ]);
     const row = result.rows[0];
     return row ? toRun(row) : null;
   }
@@ -347,7 +380,9 @@ export class RunStore implements NightlyRunStore {
    * superseded / concurrent worker). Clears any lease.
    */
   async transition(runId: string, from: RunState, to: RunState, reason: string): Promise<boolean> {
-    return withTransaction(this.pool, (client) => this.#transitionOn(client, runId, from, to, reason));
+    return withTransaction(this.pool, (client) =>
+      this.#transitionOn(client, runId, from, to, reason),
+    );
   }
 
   /**
@@ -456,7 +491,14 @@ export class RunStore implements NightlyRunStore {
     fenceLease?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
+      const applied = await this.#transitionOn(
+        client,
+        params.runId,
+        params.from,
+        params.to,
+        params.reason,
+        params.fenceLease,
+      );
       if (!applied) return false;
 
       const now = this.clock.now();
@@ -523,7 +565,14 @@ export class RunStore implements NightlyRunStore {
     const report = params.report;
     const identity = report.identity;
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
+      const applied = await this.#transitionOn(
+        client,
+        params.runId,
+        params.from,
+        params.to,
+        params.reason,
+        params.fenceLease,
+      );
       if (!applied) return false;
 
       const now = this.clock.now();
@@ -587,7 +636,12 @@ export class RunStore implements NightlyRunStore {
    * would leave a dependent effect with no declared dependencies and let it be
    * claimed before its references exist.
    */
-  async #enqueueEffect(client: PoolClient, runId: string, effect: OutboxEffect, now: Date): Promise<void> {
+  async #enqueueEffect(
+    client: PoolClient,
+    runId: string,
+    effect: OutboxEffect,
+    now: Date,
+  ): Promise<void> {
     const inserted = await client.query<{ id: string }>(
       `insert into outbox
          (id, run_id, effect_type, external_id, payload, status, attempts, created_at,
@@ -608,10 +662,10 @@ export class RunStore implements NightlyRunStore {
     );
     let outboxId = inserted.rows[0]?.id;
     if (outboxId === undefined) {
-      const existing = await client.query<{ id: string }>(`select id from outbox where run_id = $1 and external_id = $2`, [
-        runId,
-        effect.externalId,
-      ]);
+      const existing = await client.query<{ id: string }>(
+        `select id from outbox where run_id = $1 and external_id = $2`,
+        [runId, effect.externalId],
+      );
       outboxId = existing.rows[0]?.id;
       if (outboxId === undefined) return; // Cannot happen; nothing sensible to attach to.
     }
@@ -627,7 +681,11 @@ export class RunStore implements NightlyRunStore {
   }
 
   /** Report + finding graph + work items + proposals, inside the caller's transaction. */
-  async #writeReport(client: PoolClient, params: CommitNightlyDecisionParams, now: Date): Promise<void> {
+  async #writeReport(
+    client: PoolClient,
+    params: CommitNightlyDecisionParams,
+    now: Date,
+  ): Promise<void> {
     const { report, workGraph } = params;
     const identity = report.identity;
     const findingsByKey = new Map(params.findings.map((f) => [findingKey(f), f]));
@@ -719,7 +777,11 @@ export class RunStore implements NightlyRunStore {
       // retry whose recomputed report still carries the stale `queued/unknown/open`
       // defaults for a proposal a later brief already published and progressed.
       if (proposal !== null) {
-        const authoritative = await client.query<{ delivery: ProposalDelivery; ci: ProposalCiState; merge_state: ProposalMergeState }>(
+        const authoritative = await client.query<{
+          delivery: ProposalDelivery;
+          ci: ProposalCiState;
+          merge_state: ProposalMergeState;
+        }>(
           `insert into nightly_fix_proposals
              (proposal_id, occurrence_id, provenance, branch, edits, delivery, ci, merge_state,
               repository, base_branch, reviewed_head_sha, reviewed_base_sha, created_at, updated_at)
@@ -748,13 +810,17 @@ export class RunStore implements NightlyRunStore {
         const onRecord = authoritative.rows[0]!;
         const remediationForStorage = {
           ...finding.remediation!,
-          proposal: { ...proposal, delivery: onRecord.delivery, ci: onRecord.ci, merge: onRecord.merge_state },
+          proposal: {
+            ...proposal,
+            delivery: onRecord.delivery,
+            ci: onRecord.ci,
+            merge: onRecord.merge_state,
+          },
         };
-        await client.query(`update nightly_report_findings set remediation = $2, updated_at = $3 where occurrence_id = $1`, [
-          finding.occurrenceId,
-          JSON.stringify(remediationForStorage),
-          now,
-        ]);
+        await client.query(
+          `update nightly_report_findings set remediation = $2, updated_at = $3 where occurrence_id = $1`,
+          [finding.occurrenceId, JSON.stringify(remediationForStorage), now],
+        );
       }
     }
 
@@ -863,11 +929,21 @@ export class RunStore implements NightlyRunStore {
     fenceLease?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      const applied = await this.#transitionOn(client, params.runId, params.from, params.to, params.reason, params.fenceLease);
+      const report = params.report;
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        releaseEnvelopeLockKey(report.subject),
+      ]);
+      const applied = await this.#transitionOn(
+        client,
+        params.runId,
+        params.from,
+        params.to,
+        params.reason,
+        params.fenceLease,
+      );
       if (!applied) return false;
 
       const now = this.clock.now();
-      const report = params.report;
       // When a legacy shadow effect is requested, serialize it FIRST: a payload
       // that cannot be serialized must abort the whole transaction. CD-native
       // runs omit the effect entirely; the persisted report is their output.
@@ -875,8 +951,9 @@ export class RunStore implements NightlyRunStore {
         params.effect === undefined ? undefined : JSON.stringify(params.effect.payload);
       await client.query(
         `insert into release_reports
-           (run_id, report_id, report_version, repository, previous_release_sha, candidate_sha, policy_version, report, generated_at, created_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           (run_id, report_id, report_version, repository, previous_release_sha, candidate_sha,
+            artifact_digest, target_environment, policy_version, report, generated_at, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          on conflict (run_id) do nothing`,
         [
           params.runId,
@@ -885,6 +962,8 @@ export class RunStore implements NightlyRunStore {
           report.subject.repository,
           report.subject.previousReleaseSha,
           report.subject.candidateSha,
+          report.subject.artifactDigest,
+          report.subject.targetEnvironment,
           report.policyVersion,
           JSON.stringify(report),
           report.generatedAt,

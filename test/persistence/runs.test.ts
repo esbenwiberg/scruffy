@@ -28,7 +28,9 @@ let clock: FixedClock;
 
 beforeEach(async () => {
   await migrate(pool);
-  await pool.query("truncate outbox, poison_decisions, release_decisions, release_reports, run_transitions, evaluation_runs cascade");
+  await pool.query(
+    "truncate outbox, poison_decisions, release_decisions, release_reports, run_transitions, evaluation_runs cascade",
+  );
   clock = new FixedClock(new Date("2026-07-15T00:00:00Z"));
   runs = new RunStore(pool, clock, new SeededIdGenerator("t"));
 });
@@ -64,7 +66,11 @@ describeDb("RunStore durability", () => {
       reason: "poison allow",
       decision: DECISION,
       findings: [],
-      effect: { effectType: "check_run", externalId: "poison:acme/web:sha", payload: { hello: "world" } },
+      effect: {
+        effectType: "check_run",
+        externalId: "poison:acme/web:sha",
+        payload: { hello: "world" },
+      },
     });
     expect(applied).toBe(true);
 
@@ -191,7 +197,13 @@ describeDb("RunStore durability", () => {
   });
 
   it("does not persist a report without its effect", async () => {
-    const run = await runs.ensureRun(SUBJECT, "release", "policy-v1");
+    const run = await runs.ensureReleaseRun(
+      SUBJECT,
+      null,
+      `sha256:${"d4".repeat(32)}`,
+      "shadow-production",
+      "policy-v1",
+    );
     await runs.transition(run.id, "pending", "analyzing", "start");
 
     const decision: ReleaseDecision = {
@@ -202,7 +214,13 @@ describeDb("RunStore durability", () => {
       coverage: COMPLETE_COVERAGE,
     };
     const report = assembleReleaseReport({
-      subject: { repository: SUBJECT.repository, previousReleaseSha: null, candidateSha: SUBJECT.commitSha },
+      subject: {
+        repository: SUBJECT.repository,
+        previousReleaseSha: null,
+        candidateSha: SUBJECT.commitSha,
+        artifactDigest: `sha256:${"d4".repeat(32)}`,
+        targetEnvironment: "shadow-production",
+      },
       policyVersion: "policy-v1",
       generatedAt: "2026-07-15T00:00:00.000Z",
       provenance: { analyzers: [{ id: "secret-scan" }] },

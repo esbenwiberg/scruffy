@@ -24,6 +24,8 @@ const REPO = "acme/web";
 const PREV = "a1".repeat(20);
 const CAND = "b2".repeat(20);
 const OTHER = "c3".repeat(20);
+const ARTIFACT = `sha256:${"d4".repeat(32)}`;
+const ENVIRONMENT = "shadow-production";
 
 const SHIP: ReleaseDecision = {
   outcome: "ship",
@@ -69,7 +71,13 @@ const FINDING: Finding = {
 
 function baseInput(over: Partial<AssembleReleaseReportInput> = {}): AssembleReleaseReportInput {
   return {
-    subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
+    subject: {
+      repository: REPO,
+      previousReleaseSha: PREV,
+      candidateSha: CAND,
+      artifactDigest: ARTIFACT,
+      targetEnvironment: ENVIRONMENT,
+    },
     policyVersion: "policy-v1",
     generatedAt: "2026-07-15T00:00:00.000Z",
     provenance: { analyzers: [{ id: "secret-scan" }, { id: "disabled-tls" }] },
@@ -80,21 +88,21 @@ function baseInput(over: Partial<AssembleReleaseReportInput> = {}): AssembleRele
 }
 
 describe("release report", () => {
-  it("release report identity and SHA binding", () => {
+  it("release envelope identity", () => {
     const idOf = (over: Partial<AssembleReleaseReportInput> = {}): string =>
       assembleReleaseReport(baseInput(over)).reportId;
     const base = idOf();
 
     // Not a constant / candidate-only id: the SUBJECT bindings all move it.
+    expect(idOf({ subject: { ...baseInput().subject, previousReleaseSha: OTHER } })).not.toBe(base); // base sha
+    expect(idOf({ subject: { ...baseInput().subject, candidateSha: OTHER } })).not.toBe(base); // candidate sha
+    expect(idOf({ subject: { ...baseInput().subject, repository: "acme/other" } })).not.toBe(base); // repository
     expect(
-      idOf({ subject: { repository: REPO, previousReleaseSha: OTHER, candidateSha: CAND } }),
-    ).not.toBe(base); // base sha
+      idOf({ subject: { ...baseInput().subject, artifactDigest: `sha256:${"e5".repeat(32)}` } }),
+    ).not.toBe(base);
     expect(
-      idOf({ subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: OTHER } }),
-    ).not.toBe(base); // candidate sha
-    expect(
-      idOf({ subject: { repository: "acme/other", previousReleaseSha: PREV, candidateSha: CAND } }),
-    ).not.toBe(base); // repository
+      idOf({ subject: { ...baseInput().subject, targetEnvironment: "another-environment" } }),
+    ).not.toBe(base);
     expect(idOf({ policyVersion: "policy-v2" })).not.toBe(base); // policy version
 
     // Evidence content moves it: a different findings set is different evidence.
@@ -111,14 +119,31 @@ describe("release report", () => {
 
     // Volatile generatedAt does NOT move it.
     expect(idOf({ generatedAt: "2030-01-01T12:34:56.000Z" })).toBe(base);
+
+    expect(() =>
+      assembleReleaseReport(
+        baseInput({ subject: { ...baseInput().subject, artifactDigest: "sha256:not-a-digest" } }),
+      ),
+    ).toThrow();
+    expect(() =>
+      assembleReleaseReport(
+        baseInput({ subject: { ...baseInput().subject, targetEnvironment: "bad environment" } }),
+      ),
+    ).toThrow();
   });
 
   it("is independent of object key insertion order", () => {
     // Two contents with identical values but different key insertion order (nested
     // too) must hash to the same identity — equivalent committed content, one id.
     const content: ReleaseReportContent = {
-      reportVersion: "1",
-      subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
+      reportVersion: "2",
+      subject: {
+        repository: REPO,
+        previousReleaseSha: PREV,
+        candidateSha: CAND,
+        artifactDigest: ARTIFACT,
+        targetEnvironment: ENVIRONMENT,
+      },
       policyVersion: "policy-v1",
       provenance: { analyzers: [{ id: "secret-scan" }] },
       changeSummary: "",
@@ -157,8 +182,14 @@ describe("release report", () => {
       changeSummary: "",
       provenance: { analyzers: [{ id: "secret-scan" }] },
       policyVersion: "policy-v1",
-      subject: { candidateSha: CAND, previousReleaseSha: PREV, repository: REPO },
-      reportVersion: "1",
+      subject: {
+        targetEnvironment: ENVIRONMENT,
+        artifactDigest: ARTIFACT,
+        candidateSha: CAND,
+        previousReleaseSha: PREV,
+        repository: REPO,
+      },
+      reportVersion: "2",
     };
     expect(computeReportId(content)).toBe(computeReportId(reordered));
   });
@@ -246,12 +277,14 @@ describe("release report", () => {
     const parsed = parseReleaseReport(JSON.parse(JSON.stringify(report)));
     expect(() => ReleaseRiskReport.parse(parsed)).not.toThrow();
 
-    expect(parsed.reportVersion).toBe("1");
+    expect(parsed.reportVersion).toBe("2");
     expect(parsed.reportId).toBe(report.reportId);
     expect(parsed.subject).toEqual({
       repository: REPO,
       previousReleaseSha: PREV,
       candidateSha: CAND,
+      artifactDigest: ARTIFACT,
+      targetEnvironment: ENVIRONMENT,
     });
     expect(parsed.evidenceLanes).toHaveLength(1);
     expect(parsed.evidenceLanes[0]!.laneId).toBe("source-analysis");

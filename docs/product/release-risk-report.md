@@ -275,15 +275,22 @@ The walking skeleton already:
 - supports a CD-native mode that persists the report, writes deployment-job
   summary/routing outputs, and emits no commit status or check.
 
-It does not yet provide this complete contract. In particular, it lacks:
+The local code now also includes a v2 identity bound to artifact digest and
+target environment, GitHub Actions OIDC authentication, hosted report retrieval,
+durable approval attestations based on actual Environment approval history, and
+terminal `shadowOnly` authorization revalidation. The Azure template can select
+a keyless managed-identity Foundry backend and the controlled client carries one
+exact envelope through the protocol.
 
-- a hosted durable report page linked from the deployment job;
-- an Azure-hosted real model backend in the current shadow deployment;
-- policy-authoritative prior-gate, visual, deployment, migration, and artifact
-  aggregation;
-- the protected, SHA-bound publication and sign-off workflow, including
-  mandatory rationale and durable approval audit records.
+It does not yet provide production authority. In particular, it still lacks:
 
-Until those gaps are implemented and validated in shadow operation, release
-reports remain advisory deployment evidence and must not authorize automatic
-publication. They must not be posted onto pull requests.
+- deployed and live-verified hosted report/approval/authorization operation;
+- an approved Foundry deployment and observed real-model call from the Container
+  App;
+- policy-authoritative prior-gate, visual, deployment, and migration evidence;
+- administrator-bypass removal and two fresh disposable OIDC terminal paths;
+- any separately authorized publication or real deployment integration.
+
+Until those gaps are validated in shadow operation, release reports and
+`shadowOnly` authorization records remain advisory deployment evidence and must
+not authorize automatic publication. They must not be posted onto pull requests.

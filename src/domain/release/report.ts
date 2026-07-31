@@ -27,7 +27,17 @@ import {
  * populate them without changing this shape.
  */
 
-export const RELEASE_REPORT_VERSION = "1" as const;
+export const RELEASE_REPORT_VERSION = "2" as const;
+
+export const ArtifactDigest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+export type ArtifactDigest = z.infer<typeof ArtifactDigest>;
+
+export const TargetEnvironment = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+export type TargetEnvironment = z.infer<typeof TargetEnvironment>;
 
 /** Stable evidence-lane IDs (design.md). Only `source-analysis` is declared this slice. */
 export const EVIDENCE_LANE_IDS = ["source-analysis", "release-risk-llm", "candidate-ci"] as const;
@@ -111,10 +121,26 @@ export type EvidenceLane = z.infer<typeof EvidenceLane>;
 
 export const ReleaseReportSubject = z.object({
   repository: z.string().min(1),
-  previousReleaseSha: z.string().nullable(),
-  candidateSha: z.string().min(1),
+  previousReleaseSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .nullable(),
+  candidateSha: z.string().regex(/^[0-9a-f]{40}$/),
+  artifactDigest: ArtifactDigest,
+  targetEnvironment: TargetEnvironment,
 });
 export type ReleaseReportSubject = z.infer<typeof ReleaseReportSubject>;
+
+/** Stable database-lock key for serializing report successors with terminal authority. */
+export function releaseEnvelopeLockKey(subject: ReleaseReportSubject): string {
+  return [
+    subject.repository,
+    subject.previousReleaseSha ?? "(first-release)",
+    subject.candidateSha,
+    subject.artifactDigest,
+    subject.targetEnvironment,
+  ].join("|");
+}
 
 export const ReleaseReportProvenance = z.object({
   analyzers: z.array(LaneAnalyzerProvenance),
@@ -455,6 +481,26 @@ export function assembleReleaseReport(input: AssembleReleaseReportInput): Releas
  * boundary. Never trust the blob — a stored report is re-validated through the
  * schema before it is read.
  */
+export const LegacyReleaseRiskReportV1 = ReleaseRiskReport.extend({
+  reportVersion: z.literal("1"),
+  subject: z.object({
+    repository: z.string().min(1),
+    previousReleaseSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .nullable(),
+    candidateSha: z.string().regex(/^[0-9a-f]{40}$/),
+  }),
+});
+export type LegacyReleaseRiskReportV1 = z.infer<typeof LegacyReleaseRiskReportV1>;
+export const StoredReleaseRiskReport = z.union([ReleaseRiskReport, LegacyReleaseRiskReportV1]);
+export type StoredReleaseRiskReport = z.infer<typeof StoredReleaseRiskReport>;
+
 export function parseReleaseReport(raw: unknown): ReleaseRiskReport {
   return ReleaseRiskReport.parse(raw);
+}
+
+/** Historical reports remain inspectable but are structurally ineligible for v2 authority. */
+export function parseStoredReleaseReport(raw: unknown): StoredReleaseRiskReport {
+  return StoredReleaseRiskReport.parse(raw);
 }

@@ -1,0 +1,83 @@
+contract_version: 1
+title: "Wire a keyless Foundry backend and disposable OIDC release client"
+depends_on: ["02-hosted-oidc-authority"]
+scenarios:
+  - id: foundry-managed-identity
+    given:
+      - "an explicit Foundry base URL and deployment name in an Azure managed-identity environment"
+    when:
+      - "Scruffy creates and invokes the Azure model backend"
+    then:
+      - "the provider obtains an Entra token for https://ai.azure.com/.default and uses the configured deployment"
+      - "model provenance is returned and truncation or malformed responses fail closed"
+      - "missing configuration or authentication fails boot without falling back to fake"
+      - "no Foundry API key is required or read"
+  - id: azure-shadow-model-configuration
+    given:
+      - "the shadow Container App template configured for an existing Foundry resource and deployment"
+    when:
+      - "the infrastructure and deployment parameters are rendered"
+    then:
+      - "the service selects the real Azure backend with explicit endpoint and deployment configuration"
+      - "its managed identity receives only the configured inference role"
+      - "no Foundry API-key secret is created or injected"
+      - "shadow-only tags and absence of publication or deployment authority are preserved"
+  - id: oidc-release-client
+    given:
+      - "a controlled GitHub Actions job, exact deployment envelope and HTTPS Scruffy endpoint"
+    when:
+      - "the client requests report, optional attestation and terminal shadow authorization"
+    then:
+      - "the GitHub token endpoint receives the fixed Scruffy audience"
+      - "the same candidate, artifact, environment and report identity is carried through every call"
+      - "ship skips attestation while sign-off-required submits rationale and explicit acceptance after the Environment gate"
+      - "wrong host, stop, indeterminate or any envelope/report/authorization mismatch fails without publishing or deploying"
+  - id: backend-compatibility
+    given:
+      - "existing fake, Claude CLI, Anthropic and Azure backend selections"
+    when:
+      - "server/model factory configuration is resolved"
+    then:
+      - "Azure is explicit and can never silently fall back to fake"
+      - "existing local and deterministic backend behavior remains compatible"
+required_facts:
+  - id: fact-foundry-managed-identity
+    proves: [foundry-managed-identity]
+    kind: unit-test
+    artifact:
+      path: test/providers/azure-foundry.test.ts
+      change: create
+    command: npm test -- test/providers/azure-foundry.test.ts -t "Azure Foundry managed identity backend"
+  - id: fact-azure-shadow-model-configuration
+    proves: [azure-shadow-model-configuration]
+    kind: unit-test
+    artifact:
+      path: test/infra/azure-shadow.test.ts
+      change: create
+    command: npm test -- test/infra/azure-shadow.test.ts -t "Azure shadow real model configuration"
+  - id: fact-oidc-release-client
+    proves: [oidc-release-client]
+    kind: unit-test
+    artifact:
+      path: test/scripts/release-authority-client.test.ts
+      change: create
+    command: npm test -- test/scripts/release-authority-client.test.ts -t "GitHub OIDC release client"
+  - id: fact-backend-compatibility
+    proves: [backend-compatibility]
+    kind: unit-test
+    artifact:
+      path: test/providers/model-factory.test.ts
+      change: update
+    command: npm test -- test/providers/model-factory.test.ts
+human_review:
+  - id: review-no-live-authority-change
+    covers:
+      - foundry-managed-identity
+      - azure-shadow-model-configuration
+    criterion: "No Foundry Marketplace purchase, Azure RBAC change, PIM activation, GitHub permission change, Environment change, deployment, live model call, publication, or real deployment was performed by the pod."
+    reason: "Cloud billing, privilege, and live-resource activity cannot be established solely from repository tests and remains explicitly human-gated."
+  - id: review-operator-checklist
+    covers:
+      - oidc-release-client
+    criterion: "The runbook orders every external permission, deployment, bypass-removal, and disposable live-proof step behind a separate explicit approval and preserves zero real publication/deployment effects."
+    reason: "Operational safety and completeness across GitHub and Azure control planes require operator judgment before any live action."

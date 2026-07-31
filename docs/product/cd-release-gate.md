@@ -29,7 +29,7 @@ subject will be:
 
 ```bash
 SCRUFFY_MODEL_BACKEND=claude-cli \
-  npm run scruffy:release -- owner/repository candidate-sha previous-deployed-sha
+  npm run scruffy:release -- owner/repository candidate-sha sha256:artifact-digest target-environment previous-deployed-sha
 ```
 
 It:
@@ -45,9 +45,10 @@ It:
 `ship` and `sign-off-required` exit successfully so the workflow can route to
 the appropriate next job. `stop` and `indeterminate` fail the analysis job.
 
-This seam is not yet publication authority: artifact/environment binding,
-hosted report retrieval, approval persistence, and pre-deployment revalidation
-remain required.
+The local command remains a report-only compatibility seam. The codebase now
+contains a v2 full-envelope identity, authenticated hosted report/attestation/
+shadow-authorization protocol, and terminal durable-state revalidation. Those
+paths are not yet deployed or live-verified and therefore remain non-authoritative.
 
 ## Target workflow
 
@@ -162,9 +163,34 @@ notice; its intentionally risky PR was closed without merge and its branch was
 deleted.
 
 This proves the CD routing and approval mechanics, not production authority. The
-lab uses the fake model backend and ephemeral Postgres, performs no real
-deployment, and currently binds artifact/environment in the workflow envelope
-rather than in Scruffy's report identity. GitHub's native environment deployment
-record is bound to the workflow ref; the uploaded approval attestation is what
-binds the reviewed candidate artifact. The lab environment also retains GitHub's
-default administrator-bypass option. Those gaps must be closed before promotion.
+lab used the fake model backend and ephemeral Postgres and performed no real
+deployment. The subsequent local implementation now binds artifact/environment
+inside report v2 and adds durable hosted attestation/authorization records, but
+it has not been deployed against the hosted database, a real Foundry model, or a
+GitHub Actions OIDC caller. The lab environment also retains GitHub's default
+administrator-bypass option. Those live gaps must be closed before promotion.
+
+## Hosted release protocol (implemented locally; not deployed)
+
+Controlled jobs request a short-lived OIDC token with audience
+`scruffy-release`. Scruffy independently allowlists the repository ID, immutable
+reusable-workflow ref, and target environment before exposing four authenticated
+operations:
+
+- `POST /v1/release-reports` — drive one exact repository/range/artifact/environment report;
+- `GET /v1/release-reports/{reportId}` — retrieve the persisted v2 report;
+- `POST /v1/release-reports/{reportId}/attestations` — after the protected
+  Environment gate, persist rationale and responsibility acceptance only when
+  GitHub approval history establishes that the OIDC actor was the reviewer;
+- `POST /v1/release-reports/{reportId}/authorizations` — re-read durable state
+  and persist a `shadowOnly: true` terminal result.
+
+The client is `npm run scruffy:release-client -- <review|attest|authorize> ...`.
+It uses `ACTIONS_ID_TOKEN_REQUEST_URL`/`ACTIONS_ID_TOKEN_REQUEST_TOKEN`; no
+long-lived workflow secret or Scruffy authority credential enters the repository.
+The attestation job supplies rationale through `SCRUFFY_RELEASE_RATIONALE` and
+requires `SCRUFFY_RELEASE_RESPONSIBILITY_ACCEPTED=true` rather than hardcoding or
+passing acceptance on the command line. Authorization reads optional
+`SCRUFFY_PREVIOUS_RELEASE_SHA` / `SCRUFFY_RELEASE_ATTESTATION_ID`. `stop` and
+`indeterminate` never authorize. This protocol emits no publication or deployment
+effect.

@@ -1,0 +1,92 @@
+contract_version: 1
+title: "Add the OIDC-authenticated hosted release and shadow-authorization protocol"
+depends_on: ["01-bind-release-envelope"]
+scenarios:
+  - id: oidc-trust-pressure
+    given:
+      - "service-owned GitHub OIDC issuer, audience, repository, workflow-ref and environment trust configuration"
+      - "locally signed tokens and deterministic discovery/JWKS fixtures"
+    when:
+      - "valid and claim-mutated tokens call a protected release route"
+    then:
+      - "only a correctly signed, live token matching every configured identity claim reaches release work"
+      - "wrong issuer, audience, key, lifetime, repository, workflow, run, actor or environment posture fails closed"
+      - "bounded safe signing-key rotation is supported without trusting an unknown key"
+  - id: hosted-report-protocol
+    given:
+      - "an allowlisted OIDC caller and one exact complete deployment envelope"
+    when:
+      - "the caller requests and retrieves release analysis through the hosted service"
+    then:
+      - "the exact schema-valid report is durable in hosted PostgreSQL and returned only to an authenticated caller"
+      - "exact retries deduplicate and neighboring artifact/environment envelopes remain distinct"
+      - "no SCM, publication or deployment effect is emitted"
+  - id: protected-environment-attestation
+    given:
+      - "a sign-off-required report and GitHub workflow-run approval history"
+    when:
+      - "the caller submits rationale and explicit responsibility acceptance"
+    then:
+      - "an attestation is persisted only for non-empty rationale and equality of OIDC actor, responsibility accepter and actual approving reviewer stable identities"
+      - "unavailable, rejected, ambiguous or mismatched approval history persists no attestation"
+      - "the attestation is bound to the exact report, envelope, approval environment, workflow run and attempt"
+  - id: terminal-shadow-authorization
+    given:
+      - "a durable terminal report and, when required, an exact verified attestation"
+    when:
+      - "the authenticated caller requests terminal authorization for the complete envelope"
+    then:
+      - "ship produces a shadow-only authorization without human attestation"
+      - "sign-off-required produces one only with the exact attestation"
+      - "stop and indeterminate never authorize"
+      - "any report, envelope, workflow or approval mutation causes refusal"
+  - id: authority-atomicity-idempotency
+    given:
+      - "the real PostgreSQL authority store and repeat or forced-failure requests"
+    when:
+      - "attestation and authorization commits are retried or interrupted"
+    then:
+      - "exact retries return one durable authority record"
+      - "a transaction failure leaves no partial attestation or authorization"
+required_facts:
+  - id: fact-oidc-trust-pressure
+    proves: [oidc-trust-pressure]
+    kind: unit-test
+    artifact:
+      path: test/server/oidc-auth.test.ts
+      change: create
+    command: npm test -- test/server/oidc-auth.test.ts -t "GitHub Actions OIDC trust pressure"
+  - id: fact-hosted-report-protocol
+    proves: [hosted-report-protocol]
+    kind: integration-test
+    artifact:
+      path: test/server/release-authority.test.ts
+      change: create
+    command: npm test -- test/server/release-authority.test.ts -t "hosted release report protocol"
+  - id: fact-protected-environment-attestation
+    proves: [protected-environment-attestation]
+    kind: integration-test
+    artifact:
+      path: test/server/release-authority.test.ts
+      change: create
+    command: npm test -- test/server/release-authority.test.ts -t "protected environment attestation"
+  - id: fact-terminal-shadow-authorization
+    proves: [terminal-shadow-authorization]
+    kind: integration-test
+    artifact:
+      path: test/server/release-authority.test.ts
+      change: create
+    command: npm test -- test/server/release-authority.test.ts -t "terminal shadow authorization"
+  - id: fact-authority-atomicity-idempotency
+    proves: [authority-atomicity-idempotency]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-authority.test.ts
+      change: create
+    command: npm test -- test/persistence/release-authority.test.ts -t "authority idempotency and atomicity"
+human_review:
+  - id: review-github-app-permission-boundary
+    covers:
+      - protected-environment-attestation
+    criterion: "The documented GitHub App permission change adds read-only Actions access and no workflow, deployment, environment-write, or administration authority; no live installation permission was changed by the pod."
+    reason: "The least-privilege meaning of an external GitHub App permission diff and confirmation that no live setting changed require operator review."

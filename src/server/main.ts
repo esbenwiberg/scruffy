@@ -8,12 +8,14 @@ import type {
   ScmLifecycleReader,
   ScmReader,
   ScmWriter,
+  WorkflowApprovalReader,
 } from "../providers/scm/port.js";
 import {
   createScmInstallationReader,
   createScmLifecycleReader,
   createScmReader,
   createScmWriter,
+  createWorkflowApprovalReader,
   resolveScmReaderBackend,
   resolveScmWriterBackend,
   type ScmReaderBackend,
@@ -28,6 +30,12 @@ import {
 } from "../providers/registry.js";
 import { createModelProvider, resolveBackend } from "../providers/models/factory.js";
 import { createWebhookServer } from "./http.js";
+import {
+  GithubActionsOidcVerifier,
+  githubActionsOidcTrustFromEnv,
+} from "../providers/identity/github-actions-oidc.js";
+import { ReleaseAuthorityStore } from "../persistence/release-authority.js";
+import { ReleaseAuthorityService } from "../app/release-authority.js";
 
 /**
  * Hosted entrypoint: `npm run serve` (tsx) locally, `node dist/server/main.js`
@@ -48,7 +56,12 @@ import { createWebhookServer } from "./http.js";
  *   DATABASE_URL                    — Postgres (persistence default otherwise)
  *   SCRUFFY_SCM_READER              — gh-cli (default) | github-app (+ its env)
  *   SCRUFFY_SCM_WRITER              — gh-cli (default) | github-app (+ its env)
- *   SCRUFFY_MODEL_BACKEND           — fake (default) | claude-cli | anthropic | azure (+ its env)
+ *   SCRUFFY_MODEL_BACKEND           — fake (default) | claude-cli | anthropic | azure
+ *   AZURE_FOUNDRY_BASE_URL          — required for azure; HTTPS ...services.ai.azure.com/anthropic
+ *   AZURE_FOUNDRY_DEPLOYMENT        — required for azure; explicit deployed model name
+ *   SCRUFFY_RELEASE_OIDC_REPOSITORY / _ID / _WORKFLOW_REF / _AUDIENCE
+ *   SCRUFFY_RELEASE_TARGET_ENVIRONMENT / _APPROVAL_ENVIRONMENT
+ *                                  — enables the authenticated hosted release protocol
  *   SCRUFFY_NIGHTLY_CADENCE_MS      — nightly cadence per repository/branch; UNSET = no
  *                                     hosted schedule (manual `scruffy:nightly` only)
  *   SCRUFFY_NIGHTLY_TICK_MS         — how often the schedule is polled (default 5min)
@@ -79,6 +92,8 @@ export interface ResolvedScmBackends {
    * silently reviewing nothing (see `resolveNightlySchedule`).
    */
   scmInstallationReader: ScmInstallationReader | null;
+  /** Null on gh-cli; the App implementation requires read-only Actions permission. */
+  workflowApprovalReader: WorkflowApprovalReader | null;
   readerBackend: ScmReaderBackend;
   writerBackend: ScmWriterBackend;
 }
@@ -101,6 +116,7 @@ export function createScmBackends(
     scmWriter: createScmWriter(writerBackend),
     scmLifecycleReader: createScmLifecycleReader(readerBackend),
     scmInstallationReader: createScmInstallationReader(readerBackend),
+    workflowApprovalReader: createWorkflowApprovalReader(readerBackend),
   };
 }
 
@@ -185,6 +201,7 @@ async function main(): Promise<void> {
     scmWriter,
     scmLifecycleReader,
     scmInstallationReader,
+    workflowApprovalReader,
     readerBackend,
     writerBackend,
   } = createScmBackends();
@@ -236,10 +253,32 @@ async function main(): Promise<void> {
     webhookSecret: secret,
   });
 
+  const oidcTrust = githubActionsOidcTrustFromEnv(process.env);
+  if (oidcTrust !== null && workflowApprovalReader === null) {
+    throw new Error(
+      "hosted release OIDC is enabled but the SCM reader cannot read workflow approvals; use github-app with Actions: read",
+    );
+  }
+  const oidcVerifier = oidcTrust === null ? null : new GithubActionsOidcVerifier(oidcTrust);
+  const releaseAuthority =
+    oidcTrust === null || workflowApprovalReader === null
+      ? null
+      : new ReleaseAuthorityService({
+          scruffy,
+          store: new ReleaseAuthorityStore(pool),
+          approvals: workflowApprovalReader,
+          clock: new SystemClock(),
+          targetEnvironment: oidcTrust.targetEnvironment,
+          approvalEnvironment: oidcTrust.approvalEnvironment,
+        });
+
   const server = createWebhookServer(scruffy, {
     healthCheck: async () => {
       await pool.query("select 1");
     },
+    ...(releaseAuthority !== null && oidcVerifier !== null
+      ? { releaseAuthority, oidcVerifier }
+      : {}),
   });
 
   // The engine. `busy` guards against overlapping passes when a pass outlasts

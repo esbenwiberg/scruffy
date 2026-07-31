@@ -18,22 +18,25 @@ export function resolveBackend(): ModelBackend {
   const value = process.env.SCRUFFY_MODEL_BACKEND;
   // Unset/empty: default to the deterministic fake so nothing fires a live model unasked.
   if (!value) return "fake";
-  if (value === "claude-cli" || value === "anthropic" || value === "azure" || value === "fake") return value;
+  if (value === "claude-cli" || value === "anthropic" || value === "azure" || value === "fake")
+    return value;
   // A non-empty but unrecognized value is an operator typo — fail loudly rather than
   // silently selecting the fake, whose empty output parses to a false "no findings" review.
   throw new Error(`unknown SCRUFFY_MODEL_BACKEND '${value}'`);
 }
 
-export async function createModelProvider(backend: ModelBackend = resolveBackend()): Promise<ModelProvider> {
+export async function createModelProvider(
+  backend: ModelBackend = resolveBackend(),
+): Promise<ModelProvider> {
   switch (backend) {
     case "claude-cli":
       return new ClaudeCliModelProvider();
     case "anthropic":
       return new AnthropicCliModelProvider();
     case "azure": {
-      const apiKey = requireEnv("AZURE_FOUNDRY_API_KEY");
-      const resource = requireEnv("AZURE_FOUNDRY_RESOURCE");
-      return AzureFoundryModelProvider.create({ apiKey, resource });
+      const baseUrl = requireEnv("AZURE_FOUNDRY_BASE_URL");
+      const deployment = requireEnv("AZURE_FOUNDRY_DEPLOYMENT");
+      return AzureFoundryModelProvider.create({ baseUrl, deployment });
     }
     case "fake":
       return new FakeModelProvider();

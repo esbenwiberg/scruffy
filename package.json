@@ -27,6 +27,7 @@
     "scruffy:review": "tsx scripts/review-pr.ts",
     "scruffy:nightly": "tsx scripts/nightly-review.ts",
     "scruffy:release": "tsx scripts/release-review.ts",
+    "scruffy:release-client": "tsx scripts/release-authority-client.ts",
     "serve": "tsx src/server/main.ts",
     "app:doctor": "tsx scripts/app-doctor.ts",
     "ops:measure": "npm run build && tsx scripts/ops-measure.ts",
@@ -37,10 +38,13 @@
     "db:migrate": "tsx src/persistence/migrate.ts"
   },
   "dependencies": {
+    "@anthropic-ai/foundry-sdk": "^0.4.0",
     "@anthropic-ai/sdk": "^0.111.0",
+    "@azure/identity": "^4.13.1",
     "@octokit/auth-app": "^8.2.0",
     "@octokit/request": "^10.0.11",
     "@octokit/webhooks-methods": "^5.1.1",
+    "jose": "^6.2.6",
     "pg": "^8.13.1",
     "zod": "^3.24.1"
   },

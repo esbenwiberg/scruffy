@@ -16,13 +16,18 @@ import {
 } from "../src/providers/registry.js";
 import { withPool } from "./review-pr.js";
 import { isSafeRef, resolveBranchHead } from "./nightly-review.js";
-import { parseReleaseReport, type ReleaseRiskReport } from "../src/domain/release/report.js";
+import {
+  ArtifactDigest,
+  TargetEnvironment,
+  parseReleaseReport,
+  type ReleaseRiskReport,
+} from "../src/domain/release/report.js";
 import { CheckRunPayload } from "../src/effects/check-run.js";
 import { createModelProvider, resolveBackend } from "../src/providers/models/factory.js";
 import { signoffResponsibility } from "../src/domain/release/signoff.js";
 
 /**
- * `npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]` —
+ * `npm run scruffy:release -- <owner/repo> <candidate-ref> <artifact-digest> <target-environment> [prev-release-ref]` —
  * run the RELEASE gate over the range (prev-release, candidate] as a CD step.
  * It reads repository evidence, persists one report, prints it, and writes
  * GitHub Actions job-summary/output files when those paths are present. It does
@@ -65,6 +70,8 @@ function reportOnlyWriter(): ScmWriter {
 export interface ReleaseArgs {
   repo: string;
   candidateRef: string;
+  artifactDigest: string;
+  targetEnvironment: string;
   /** null when omitted — a first-ever release over the candidate's own changes. */
   prevRef: string | null;
 }
@@ -76,15 +83,24 @@ export interface ReleaseArgs {
  * ref is rejected here before it can reach the URL — same rationale as nightly.
  */
 export function parseReleaseArgs(argv: readonly string[]): ReleaseArgs | null {
-  const [repo, candidateRef, prevRef] = argv;
+  const [repo, candidateRef, artifactDigestRaw, targetEnvironmentRaw, prevRef] = argv;
   if (!repo || !repo.includes("/") || !candidateRef || !isSafeRef(candidateRef)) return null;
+  const artifactDigest = ArtifactDigest.safeParse(artifactDigestRaw);
+  const targetEnvironment = TargetEnvironment.safeParse(targetEnvironmentRaw);
+  if (!artifactDigest.success || !targetEnvironment.success) return null;
   if (prevRef !== undefined && !isSafeRef(prevRef)) return null;
-  return { repo, candidateRef, prevRef: prevRef ?? null };
+  return {
+    repo,
+    candidateRef,
+    artifactDigest: artifactDigest.data,
+    targetEnvironment: targetEnvironment.data,
+    prevRef: prevRef ?? null,
+  };
 }
 
 function usage(): never {
   console.error(
-    "usage: npm run scruffy:release -- <owner/repo> <candidate-ref> [prev-release-ref]",
+    "usage: npm run scruffy:release -- <owner/repo> <candidate-ref> <sha256-artifact-digest> <target-environment> [prev-release-ref]",
   );
   process.exit(2);
 }
@@ -112,6 +128,8 @@ export function formatReleaseReport(report: ReleaseRiskReport): string[] {
   lines.push(`  policy    : ${report.policyVersion}`);
   lines.push(`  repository: ${report.subject.repository}`);
   lines.push(`  candidate : ${report.subject.candidateSha}`);
+  lines.push(`  artifact  : ${report.subject.artifactDigest}`);
+  lines.push(`  environment: ${report.subject.targetEnvironment}`);
   lines.push(
     `  previous  : ${report.subject.previousReleaseSha ?? "(first release — candidate's own changes)"}`,
   );
@@ -233,7 +251,9 @@ export function formatReleaseReport(report: ReleaseRiskReport): string[] {
   }
 
   lines.push("");
-  lines.push("CD surface: this report is emitted to the deployment job; no pull-request check is posted.");
+  lines.push(
+    "CD surface: this report is emitted to the deployment job; no pull-request check is posted.",
+  );
   return lines;
 }
 
@@ -255,6 +275,10 @@ export function checkReportCongruence(
     problems.push("advisory check is missing the report id");
   if (!check.summary.includes(report.subject.candidateSha))
     problems.push("advisory check is missing the candidate SHA");
+  if (!check.summary.includes(report.subject.artifactDigest))
+    problems.push("advisory check is missing the artifact digest");
+  if (!check.summary.includes(report.subject.targetEnvironment))
+    problems.push("advisory check is missing the target environment");
   if (!check.summary.includes(report.decision.outcome))
     problems.push(`advisory check is missing the outcome '${report.decision.outcome}'`);
   if (
@@ -290,6 +314,8 @@ export function formatGithubStepSummary(report: ReleaseRiskReport): string {
     "",
     `**Outcome:** \`${report.decision.outcome}\`  `,
     `**Candidate:** \`${report.subject.candidateSha}\`  `,
+    `**Artifact:** \`${report.subject.artifactDigest}\`  `,
+    `**Environment:** \`${report.subject.targetEnvironment}\`  `,
     `**Report:** \`${report.reportId}\``,
     "",
     "<details open>",
@@ -310,6 +336,8 @@ export function formatGithubOutputs(report: ReleaseRiskReport): string {
     `outcome=${report.decision.outcome}`,
     `report_id=${report.reportId}`,
     `candidate_sha=${report.subject.candidateSha}`,
+    `artifact_digest=${report.subject.artifactDigest}`,
+    `target_environment=${report.subject.targetEnvironment}`,
     `signoff_required=${report.decision.outcome === "sign-off-required"}`,
   ].join("\n");
 }
@@ -332,7 +360,7 @@ export const CD_RUNBOOK: string[] = [
   "  1. Run only after merge and artifact creation, against an immutable SHA.",
   "  2. Ensure repository read credentials and the selected model backend exist.",
   "  3. Execute:",
-  "       npm run scruffy:release -- <owner/repo> <candidate-sha> [previous-deployed-sha]",
+  "       npm run scruffy:release -- <owner/repo> <candidate-sha> <artifact-digest> <target-environment> [previous-deployed-sha]",
   "  4. Route output=ship directly to deployment; route sign-off-required through",
   "     a protected environment; fail stop and indeterminate.",
   "  The command writes GITHUB_STEP_SUMMARY/GITHUB_OUTPUT when Actions provides",
@@ -342,7 +370,7 @@ export const CD_RUNBOOK: string[] = [
 async function main(): Promise<void> {
   const parsed = parseReleaseArgs(process.argv.slice(2));
   if (!parsed) usage();
-  const { repo, candidateRef, prevRef } = parsed;
+  const { repo, candidateRef, artifactDigest, targetEnvironment, prevRef } = parsed;
 
   // Resolve the candidate ref (branch/tag/sha) to a full 40-char sha + URL. When a
   // previous release is given, resolve it too — its sha becomes the range's lower
@@ -384,6 +412,8 @@ async function main(): Promise<void> {
     const run = await scruffy.runRelease({
       repository: repo,
       candidate: candidateSha,
+      artifactDigest,
+      targetEnvironment,
       prevRelease: prevSha,
     });
 

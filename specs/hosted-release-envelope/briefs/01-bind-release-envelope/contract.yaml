@@ -1,0 +1,69 @@
+contract_version: 1
+title: "Bind release reports and persistence to the complete deployment envelope"
+depends_on: []
+scenarios:
+  - id: release-envelope-identity
+    given:
+      - "a schema-valid release report for one repository, immutable range, artifact digest, target environment, policy and evidence set"
+    when:
+      - "the report identity is computed repeatedly and each identity-bearing field is mutated one at a time"
+    then:
+      - "an exact replay has the same report id"
+      - "changing previous release, candidate, artifact digest, target environment, policy, provenance, evidence or decision changes the report id"
+      - "malformed artifact digests and empty or invalid target environments are rejected at the runtime-schema boundary"
+  - id: release-envelope-persistence
+    given:
+      - "one candidate SHA built into multiple artifact digests and targeted at multiple environments"
+    when:
+      - "each complete envelope is reviewed and committed through the real PostgreSQL store"
+    then:
+      - "every distinct envelope has its own durable report and release subject"
+      - "exact retries are idempotent"
+      - "lookup by report id and complete envelope cannot return a neighboring artifact or environment"
+  - id: historical-report-compatibility
+    given:
+      - "a release report persisted before artifact digest and target environment became canonical identity fields"
+    when:
+      - "the historical report is read after the additive migration"
+    then:
+      - "its historical contents remain inspectable through an explicit versioned parser path"
+      - "it is not eligible to satisfy a complete-envelope authorization contract"
+  - id: cd-report-only-compatibility
+    given:
+      - "the manual CD release command receives an exact candidate, artifact digest and target environment"
+    when:
+      - "release analysis reaches a terminal report"
+    then:
+      - "the persisted and rendered report carries the complete envelope"
+      - "GitHub outputs carry report, candidate, artifact and environment identity"
+      - "the command emits no SCM effect"
+required_facts:
+  - id: fact-release-envelope-identity
+    proves: [release-envelope-identity]
+    kind: unit-test
+    artifact:
+      path: src/gates/release/report.test.ts
+      change: update
+    command: npm test -- src/gates/release/report.test.ts -t "release envelope identity"
+  - id: fact-release-envelope-persistence
+    proves: [release-envelope-persistence]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-envelope.test.ts
+      change: create
+    command: npm test -- test/persistence/release-envelope.test.ts -t "release envelope persistence"
+  - id: fact-historical-report-compatibility
+    proves: [historical-report-compatibility]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-envelope.test.ts
+      change: create
+    command: npm test -- test/persistence/release-envelope.test.ts -t "historical release report compatibility"
+  - id: fact-cd-report-only-compatibility
+    proves: [cd-report-only-compatibility]
+    kind: unit-test
+    artifact:
+      path: test/scripts/release-review.test.ts
+      change: update
+    command: npm test -- test/scripts/release-review.test.ts -t "complete deployment envelope"
+human_review: []

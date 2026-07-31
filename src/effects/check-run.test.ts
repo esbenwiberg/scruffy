@@ -43,7 +43,13 @@ const POLICY: ReleasePolicy = {
 
 function baseInput(over: Partial<AssembleReleaseReportInput> = {}): AssembleReleaseReportInput {
   return {
-    subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
+    subject: {
+      repository: REPO,
+      previousReleaseSha: PREV,
+      candidateSha: CAND,
+      artifactDigest: `sha256:${"d4".repeat(32)}`,
+      targetEnvironment: "shadow-production",
+    },
     policyVersion: "policy-v1",
     generatedAt: "2026-07-15T00:00:00.000Z",
     provenance: { analyzers: [{ id: "secret-scan" }] },

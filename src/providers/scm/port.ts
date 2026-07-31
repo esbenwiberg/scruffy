@@ -126,6 +126,23 @@ export interface RepositoryOpenWorkObservation {
   gaps: string[];
 }
 
+export interface WorkflowEnvironmentApproval {
+  environment: string;
+  state: "approved" | "rejected";
+  reviewer: { login: string; id: string };
+  reviewedAt: string;
+}
+
+/** Read-only GitHub Actions approval history used to verify an Environment reviewer. */
+export interface WorkflowApprovalHistory {
+  runAttempt: number;
+  approvals: WorkflowEnvironmentApproval[];
+}
+
+export interface WorkflowApprovalReader {
+  getWorkflowRunApprovals(repository: string, runId: string): Promise<WorkflowApprovalHistory>;
+}
+
 export interface ScmReader {
   /** Changed files for a PR/subject, by immutable revision. */
   getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]>;

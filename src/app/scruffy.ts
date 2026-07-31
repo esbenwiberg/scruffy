@@ -32,6 +32,7 @@ import type {
   ScmWriter,
 } from "../providers/scm/port.js";
 import { verifyAndParseWebhook } from "../ingest/webhook.js";
+import { ArtifactDigest, TargetEnvironment } from "../domain/release/report.js";
 
 /**
  * Application wiring. Everything the domain touches is injected, so the harness
@@ -360,6 +361,8 @@ export class Scruffy {
   async runRelease(input: {
     repository: string;
     candidate: string;
+    artifactDigest: string;
+    targetEnvironment: string;
     prevRelease?: string | null;
   }): Promise<EvaluationRun> {
     const subject = SubjectRevision.parse({
@@ -374,6 +377,8 @@ export class Scruffy {
     return this.release.review({
       repository: subject.repository,
       candidate: subject.commitSha,
+      artifactDigest: ArtifactDigest.parse(input.artifactDigest),
+      targetEnvironment: TargetEnvironment.parse(input.targetEnvironment),
       prevRelease,
     });
   }

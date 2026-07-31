@@ -1,9 +1,16 @@
-import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "./port.js";
+import type {
+  ScmInstallationReader,
+  ScmLifecycleReader,
+  ScmReader,
+  ScmWriter,
+  WorkflowApprovalReader,
+} from "./port.js";
 import { GhCliScm } from "./gh-cli.js";
 import { GithubAppScmWriter } from "./github-app.js";
 import { GithubAppScmReader } from "./github-app-reader.js";
 import { GithubAppLifecycleReader } from "./github-app-lifecycle.js";
 import { createGithubAppApi, githubAppConfigFromEnv } from "./github-app-auth.js";
+import { GithubAppWorkflowApprovalReader } from "./github-app-approvals.js";
 
 /**
  * Selects the SCM writer backend. Defaults to the gh-cli shadow-status adapter
@@ -17,7 +24,9 @@ import { createGithubAppApi, githubAppConfigFromEnv } from "./github-app-auth.js
  */
 export type ScmWriterBackend = "gh-cli" | "github-app";
 
-export function resolveScmWriterBackend(env: Record<string, string | undefined> = process.env): ScmWriterBackend {
+export function resolveScmWriterBackend(
+  env: Record<string, string | undefined> = process.env,
+): ScmWriterBackend {
   const value = env.SCRUFFY_SCM_WRITER;
   if (!value) return "gh-cli";
   if (value === "gh-cli" || value === "github-app") return value;
@@ -52,7 +61,9 @@ export function createScmWriter(
  */
 export type ScmReaderBackend = "gh-cli" | "github-app";
 
-export function resolveScmReaderBackend(env: Record<string, string | undefined> = process.env): ScmReaderBackend {
+export function resolveScmReaderBackend(
+  env: Record<string, string | undefined> = process.env,
+): ScmReaderBackend {
   const value = env.SCRUFFY_SCM_READER;
   if (!value) return "gh-cli";
   if (value === "gh-cli" || value === "github-app") return value;
@@ -88,7 +99,9 @@ export function createScmReader(
  * posts shadow statuses is a legitimate configuration, and it should be visible
  * at wiring time, not as a per-tick error from a loop nobody reads.
  */
-export function createScmLifecycleReader(backend: ScmReaderBackend = resolveScmReaderBackend()): ScmLifecycleReader | null {
+export function createScmLifecycleReader(
+  backend: ScmReaderBackend = resolveScmReaderBackend(),
+): ScmLifecycleReader | null {
   switch (backend) {
     case "gh-cli":
       return null;
@@ -117,7 +130,24 @@ export function createScmLifecycleReader(backend: ScmReaderBackend = resolveScmR
  * not started, and the manual `scruffy:nightly` command remains the supported way
  * to drive a controlled run on a gh-cli deployment.
  */
-export function createScmInstallationReader(backend: ScmReaderBackend = resolveScmReaderBackend()): ScmInstallationReader | null {
+export function createWorkflowApprovalReader(
+  backend: ScmReaderBackend = resolveScmReaderBackend(),
+): WorkflowApprovalReader | null {
+  switch (backend) {
+    case "gh-cli":
+      return null;
+    case "github-app":
+      return new GithubAppWorkflowApprovalReader(createGithubAppApi(githubAppConfigFromEnv()));
+    default: {
+      const _exhaustive: never = backend;
+      return _exhaustive;
+    }
+  }
+}
+
+export function createScmInstallationReader(
+  backend: ScmReaderBackend = resolveScmReaderBackend(),
+): ScmInstallationReader | null {
   switch (backend) {
     case "gh-cli":
       return null;

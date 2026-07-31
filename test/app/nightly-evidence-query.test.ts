@@ -318,7 +318,13 @@ describe("the release boundary", () => {
     expect(decision.outcome).toBe("stop");
 
     const report = assembleReleaseReport({
-      subject: { repository: REPO, previousReleaseSha: PREVIOUS, candidateSha: CANDIDATE },
+      subject: {
+        repository: REPO,
+        previousReleaseSha: PREVIOUS,
+        candidateSha: CANDIDATE,
+        artifactDigest: `sha256:${"d4".repeat(32)}`,
+        targetEnvironment: "shadow-production",
+      },
       policyVersion: "policy-v1",
       generatedAt: "2026-07-15T00:00:00.000Z",
       provenance: { analyzers: [{ id: "secret-scan" }] },

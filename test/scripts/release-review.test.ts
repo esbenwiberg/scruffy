@@ -28,41 +28,56 @@ import type { ReleasePolicy } from "../../src/domain/policy/types.js";
  */
 
 describe("parseReleaseArgs", () => {
-  it("accepts repo + candidate with an explicit previous release", () => {
-    expect(parseReleaseArgs(["acme/widgets", "v2.0.0", "v1.0.0"])).toEqual({
+  const artifactDigest = `sha256:${"d4".repeat(32)}`;
+
+  it("accepts repo + candidate with a complete deployment envelope", () => {
+    expect(
+      parseReleaseArgs(["acme/widgets", "v2.0.0", artifactDigest, "shadow-production", "v1.0.0"]),
+    ).toEqual({
       repo: "acme/widgets",
       candidateRef: "v2.0.0",
+      artifactDigest,
+      targetEnvironment: "shadow-production",
       prevRef: "v1.0.0",
     });
   });
 
   it("treats an omitted previous release as null (first-ever release)", () => {
-    expect(parseReleaseArgs(["acme/widgets", "main"])).toEqual({
-      repo: "acme/widgets",
-      candidateRef: "main",
-      prevRef: null,
-    });
+    expect(parseReleaseArgs(["acme/widgets", "main", artifactDigest, "shadow-production"])).toEqual(
+      {
+        repo: "acme/widgets",
+        candidateRef: "main",
+        artifactDigest,
+        targetEnvironment: "shadow-production",
+        prevRef: null,
+      },
+    );
   });
 
-  it("rejects a missing or malformed repo", () => {
+  it("rejects missing or malformed envelope fields", () => {
     expect(parseReleaseArgs([])).toBeNull();
-    expect(parseReleaseArgs(["not-a-repo", "main"])).toBeNull(); // no slash
-    expect(parseReleaseArgs(["", "main"])).toBeNull();
-  });
-
-  it("rejects a missing candidate ref", () => {
-    expect(parseReleaseArgs(["acme/widgets"])).toBeNull();
+    expect(parseReleaseArgs(["not-a-repo", "main", artifactDigest, "shadow"])).toBeNull();
+    expect(parseReleaseArgs(["acme/widgets", "main", "sha256:nope", "shadow"])).toBeNull();
+    expect(
+      parseReleaseArgs(["acme/widgets", "main", artifactDigest, "bad environment"]),
+    ).toBeNull();
   });
 
   it("rejects an unsafe candidate ref (traversal / splice / control char)", () => {
-    expect(parseReleaseArgs(["acme/widgets", "feature/../../etc"])).toBeNull();
-    expect(parseReleaseArgs(["acme/widgets", "main?foo=bar"])).toBeNull();
-    expect(parseReleaseArgs(["acme/widgets", "main\n"])).toBeNull();
+    expect(
+      parseReleaseArgs(["acme/widgets", "feature/../../etc", artifactDigest, "shadow"]),
+    ).toBeNull();
+    expect(parseReleaseArgs(["acme/widgets", "main?foo=bar", artifactDigest, "shadow"])).toBeNull();
+    expect(parseReleaseArgs(["acme/widgets", "main\n", artifactDigest, "shadow"])).toBeNull();
   });
 
   it("rejects an unsafe previous-release ref while the candidate is fine", () => {
-    expect(parseReleaseArgs(["acme/widgets", "main", "v1..v2"])).toBeNull();
-    expect(parseReleaseArgs(["acme/widgets", "main", "tag#frag"])).toBeNull();
+    expect(
+      parseReleaseArgs(["acme/widgets", "main", artifactDigest, "shadow", "v1..v2"]),
+    ).toBeNull();
+    expect(
+      parseReleaseArgs(["acme/widgets", "main", artifactDigest, "shadow", "tag#frag"]),
+    ).toBeNull();
   });
 });
 
@@ -92,7 +107,7 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     },
   };
 
-  it("prints the complete persisted release report", () => {
+  it("prints the complete deployment envelope and persisted release report", () => {
     // A sign-off with a model risk AND a partial candidate-CI lane, so identity,
     // range, lane statuses, risks, gaps and outcome must ALL appear in the output.
     const decision = evaluateRelease(
@@ -105,7 +120,13 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     expect(decision.outcome).toBe("sign-off-required");
 
     const report = assembleReleaseReport({
-      subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
+      subject: {
+        repository: REPO,
+        previousReleaseSha: PREV,
+        candidateSha: CAND,
+        artifactDigest: `sha256:${"d4".repeat(32)}`,
+        targetEnvironment: "shadow-production",
+      },
       policyVersion: "policy-v1",
       generatedAt: "2026-07-15T00:00:00.000Z",
       provenance: { analyzers: [{ id: "secret-scan" }] },
@@ -191,6 +212,8 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     // Immutable range.
     expect(out).toContain(CAND);
     expect(out).toContain(PREV);
+    expect(out).toContain(report.subject.artifactDigest);
+    expect(out).toContain(report.subject.targetEnvironment);
     // Lane statuses.
     expect(out).toContain("source-analysis: complete");
     expect(out).toContain("release-risk-llm: complete");
@@ -231,6 +254,12 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     expect(jobSummary).toContain(report.reportId);
     expect(jobSummary).toContain("Full deployment evidence");
     expect(formatGithubOutputs(report)).toContain("outcome=sign-off-required");
+    expect(formatGithubOutputs(report)).toContain(
+      `artifact_digest=${report.subject.artifactDigest}`,
+    );
+    expect(formatGithubOutputs(report)).toContain(
+      `target_environment=${report.subject.targetEnvironment}`,
+    );
     expect(formatGithubOutputs(report)).toContain("signoff_required=true");
     expect(releaseCdExitCode(report.decision.outcome)).toBe(0); // route to protected environment
     expect(releaseCdExitCode("ship")).toBe(0);
@@ -249,7 +278,13 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
       { required: true, complete: true },
     );
     const report = assembleReleaseReport({
-      subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
+      subject: {
+        repository: REPO,
+        previousReleaseSha: PREV,
+        candidateSha: CAND,
+        artifactDigest: `sha256:${"d4".repeat(32)}`,
+        targetEnvironment: "shadow-production",
+      },
       policyVersion: "policy-v1",
       generatedAt: "2026-07-15T00:00:00.000Z",
       provenance: { analyzers: [{ id: "secret-scan" }] },

@@ -59,6 +59,37 @@ param nightlyCadenceMs string = '86400000'
 @description('How often the hosted process polls for nightly work.')
 param nightlyTickMs string = '300000'
 
+@allowed([
+  'fake'
+  'azure'
+])
+@description('Model backend. Azure requires an existing Foundry resource/deployment and managed-identity RBAC.')
+param modelBackend string = 'fake'
+
+@description('Existing Microsoft Foundry/Cognitive Services account name. Required when modelBackend=azure.')
+param foundryResourceName string = ''
+
+@description('Claude deployment name inside the Foundry resource. Required when modelBackend=azure.')
+param foundryDeploymentName string = ''
+
+@description('Fixed GitHub Actions OIDC audience accepted by the hosted release API.')
+param releaseOidcAudience string = 'scruffy-release'
+
+@description('Single allowlisted owner/repository for the initial hosted release protocol.')
+param releaseOidcRepository string = ''
+
+@description('Stable numeric GitHub repository id for the OIDC allowlist.')
+param releaseOidcRepositoryId string = ''
+
+@description('Allowlisted reusable job_workflow_ref, pinned to an immutable revision.')
+param releaseOidcWorkflowRef string = ''
+
+@description('Single service-allowlisted deployment target for the initial hosted release protocol.')
+param releaseTargetEnvironment string = ''
+
+@description('Protected GitHub Environment used for human exception approval.')
+param releaseApprovalEnvironment string = ''
+
 @description('Object id of the operator allowed to read deployment secrets from Key Vault.')
 param operatorObjectId string
 
@@ -88,6 +119,10 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
 resource acrPullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: acrPullIdentityName
   scope: resourceGroup(acrResourceGroupName)
+}
+
+resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (modelBackend == 'azure') {
+  name: foundryResourceName
 }
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -284,6 +319,19 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
+resource foundryInferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (modelBackend == 'azure') {
+  name: guid(foundry.id, identity.id, 'bba48692-92b0-4667-a9ad-c31c7b334ac2')
+  scope: foundry
+  properties: {
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      'bba48692-92b0-4667-a9ad-c31c7b334ac2'
+    )
+  }
+}
+
 resource databaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'database-url'
   parent: keyVault
@@ -401,7 +449,43 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
             }
             {
               name: 'SCRUFFY_MODEL_BACKEND'
-              value: 'fake'
+              value: modelBackend
+            }
+            {
+              name: 'AZURE_FOUNDRY_BASE_URL'
+              value: modelBackend == 'azure' ? 'https://${foundryResourceName}.services.ai.azure.com/anthropic' : ''
+            }
+            {
+              name: 'AZURE_FOUNDRY_DEPLOYMENT'
+              value: modelBackend == 'azure' ? foundryDeploymentName : ''
+            }
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: identity.properties.clientId
+            }
+            {
+              name: 'SCRUFFY_RELEASE_OIDC_AUDIENCE'
+              value: releaseOidcAudience
+            }
+            {
+              name: 'SCRUFFY_RELEASE_OIDC_REPOSITORY'
+              value: releaseOidcRepository
+            }
+            {
+              name: 'SCRUFFY_RELEASE_OIDC_REPOSITORY_ID'
+              value: releaseOidcRepositoryId
+            }
+            {
+              name: 'SCRUFFY_RELEASE_OIDC_WORKFLOW_REF'
+              value: releaseOidcWorkflowRef
+            }
+            {
+              name: 'SCRUFFY_RELEASE_TARGET_ENVIRONMENT'
+              value: releaseTargetEnvironment
+            }
+            {
+              name: 'SCRUFFY_RELEASE_APPROVAL_ENVIRONMENT'
+              value: releaseApprovalEnvironment
             }
             {
               name: 'SCRUFFY_NIGHTLY_CADENCE_MS'

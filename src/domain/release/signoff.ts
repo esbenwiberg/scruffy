@@ -9,7 +9,8 @@ export function signoffResponsibility(
 ): string {
   return (
     `By approving this exception, you personally accept responsibility for releasing candidate ` +
-    `${report.subject.candidateSha} despite the unresolved risks and evidence gaps recorded in report ${report.reportId}. ` +
-    `Scruffy has not certified this release as safe. This approval applies only to this exact candidate and report.`
+    `${report.subject.candidateSha}, artifact ${report.subject.artifactDigest}, to environment ` +
+    `${report.subject.targetEnvironment} despite the unresolved risks and evidence gaps recorded in report ${report.reportId}. ` +
+    `Scruffy has not certified this release as safe. This approval applies only to this exact candidate, artifact, environment, and report.`
   );
 }

@@ -12,6 +12,8 @@ describe("resolveBackend", () => {
   afterEach(() => {
     if (original === undefined) delete process.env.SCRUFFY_MODEL_BACKEND;
     else process.env.SCRUFFY_MODEL_BACKEND = original;
+    delete process.env.AZURE_FOUNDRY_BASE_URL;
+    delete process.env.AZURE_FOUNDRY_DEPLOYMENT;
   });
 
   it("defaults to fake when unset", () => {
@@ -39,5 +41,12 @@ describe("resolveBackend", () => {
   it("createModelProvider also throws on a bogus backend", async () => {
     process.env.SCRUFFY_MODEL_BACKEND = "AZURE";
     await expect(createModelProvider()).rejects.toThrow(/unknown SCRUFFY_MODEL_BACKEND 'AZURE'/);
+  });
+
+  it("Azure is explicit and never silently falls back to fake", async () => {
+    process.env.SCRUFFY_MODEL_BACKEND = "azure";
+    await expect(createModelProvider()).rejects.toThrow(/AZURE_FOUNDRY_BASE_URL/);
+    process.env.AZURE_FOUNDRY_BASE_URL = "https://scruffy.services.ai.azure.com/anthropic";
+    await expect(createModelProvider()).rejects.toThrow(/AZURE_FOUNDRY_DEPLOYMENT/);
   });
 });

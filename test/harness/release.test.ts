@@ -81,13 +81,25 @@ function passingCi(sha: string): CandidateCiEvidence {
 }
 
 let h: Harness;
+const ARTIFACT = `sha256:${"d4".repeat(32)}`;
+const TARGET_ENVIRONMENT = "shadow-production";
+
+function runEnvelope(input: { repository: string; candidate: string; prevRelease: string | null }) {
+  return h.scruffy.runRelease({
+    ...input,
+    artifactDigest: ARTIFACT,
+    targetEnvironment: TARGET_ENVIRONMENT,
+  });
+}
 
 afterEach(async () => {
   await h.pool.end();
 });
 
 function releaseChecks(sha: string) {
-  return h.scm.recordedCheckRuns().filter((c) => c.input.externalId === `release:${REPO}:${sha}`);
+  return h.scm
+    .recordedCheckRuns()
+    .filter((c) => c.input.externalId.startsWith(`release:${REPO}:${sha}:sha256:`));
 }
 
 async function decisionOf(candidate: string) {
@@ -127,7 +139,7 @@ describeDb("release gate over a seeded range", () => {
       CLEAN_FILE,
     ]);
 
-    const run = await h.scruffy.runRelease({
+    const run = await runEnvelope({
       repository: REPO,
       candidate: CAND,
       prevRelease: PREV,
@@ -149,7 +161,7 @@ describeDb("release gate over a seeded range", () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [TLS_FILE]);
 
-    const run = await h.scruffy.runRelease({
+    const run = await runEnvelope({
       repository: REPO,
       candidate: CAND,
       prevRelease: PREV,
@@ -170,7 +182,7 @@ describeDb("release gate over a seeded range", () => {
     // context passing for the exact candidate. Without this, ship is impossible.
     h.scm.seedCandidateCi({ repository: REPO, commitSha: CAND }, passingCi(CAND));
 
-    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: CAND, prevRelease: PREV });
     await h.scruffy.flushEffects();
 
     expect((await decisionOf(CAND))?.outcome).toBe("ship");
@@ -211,7 +223,7 @@ describeDb("release gate over a seeded range", () => {
           { context: CI_TESTS!, state: "success" },
         ]),
       );
-      await h.scruffy.runRelease({ repository: REPO, candidate: cand, prevRelease: PREV });
+      await runEnvelope({ repository: REPO, candidate: cand, prevRelease: PREV });
       expect((await decisionOf(cand))?.outcome, `CI state ${state} must not ship`).toBe(
         "sign-off-required",
       );
@@ -226,7 +238,7 @@ describeDb("release gate over a seeded range", () => {
       { repository: REPO, commitSha: missing },
       ciEvidence(missing, [{ context: CI_TESTS!, state: "success" }]),
     );
-    await h.scruffy.runRelease({ repository: REPO, candidate: missing, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: missing, prevRelease: PREV });
     expect((await decisionOf(missing))?.outcome).toBe("sign-off-required");
 
     // EXTRA unrelated successful contexts cannot substitute for a required one:
@@ -242,7 +254,7 @@ describeDb("release gate over a seeded range", () => {
         { context: "unrelated/thing", state: "success" },
       ]),
     );
-    await h.scruffy.runRelease({ repository: REPO, candidate: extra, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: extra, prevRelease: PREV });
     expect((await decisionOf(extra))?.outcome).toBe("sign-off-required");
 
     // A DUPLICATE-AMBIGUOUS required context (two records, differing states, no clear
@@ -259,7 +271,7 @@ describeDb("release gate over a seeded range", () => {
         { context: CI_TESTS!, state: "success" },
       ]),
     );
-    await h.scruffy.runRelease({ repository: REPO, candidate: ambiguous, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: ambiguous, prevRelease: PREV });
     expect((await decisionOf(ambiguous))?.outcome).toBe("sign-off-required");
 
     // Control: EVERY required context passing for the exact candidate ships.
@@ -268,7 +280,7 @@ describeDb("release gate over a seeded range", () => {
       CLEAN_FILE,
     ]);
     h.scm.seedCandidateCi({ repository: REPO, commitSha: clean }, passingCi(clean));
-    await h.scruffy.runRelease({ repository: REPO, candidate: clean, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: clean, prevRelease: PREV });
     expect((await decisionOf(clean))?.outcome).toBe("ship");
   });
 
@@ -278,7 +290,7 @@ describeDb("release gate over a seeded range", () => {
       SECRET_FILE,
     ]);
 
-    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: null });
+    await runEnvelope({ repository: REPO, candidate: CAND, prevRelease: null });
     await h.scruffy.flushEffects();
 
     expect((await decisionOf(CAND))?.outcome).toBe("stop");
@@ -290,7 +302,7 @@ describeDb("release gate over a seeded range", () => {
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [CLEAN_FILE]);
     h.scm.seedCandidateCi({ repository: REPO, commitSha: CAND }, passingCi(CAND));
 
-    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: CAND, prevRelease: PREV });
 
     expect(await reportsOf(CAND)).toHaveLength(1);
     expect(releaseChecks(CAND)).toHaveLength(0);
@@ -307,11 +319,11 @@ describeDb("release gate over a seeded range", () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [TLS_FILE]);
 
-    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: CAND, prevRelease: PREV });
     await h.scruffy.flushEffects();
 
     // Second trigger: the run is already terminal, so it is a no-op reconcile.
-    const again = await h.scruffy.runRelease({
+    const again = await runEnvelope({
       repository: REPO,
       candidate: CAND,
       prevRelease: PREV,
@@ -328,7 +340,7 @@ describeDb("release gate over a seeded range", () => {
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [CLEAN_FILE]);
     h.scm.seedCandidateCi({ repository: REPO, commitSha: CAND }, passingCi(CAND));
 
-    const run = await h.scruffy.runRelease({
+    const run = await runEnvelope({
       repository: REPO,
       candidate: CAND,
       prevRelease: PREV,
@@ -340,9 +352,11 @@ describeDb("release gate over a seeded range", () => {
     const reports = await reportsOf(CAND);
     expect(reports).toHaveLength(1);
     const { report, reportId, candidateShaColumn } = reports[0]!;
-    expect(report.reportVersion).toBe("1");
+    expect(report.reportVersion).toBe("2");
     expect(report.subject.candidateSha).toBe(CAND);
     expect(report.subject.previousReleaseSha).toBe(PREV);
+    expect(report.subject.artifactDigest).toBe(ARTIFACT);
+    expect(report.subject.targetEnvironment).toBe(TARGET_ENVIRONMENT);
     expect(candidateShaColumn).toBe(CAND); // denormalized column agrees with the blob
     // Every policy-declared lane appears; the candidate-CI lane binds the exact SHA.
     expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis", "candidate-ci"]);
@@ -377,11 +391,11 @@ describeDb("release gate over a seeded range", () => {
     h = await bootHarness();
     h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: CAND }, [TLS_FILE]);
 
-    await h.scruffy.runRelease({ repository: REPO, candidate: CAND, prevRelease: PREV });
+    await runEnvelope({ repository: REPO, candidate: CAND, prevRelease: PREV });
     await h.scruffy.flushEffects();
 
     // Re-trigger the same immutable candidate + policy, and flush repeatedly.
-    const again = await h.scruffy.runRelease({
+    const again = await runEnvelope({
       repository: REPO,
       candidate: CAND,
       prevRelease: PREV,
@@ -411,6 +425,8 @@ describeDb("release gate over a seeded range", () => {
     const run = await h.scruffy.runs.ensureReleaseRun(
       { repository: REPO, commitSha: CAND },
       PREV,
+      ARTIFACT,
+      TARGET_ENVIRONMENT,
       "policy-v1",
     );
     expect(
@@ -436,6 +452,8 @@ describeDb("release gate over a seeded range", () => {
     const run = await h.scruffy.runs.ensureReleaseRun(
       { repository: REPO, commitSha: CAND2 },
       PREV,
+      ARTIFACT,
+      TARGET_ENVIRONMENT,
       "policy-v1",
     );
     await h.scruffy.runs.claimForAnalysis(run.id, "worker-that-dies", LEASE_MS); // attempt = 1
@@ -510,7 +528,7 @@ describeDb("release report/check congruence over all required lanes", () => {
     for (const c of cases) {
       h.scm.seedChangedFilesInRange({ repository: REPO, baseSha: PREV, headSha: c.sha }, c.files);
       h.scm.seedCandidateCi({ repository: REPO, commitSha: c.sha }, passingCi(c.sha));
-      await h.scruffy.runRelease({ repository: REPO, candidate: c.sha, prevRelease: PREV });
+      await runEnvelope({ repository: REPO, candidate: c.sha, prevRelease: PREV });
     }
     await h.scruffy.flushEffects();
 

@@ -68,6 +68,10 @@ export interface ReleaseInput {
   repository: string;
   /** The release candidate head to review up to (a 40-char sha). */
   candidate: string;
+  /** Immutable artifact content digest produced before release analysis. */
+  artifactDigest: string;
+  /** Service-controlled deployment target this report may authorize. */
+  targetEnvironment: string;
   /**
    * The previous release the range starts from. Null for a first-ever release, in
    * which case the range is the candidate's own full change set.
@@ -113,6 +117,8 @@ export class ReleaseService {
     const run = await runs.ensureReleaseRun(
       { repository: input.repository, commitSha: input.candidate },
       input.prevRelease,
+      input.artifactDigest,
+      input.targetEnvironment,
       policy.version,
     );
     return this.#drive(run);
@@ -258,11 +264,16 @@ export class ReleaseService {
     candidateCi?: CandidateCiEvaluation,
     outstandingWork?: ReleaseOutstandingWork,
   ): ReleaseRiskReport {
+    if (run.releaseArtifactDigest == null || run.releaseTargetEnvironment == null) {
+      throw new Error(`release run ${run.id} has no complete deployment envelope`);
+    }
     return assembleReleaseReport({
       subject: {
         repository: run.subject.repository,
         previousReleaseSha: run.baseSha,
         candidateSha: run.subject.commitSha,
+        artifactDigest: run.releaseArtifactDigest,
+        targetEnvironment: run.releaseTargetEnvironment,
       },
       policyVersion: run.policyVersion,
       generatedAt: this.deps.clock.now().toISOString(),
@@ -334,6 +345,9 @@ export class ReleaseService {
   }
 
   #externalId(run: EvaluationRun): string {
-    return `release:${run.subject.repository}:${run.subject.commitSha}`;
+    if (run.releaseArtifactDigest == null || run.releaseTargetEnvironment == null) {
+      throw new Error(`release run ${run.id} has no complete deployment envelope`);
+    }
+    return `release:${run.subject.repository}:${run.subject.commitSha}:${run.releaseArtifactDigest}:${run.releaseTargetEnvironment}`;
   }
 }

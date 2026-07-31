@@ -2,6 +2,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Scruffy } from "../app/scruffy.js";
 import type { SubjectRevision } from "../domain/evidence/types.js";
 import { InvalidSignatureError, MalformedPayloadError } from "../ingest/webhook.js";
+import type { ReleaseAuthorityService } from "../app/release-authority.js";
+import { ReleaseAuthorityError } from "../app/release-authority.js";
+import type { GithubActionsOidcVerifier } from "../providers/identity/github-actions-oidc.js";
+import { GithubActionsOidcError } from "../providers/identity/github-actions-oidc.js";
+import { ZodError } from "zod";
 
 /**
  * The hosted webhook listener. Deliberately node:http with zero framework —
@@ -35,6 +40,9 @@ export interface WebhookServerOptions {
   drive?: (subject: SubjectRevision) => Promise<void>;
   /** Extra readiness probe for /healthz (e.g. a DB ping). Throw = unhealthy. */
   healthCheck?: () => Promise<void>;
+  /** Optional hosted release authority. Both fields are required to enable /v1/release-* routes. */
+  releaseAuthority?: ReleaseAuthorityService;
+  oidcVerifier?: GithubActionsOidcVerifier;
   /** Log sink, injectable for tests. */
   log?: (message: string) => void;
 }
@@ -53,14 +61,16 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
     void route(req, res).catch((err) => {
       // Last-resort containment: nothing below should reject, but an unhandled
       // rejection here would crash the whole listener.
-      log(`webhook-server: unhandled error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      log(
+        `webhook-server: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
       if (!res.headersSent) json(res, 500, { error: "internal error" });
       else res.destroy();
     });
   });
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
 
     if (path === "/healthz") {
       if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
@@ -68,7 +78,9 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
         await options.healthCheck?.();
         return json(res, 200, { ok: true });
       } catch (err) {
-        log(`webhook-server: health check failed: ${err instanceof Error ? err.message : String(err)}`);
+        log(
+          `webhook-server: health check failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
         return json(res, 503, { ok: false });
       }
     }
@@ -78,7 +90,86 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
       return handleWebhook(req, res);
     }
 
+    if (path === "/v1/release-reports" && req.method === "POST") {
+      return handleReleaseAuthority(req, res, { kind: "request-report" });
+    }
+    const reportMatch = path.match(/^\/v1\/release-reports\/([^/]+)$/);
+    if (reportMatch && req.method === "GET") {
+      return handleReleaseAuthority(req, res, { kind: "get-report", reportId: reportMatch[1]! });
+    }
+    const attestationMatch = path.match(/^\/v1\/release-reports\/([^/]+)\/attestations$/);
+    if (attestationMatch && req.method === "POST") {
+      return handleReleaseAuthority(req, res, {
+        kind: "attest",
+        reportId: attestationMatch[1]!,
+      });
+    }
+    const authorizationMatch = path.match(/^\/v1\/release-reports\/([^/]+)\/authorizations$/);
+    if (authorizationMatch && req.method === "POST") {
+      return handleReleaseAuthority(req, res, {
+        kind: "authorize",
+        reportId: authorizationMatch[1]!,
+      });
+    }
+    if (path.startsWith("/v1/release-")) {
+      return json(res, options.releaseAuthority ? 405 : 404, {
+        error: options.releaseAuthority ? "method not allowed" : "not found",
+      });
+    }
+
     return json(res, 404, { error: "not found" });
+  }
+
+  async function handleReleaseAuthority(
+    req: IncomingMessage,
+    res: ServerResponse,
+    operation:
+      | { kind: "request-report" }
+      | { kind: "get-report"; reportId: string }
+      | { kind: "attest"; reportId: string }
+      | { kind: "authorize"; reportId: string },
+  ): Promise<void> {
+    const authority = options.releaseAuthority;
+    const verifier = options.oidcVerifier;
+    if (!authority || !verifier) return json(res, 404, { error: "not found" });
+    const authorization = req.headers.authorization;
+    if (!authorization?.startsWith("Bearer ")) {
+      return json(res, 401, { error: "missing bearer token" });
+    }
+    try {
+      const identity = await verifier.verify(
+        authorization.slice("Bearer ".length),
+        operation.kind === "attest" ? { requireEnvironment: authority.approvalEnvironment } : {},
+      );
+      if (operation.kind === "get-report") {
+        return json(res, 200, await authority.getReport(identity, operation.reportId));
+      }
+      const rawBody = await readBody(req, maxBodyBytes);
+      let body: unknown;
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        return json(res, 400, { error: "malformed JSON" });
+      }
+      if (operation.kind === "request-report") {
+        return json(res, 200, await authority.requestReport(identity, body));
+      }
+      if (operation.kind === "attest") {
+        return json(res, 201, await authority.attest(identity, operation.reportId, body));
+      }
+      return json(res, 201, await authority.authorize(identity, operation.reportId, body));
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) return json(res, 413, { error: "payload too large" });
+      if (error instanceof GithubActionsOidcError)
+        return json(res, 401, { error: "invalid bearer token" });
+      if (error instanceof ZodError) return json(res, 400, { error: "invalid request" });
+      if (error instanceof ReleaseAuthorityError)
+        return json(res, error.status, { error: error.message });
+      log(
+        `release-authority: request failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+      return json(res, 500, { error: "internal error" });
+    }
   }
 
   async function handleWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -98,8 +189,10 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
     try {
       result = await scruffy.acceptWebhook(signature, body);
     } catch (err) {
-      if (err instanceof InvalidSignatureError) return json(res, 401, { error: "invalid signature" });
-      if (err instanceof MalformedPayloadError) return json(res, 400, { error: "malformed payload" });
+      if (err instanceof InvalidSignatureError)
+        return json(res, 401, { error: "invalid signature" });
+      if (err instanceof MalformedPayloadError)
+        return json(res, 400, { error: "malformed payload" });
       // ensureRun failed (e.g. DB down): a durability failure must NOT 2xx —
       // GitHub marks the delivery failed and an operator can redeliver it.
       log(`webhook-server: accept failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -113,7 +206,9 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
     json(res, 202, { accepted: true, runId: result.runId });
     const { runId, subject } = result;
     void drive(subject).catch((err) => {
-      log(`webhook-server: background drive of run ${runId} failed (reconciler will recover): ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `webhook-server: background drive of run ${runId} failed (reconciler will recover): ${err instanceof Error ? err.message : String(err)}`,
+      );
     });
   }
 }
@@ -152,6 +247,9 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
-  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+  });
   res.end(body);
 }
