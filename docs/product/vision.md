@@ -46,6 +46,11 @@ Runs before a controlled release candidate is published.
 - Runs service-controlled visual QA for applicable applications.
 - Stops or escalates releases when evidence or policy requires it.
 - Requests human sign-off only for defined exceptions or uncertainty.
+- Produces a SHA-bound, evidence-backed release risk report; a complete clean
+  report permits automatic publication.
+
+The report and decision contract is defined in
+[`release-risk-report.md`](release-risk-report.md).
 
 GitHub Releases are the initial release integration. The design must later permit Azure DevOps and distinguish release publication, package publication, and deployment.
 
