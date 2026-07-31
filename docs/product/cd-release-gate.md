@@ -133,18 +133,20 @@ The disposable TODO repository now has a manual shadow workflow at
 
 Two terminal paths were exercised end to end:
 
-1. **Human exception:** workflow run
-   [`30630097007`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30630097007)
+1. **Human exception:** hardened workflow run
+   [`30649693420`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30649693420)
    built risky candidate `c39c314163509603a572124780daa4c8f47d6912`, produced
    `sign-off-required` report
    `rr_e1ae4b3cc27c835594385d2a6e2ce0863439516c52ad6d5f4a4eeb91f50aeac0`,
    paused at the protected environment, and continued only after an explicit
-   human approval. The approval API recorded reviewer `esbenwiberg` and comment
-   `ok!`. The durable workflow artifacts bind the report, candidate, artifact
-   digest `sha256:a98403dd66df263e82ce85028ecea91407bd114e388777516fe5f8fb903ed3a8`,
-   target `shadow-production`, rationale, responsibility acceptance, reviewer,
+   human approval. The approval API recorded reviewer `esbenwiberg`; the
+   workflow proved that reviewer was also the identity that supplied the
+   mandatory rationale and responsibility acceptance. The durable workflow
+   artifacts bind the report, candidate, artifact digest
+   `sha256:784dedee47b3d216febc0e289d71d4a8f9f856a3a3c1bf515fbaeafcf36d7789`,
+   target `shadow-production`, rationale, responsibility accepter, reviewer,
    timestamp, and workflow run. The terminal shadow-deploy job revalidated the
-   complete envelope.
+   complete envelope and equality of responsibility accepter and reviewer.
 2. **Automatic ship:** workflow run
    [`30649251016`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30649251016)
    reviewed merged-main candidate `d60c6c0f959caf96f2d9f7e088bdc155693e2ab8`, produced
@@ -164,4 +166,5 @@ lab uses the fake model backend and ephemeral Postgres, performs no real
 deployment, and currently binds artifact/environment in the workflow envelope
 rather than in Scruffy's report identity. GitHub's native environment deployment
 record is bound to the workflow ref; the uploaded approval attestation is what
-binds the reviewed candidate artifact. Those gaps must be closed before promotion.
+binds the reviewed candidate artifact. The lab environment also retains GitHub's
+default administrator-bypass option. Those gaps must be closed before promotion.
