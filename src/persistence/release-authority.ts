@@ -137,16 +137,15 @@ export class ReleaseAuthorityStore {
       await this.#requireCurrentReport(client, parsed.reportId, parsed.envelope);
       await client.query(
         `insert into release_approval_attestations
-           (attestation_id, attestation_version, report_id, request_id, repository,
-            candidate_sha, artifact_digest, target_environment, workflow_run_id,
-            workflow_run_attempt, attestation, created_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           (attestation_id, attestation_version, report_id, repository, candidate_sha,
+            artifact_digest, target_environment, workflow_run_id, workflow_run_attempt,
+            attestation, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          on conflict (attestation_id) do nothing`,
         [
           parsed.attestationId,
           parsed.attestationVersion,
           parsed.reportId,
-          parsed.requestObservationId,
           parsed.envelope.repository,
           parsed.envelope.candidateSha,
           parsed.envelope.artifactDigest,

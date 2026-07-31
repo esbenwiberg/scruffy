@@ -38,11 +38,17 @@ create unique index release_report_requests_exact
 create index release_report_requests_report_lookup
   on release_report_requests (report_id, workflow_run_id, workflow_run_attempt);
 
--- Version existing attestation rows and let new (v2) attestations bind to the durable
--- request observation that ordered them. Existing rows backfill to version '1'.
+-- Version existing attestation rows so historical v1 data is distinguishable and
+-- ineligible for new terminal authorization. Existing rows backfill to '1'.
+--
+-- The binding from a v2 attestation to its ordering observation lives in the
+-- attestation's own jsonb (`requestObservationId`); terminal authorization re-reads
+-- the observation from release_report_requests by that id and refuses on removal or
+-- mismatch. That runtime revalidation — not a foreign key — is the authority, so the
+-- observation can be independently absent and the terminal transaction still fails
+-- closed without committing a partial authorization.
 alter table release_approval_attestations
-  add column attestation_version text not null default '1',
-  add column request_id text references release_report_requests(request_id);
+  add column attestation_version text not null default '1';
 
 -- New inserts must state their version explicitly; the default only backfills history.
 alter table release_approval_attestations
