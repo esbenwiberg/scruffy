@@ -126,11 +126,18 @@ export interface RepositoryOpenWorkObservation {
   gaps: string[];
 }
 
+/**
+ * One normalized GitHub Actions Environment review entry. `state` mirrors GitHub's
+ * documented review vocabulary (`approved | rejected | pending`) honestly — a
+ * `pending` entry is a real, still-open review and is neither an approval nor a
+ * rejection. There is deliberately NO review timestamp: GitHub's review-history
+ * response does not expose one, and the service establishes ordering durably (a
+ * report-request observation) rather than inventing a provider field.
+ */
 export interface WorkflowEnvironmentApproval {
   environment: string;
-  state: "approved" | "rejected";
+  state: "approved" | "rejected" | "pending";
   reviewer: { login: string; id: string };
-  reviewedAt: string;
 }
 
 /** Read-only GitHub Actions approval history used to verify an Environment reviewer. */
