@@ -1,0 +1,5 @@
+{
+  "defaultProfile": "scruffy",
+  "allowedProfiles": ["scruffy"],
+  "validationSuite": "full"
+}
