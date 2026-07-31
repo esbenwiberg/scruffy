@@ -124,3 +124,44 @@ The deployment report may show:
 
 Open PRs are future work, not part of the artifact. They are context only and
 must not be highlighted as the release candidate or affect the outcome.
+
+## Controlled TODO-repository evidence — 2026-07-31
+
+The disposable TODO repository now has a manual shadow workflow at
+`.github/workflows/release-shadow.yml` and a protected environment named
+`scruffy-production-signoff` with `esbenwiberg` as required reviewer.
+
+Two terminal paths were exercised end to end:
+
+1. **Human exception:** workflow run
+   [`30630097007`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30630097007)
+   built risky candidate `c39c314163509603a572124780daa4c8f47d6912`, produced
+   `sign-off-required` report
+   `rr_e1ae4b3cc27c835594385d2a6e2ce0863439516c52ad6d5f4a4eeb91f50aeac0`,
+   paused at the protected environment, and continued only after an explicit
+   human approval. The approval API recorded reviewer `esbenwiberg` and comment
+   `ok!`. The durable workflow artifacts bind the report, candidate, artifact
+   digest `sha256:a98403dd66df263e82ce85028ecea91407bd114e388777516fe5f8fb903ed3a8`,
+   target `shadow-production`, rationale, responsibility acceptance, reviewer,
+   timestamp, and workflow run. The terminal shadow-deploy job revalidated the
+   complete envelope.
+2. **Automatic ship:** workflow run
+   [`30649251016`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30649251016)
+   reviewed merged-main candidate `d60c6c0f959caf96f2d9f7e088bdc155693e2ab8`, produced
+   `ship` report
+   `rr_e96bf603c50270a2463e4c6855913caeed589ea501f99c6e0b1f4a68c7a21e06`,
+   skipped human approval, and revalidated artifact digest
+   `sha256:8fc417169c410666dc243b7f920fd71680b5ebd4f5857f5f48de9b63f5b8eb45`
+   before automatic shadow authorization.
+
+Both analyses emitted zero SCM effects. No release check was created or updated
+on a PR. The old experimental PR-head check remains only as a concise superseded
+notice; its intentionally risky PR was closed without merge and its branch was
+deleted.
+
+This proves the CD routing and approval mechanics, not production authority. The
+lab uses the fake model backend and ephemeral Postgres, performs no real
+deployment, and currently binds artifact/environment in the workflow envelope
+rather than in Scruffy's report identity. GitHub's native environment deployment
+record is bound to the workflow ref; the uploaded approval attestation is what
+binds the reviewed candidate artifact. Those gaps must be closed before promotion.
