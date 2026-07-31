@@ -1,0 +1,16 @@
+.git
+.github
+.pi
+.claude
+.clawpatch
+node_modules
+dist
+coverage
+*.log
+.env
+.env.*
+*.pem
+*.key
+investigations
+presentation.html
+docs/product/image.png
