@@ -2,8 +2,11 @@ import type { Pool, PoolClient } from "./db.js";
 import { withTransaction } from "./db.js";
 import {
   ReleaseApprovalAttestation,
+  ReleaseReportRequestObservation,
   ReleaseShadowAuthorization,
+  StoredReleaseApprovalAttestation,
   type ReleaseApprovalAttestation as ReleaseApprovalAttestationType,
+  type ReleaseReportRequestObservation as ReleaseReportRequestObservationType,
   type ReleaseShadowAuthorization as ReleaseShadowAuthorizationType,
 } from "../domain/release/authority.js";
 import {
@@ -64,6 +67,68 @@ export class ReleaseAuthorityStore {
     return raw === undefined ? null : parseReleaseReport(raw);
   }
 
+  /**
+   * Durably record that the current workflow attempt requested THIS report, BEFORE
+   * the report is returned to the caller. An exact retry converges on the original
+   * row (idempotent, first observation time wins); a divergent observation for the
+   * same natural key surfaces as a conflict and fails closed rather than returning an
+   * unrelated row.
+   */
+  async putReportRequest(
+    observation: ReleaseReportRequestObservationType,
+  ): Promise<ReleaseReportRequestObservationType> {
+    const parsed = ReleaseReportRequestObservation.parse(observation);
+    return withTransaction(this.pool, async (client) => {
+      await this.#requireCurrentReport(client, parsed.reportId, parsed.envelope);
+      try {
+        await client.query(
+          `insert into release_report_requests
+             (request_id, report_id, repository, candidate_sha, artifact_digest,
+              target_environment, workflow_ref, workflow_run_id, workflow_run_attempt,
+              observation, observed_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           on conflict (request_id) do nothing`,
+          [
+            parsed.requestId,
+            parsed.reportId,
+            parsed.envelope.repository,
+            parsed.envelope.candidateSha,
+            parsed.envelope.artifactDigest,
+            parsed.envelope.targetEnvironment,
+            parsed.workflowRef,
+            parsed.runId,
+            parsed.runAttempt,
+            JSON.stringify(parsed),
+            parsed.observedAt,
+          ],
+        );
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new ReleaseAuthorityIntegrityError(
+            "a conflicting report-request observation already exists for this workflow attempt",
+          );
+        }
+        throw error;
+      }
+      const stored = await client.query<{ observation: unknown }>(
+        "select observation from release_report_requests where request_id = $1",
+        [parsed.requestId],
+      );
+      return ReleaseReportRequestObservation.parse(stored.rows[0]!.observation);
+    });
+  }
+
+  async getReportRequest(
+    requestId: string,
+  ): Promise<ReleaseReportRequestObservationType | null> {
+    const result = await this.pool.query<{ observation: unknown }>(
+      "select observation from release_report_requests where request_id = $1",
+      [requestId],
+    );
+    const raw = result.rows[0]?.observation;
+    return raw === undefined ? null : ReleaseReportRequestObservation.parse(raw);
+  }
+
   async putAttestation(
     attestation: ReleaseApprovalAttestationType,
   ): Promise<ReleaseApprovalAttestationType> {
@@ -72,13 +137,16 @@ export class ReleaseAuthorityStore {
       await this.#requireCurrentReport(client, parsed.reportId, parsed.envelope);
       await client.query(
         `insert into release_approval_attestations
-           (attestation_id, report_id, repository, candidate_sha, artifact_digest,
-            target_environment, workflow_run_id, workflow_run_attempt, attestation, created_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           (attestation_id, attestation_version, report_id, request_id, repository,
+            candidate_sha, artifact_digest, target_environment, workflow_run_id,
+            workflow_run_attempt, attestation, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          on conflict (attestation_id) do nothing`,
         [
           parsed.attestationId,
+          parsed.attestationVersion,
           parsed.reportId,
+          parsed.requestObservationId,
           parsed.envelope.repository,
           parsed.envelope.candidateSha,
           parsed.envelope.artifactDigest,
@@ -97,13 +165,19 @@ export class ReleaseAuthorityStore {
     });
   }
 
-  async getAttestation(attestationId: string): Promise<ReleaseApprovalAttestationType | null> {
+  /**
+   * Audit read: returns either historical v1 or active v2 attestation data. Callers
+   * that authorize must additionally require v2 (see putAuthorization).
+   */
+  async getAttestation(
+    attestationId: string,
+  ): Promise<StoredReleaseApprovalAttestation | null> {
     const result = await this.pool.query<{ attestation: unknown }>(
       "select attestation from release_approval_attestations where attestation_id = $1",
       [attestationId],
     );
     const raw = result.rows[0]?.attestation;
-    return raw === undefined ? null : ReleaseApprovalAttestation.parse(raw);
+    return raw === undefined ? null : StoredReleaseApprovalAttestation.parse(raw);
   }
 
   /**
@@ -139,7 +213,15 @@ export class ReleaseAuthorityStore {
         );
         const raw = attestationResult.rows[0]?.attestation;
         if (raw === undefined) throw new ReleaseAuthorityIntegrityError("attestation not found");
-        const attestation = ReleaseApprovalAttestation.parse(raw);
+        const stored = StoredReleaseApprovalAttestation.parse(raw);
+        // Historical v1 attestations remain audit-readable but can never authorize
+        // under the current contract — they lack a durable ordering binding.
+        if (stored.attestationVersion !== "2") {
+          throw new ReleaseAuthorityIntegrityError(
+            "attestation version is ineligible for terminal authorization",
+          );
+        }
+        const attestation = stored;
         if (
           attestation.reportId !== parsed.reportId ||
           !sameEnvelope(attestation.envelope, parsed.envelope) ||
@@ -147,6 +229,29 @@ export class ReleaseAuthorityStore {
         ) {
           throw new ReleaseAuthorityIntegrityError(
             "attestation does not match report envelope and authorizing workflow identity",
+          );
+        }
+        // Terminal ordering revalidation: the durable report-request observation the
+        // attestation binds to must still exist and match the exact report, envelope,
+        // pinned workflow ref, run, and attempt. Removal or mutation refuses.
+        const requestResult = await client.query<{ observation: unknown }>(
+          "select observation from release_report_requests where request_id = $1 for share",
+          [attestation.requestObservationId],
+        );
+        const requestRaw = requestResult.rows[0]?.observation;
+        if (requestRaw === undefined) {
+          throw new ReleaseAuthorityIntegrityError("report-request observation not found");
+        }
+        const observation = ReleaseReportRequestObservation.parse(requestRaw);
+        if (
+          observation.reportId !== parsed.reportId ||
+          !sameEnvelope(observation.envelope, parsed.envelope) ||
+          observation.workflowRef !== parsed.workflow.workflowRef ||
+          observation.runId !== parsed.workflow.runId ||
+          observation.runAttempt !== parsed.workflow.runAttempt
+        ) {
+          throw new ReleaseAuthorityIntegrityError(
+            "report-request observation does not match the authorizing workflow ordering",
           );
         }
       }
@@ -236,6 +341,16 @@ function sameWorkflowIdentity(
     left.actor.id === right.actor.id &&
     left.actor.login.toLowerCase() === right.actor.login.toLowerCase() &&
     left.environment === right.environment
+  );
+}
+
+/** Postgres unique-violation SQLSTATE, so a concurrent conflict fails closed cleanly. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "23505"
   );
 }
 

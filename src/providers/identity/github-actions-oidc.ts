@@ -80,7 +80,7 @@ export class GithubActionsOidcVerifier {
 
   async verify(
     token: string,
-    options: { requireEnvironment?: string } = {},
+    options: { requireEnvironment?: string; forbidEnvironment?: boolean } = {},
   ): Promise<WorkflowIdentityType> {
     try {
       const result = await jwtVerify(token, this.#keys, {
@@ -89,7 +89,7 @@ export class GithubActionsOidcVerifier {
         clockTolerance: 5,
         requiredClaims: ["exp", "iat", "sub"],
       });
-      return this.#claims(result.payload, options.requireEnvironment);
+      return this.#claims(result.payload, options);
     } catch (error) {
       throw new GithubActionsOidcError(
         `GitHub Actions OIDC verification failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -97,7 +97,10 @@ export class GithubActionsOidcVerifier {
     }
   }
 
-  #claims(payload: JWTPayload, requireEnvironment?: string): WorkflowIdentityType {
+  #claims(
+    payload: JWTPayload,
+    options: { requireEnvironment?: string; forbidEnvironment?: boolean },
+  ): WorkflowIdentityType {
     const now = Math.floor(Date.now() / 1000);
     if (
       payload.iat === undefined ||
@@ -115,7 +118,15 @@ export class GithubActionsOidcVerifier {
     ) {
       throw new GithubActionsOidcError("GitHub Actions OIDC identity is not allowlisted");
     }
-    if (requireEnvironment !== undefined && claims.environment !== requireEnvironment) {
+    // Report-request posture: the pre-approval step must NOT carry an Environment
+    // claim. Attestation posture: the token MUST carry the configured protected
+    // Environment. The two are mutually exclusive and both fail closed.
+    if (options.forbidEnvironment && claims.environment !== undefined) {
+      throw new GithubActionsOidcError(
+        "GitHub Actions OIDC token must not carry an Environment claim for a report request",
+      );
+    }
+    if (options.requireEnvironment !== undefined && claims.environment !== options.requireEnvironment) {
       throw new GithubActionsOidcError(
         "GitHub Actions OIDC Environment does not match the protected gate",
       );
