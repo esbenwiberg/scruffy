@@ -93,6 +93,39 @@ export interface CandidateCiEvidence {
   records: CandidateCiRecord[];
 }
 
+/** One open issue selected by the service-owned exact `bug` label. */
+export interface OpenBugIssueObservation {
+  number: number;
+  url: string;
+  title: string;
+  labels: string[];
+  updatedAt?: string;
+}
+
+/** One open pull request. This is repository context, not release authority. */
+export interface OpenPullRequestContextObservation {
+  number: number;
+  url: string;
+  title: string;
+  draft: boolean;
+  headSha: string;
+  headBranch: string;
+  baseBranch: string;
+  author?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Bounded repository-work read. `complete=false` means the adapter hit its page
+ * bound; it still returns the observed prefix plus an explicit gap.
+ */
+export interface RepositoryOpenWorkObservation {
+  complete: boolean;
+  bugIssues: OpenBugIssueObservation[];
+  openPullRequests: OpenPullRequestContextObservation[];
+  gaps: string[];
+}
+
 export interface ScmReader {
   /** Changed files for a PR/subject, by immutable revision. */
   getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]>;
@@ -116,6 +149,12 @@ export interface ScmReader {
    * masqueraded as "no required checks" would false-green the release lane.
    */
   getCandidateCi(subject: SubjectRevision): Promise<CandidateCiEvidence>;
+  /**
+   * Optional context read used only by release-report presentation. Implemented
+   * by product SCM adapters; omitted by narrow replay/test readers. A release
+   * decision MUST NOT consume this result.
+   */
+  getOpenReleaseWork?(repository: string): Promise<RepositoryOpenWorkObservation>;
 }
 
 /**

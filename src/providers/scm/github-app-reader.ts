@@ -6,6 +6,7 @@ import type {
   ChangedFile,
   FileContentResult,
   InstalledRepository,
+  RepositoryOpenWorkObservation,
   RevisionRange,
   ScmInstallationReader,
   ScmReader,
@@ -41,6 +42,9 @@ const PER_PAGE = 100;
 /** Hard bound on compare pages. 300-file cap / 100-per-page = 3 real pages; the
  * extra headroom tolerates a short final page without ever looping unbounded. */
 const MAX_PAGES = 8;
+
+/** Context-only backlog reads are bounded independently of immutable diff reads. */
+const OPEN_WORK_MAX_PAGES = 5;
 
 // ── Response schemas (external boundary — parse, don't trust) ─────────────────
 
@@ -123,6 +127,30 @@ const CommitStatusesCi = z.array(
   }),
 );
 
+const OpenIssues = z.array(
+  z.object({
+    number: z.number().int().positive(),
+    html_url: z.string().url(),
+    title: z.string(),
+    labels: z.array(z.union([z.string(), z.object({ name: z.string() })])),
+    updated_at: z.string().optional(),
+    pull_request: z.unknown().optional(),
+  }),
+);
+
+const OpenPullRequests = z.array(
+  z.object({
+    number: z.number().int().positive(),
+    html_url: z.string().url(),
+    title: z.string(),
+    draft: z.boolean(),
+    head: z.object({ sha: z.string().min(1), ref: z.string().min(1) }),
+    base: z.object({ ref: z.string().min(1) }),
+    user: z.object({ login: z.string() }).nullable().optional(),
+    updated_at: z.string().optional(),
+  }),
+);
+
 export interface GithubAppScmReaderOptions {
   api: GhApi;
 }
@@ -152,7 +180,11 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
 
     for (let page = 1; page <= MAX_INSTALLATION_PAGES; page += 1) {
       const res = await this.#api("GET /installation/repositories", { per_page: PER_PAGE, page });
-      const parsed = this.#parse(InstallationRepositories, res.data, `installation repositories page ${page}`);
+      const parsed = this.#parse(
+        InstallationRepositories,
+        res.data,
+        `installation repositories page ${page}`,
+      );
       total = parsed.total_count;
 
       for (const repo of parsed.repositories) {
@@ -198,7 +230,9 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
     }
     const parsed = this.#parse(BranchResponse, res.data, `branch ${repository}#${branch}`);
     if (!/^[0-9a-f]{40}$/.test(parsed.commit.sha)) {
-      throw new Error(`github-app: branch ${repository}#${branch} head '${parsed.commit.sha}' is not a full commit sha`);
+      throw new Error(
+        `github-app: branch ${repository}#${branch} head '${parsed.commit.sha}' is not a full commit sha`,
+      );
     }
     return parsed.commit.sha;
   }
@@ -206,7 +240,11 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {
     const base = await this.#associatedPrBase(subject);
     if (base !== null) {
-      return this.getChangedFilesInRange({ repository: subject.repository, baseSha: base, headSha: subject.commitSha });
+      return this.getChangedFilesInRange({
+        repository: subject.repository,
+        baseSha: base,
+        headSha: subject.commitSha,
+      });
     }
     // No associated open PR: fall back to the head commit's own file list — a
     // narrower change set than a full PR diff, but well-defined.
@@ -227,7 +265,9 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
   /** The commit's own change set — the files that commit introduces — with no PR
    * resolution, mirroring the gh-cli reader so the null-base contract holds. */
   async #commitOwnFiles(repository: string, commitSha: string): Promise<ChangedFile[]> {
-    const res = await this.#api(`GET /repos/${repository}/commits/${commitSha}`, { per_page: PER_PAGE });
+    const res = await this.#api(`GET /repos/${repository}/commits/${commitSha}`, {
+      per_page: PER_PAGE,
+    });
     const files = this.#parse(FilesResponse, res.data, `commit ${commitSha}`).files ?? [];
     if (files.length >= COMPARE_FILE_CAP) {
       throw new Error(
@@ -244,11 +284,19 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
    * same capped set every page), and throw at the cap rather than scan a partial
    * diff as clean.
    */
-  async #compareFiles(repository: string, baseSha: string, headSha: string): Promise<ChangedFile[]> {
+  async #compareFiles(
+    repository: string,
+    baseSha: string,
+    headSha: string,
+  ): Promise<ChangedFile[]> {
     const byName = new Map<string, GhFile>();
     for (let page = 1; page <= MAX_PAGES; page += 1) {
-      const res = await this.#api(`GET /repos/${repository}/compare/${baseSha}...${headSha}`, { per_page: PER_PAGE, page });
-      const files = this.#parse(FilesResponse, res.data, `compare ${baseSha}...${headSha}`).files ?? [];
+      const res = await this.#api(`GET /repos/${repository}/compare/${baseSha}...${headSha}`, {
+        per_page: PER_PAGE,
+        page,
+      });
+      const files =
+        this.#parse(FilesResponse, res.data, `compare ${baseSha}...${headSha}`).files ?? [];
 
       let added = 0;
       for (const f of files) {
@@ -272,7 +320,9 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
    * Only open PRs count: a closed PR's base would compute the diff over a stale,
    * irrelevant range. No open PR -> null -> scan the commit itself. */
   async #associatedPrBase(subject: SubjectRevision): Promise<string | null> {
-    const res = await this.#api(`GET /repos/${subject.repository}/commits/${subject.commitSha}/pulls`);
+    const res = await this.#api(
+      `GET /repos/${subject.repository}/commits/${subject.commitSha}/pulls`,
+    );
     const pulls = this.#parse(CommitPulls, res.data, "commit pulls");
     const open = pulls.find((p) => p.state === "open");
     if (!open) return null;
@@ -287,7 +337,9 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
    */
   async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
     try {
-      const res = await this.#api(`GET /repos/${subject.repository}/contents/${path}`, { ref: subject.commitSha });
+      const res = await this.#api(`GET /repos/${subject.repository}/contents/${path}`, {
+        ref: subject.commitSha,
+      });
       if (Array.isArray(res.data)) {
         return { complete: false, path, reason: "not_found", detail: "path is a directory" };
       }
@@ -298,7 +350,12 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
       if (parsed.encoding !== "base64" || parsed.content === undefined) {
         // >1 MiB files come back with encoding "none" and empty content — the
         // API itself refuses to inline them; treat identically to oversized.
-        return { complete: false, path, reason: "oversized", detail: "content not inline (file too large for the contents API)" };
+        return {
+          complete: false,
+          path,
+          reason: "oversized",
+          detail: "content not inline (file too large for the contents API)",
+        };
       }
       const buffer = Buffer.from(parsed.content, "base64");
       if (buffer.byteLength > MAX_CONTENT_BYTES) {
@@ -310,7 +367,12 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
       return { complete: true, path, content: buffer.toString("utf8") };
     } catch (err) {
       if (statusOf(err) === 404) return { complete: false, path, reason: "not_found" };
-      return { complete: false, path, reason: "provider_error", detail: err instanceof Error ? err.message : String(err) };
+      return {
+        complete: false,
+        path,
+        reason: "provider_error",
+        detail: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -326,19 +388,27 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
     const { repository, commitSha } = subject;
     const records: CandidateCiRecord[] = [];
 
-    const checkRunsRes = await this.#api(`GET /repos/${repository}/commits/${commitSha}/check-runs`, { per_page: PER_PAGE });
-    const checkRuns = this.#parse(CheckRunsCi, checkRunsRes.data, `check-runs for ${commitSha}`).check_runs ?? [];
+    const checkRunsRes = await this.#api(
+      `GET /repos/${repository}/commits/${commitSha}/check-runs`,
+      { per_page: PER_PAGE },
+    );
+    const checkRuns =
+      this.#parse(CheckRunsCi, checkRunsRes.data, `check-runs for ${commitSha}`).check_runs ?? [];
     for (const run of checkRuns) {
       records.push({
         context: run.name,
         state: normalizeCheckRunConclusion(run.status, run.conclusion ?? null),
         sha: run.head_sha ?? commitSha,
         source: "check-run",
-        ...(run.completed_at ?? run.started_at ? { updatedAt: (run.completed_at ?? run.started_at)! } : {}),
+        ...((run.completed_at ?? run.started_at)
+          ? { updatedAt: (run.completed_at ?? run.started_at)! }
+          : {}),
       });
     }
 
-    const statusesRes = await this.#api(`GET /repos/${repository}/commits/${commitSha}/statuses`, { per_page: PER_PAGE });
+    const statusesRes = await this.#api(`GET /repos/${repository}/commits/${commitSha}/statuses`, {
+      per_page: PER_PAGE,
+    });
     const statuses = this.#parse(CommitStatusesCi, statusesRes.data, `statuses for ${commitSha}`);
     for (const status of statuses) {
       records.push({
@@ -353,16 +423,91 @@ export class GithubAppScmReader implements ScmReader, ScmInstallationReader {
     return { sha: commitSha, records };
   }
 
+  /**
+   * Exact-label open bug issues and all open pull requests, for report context
+   * only. The five-page bound is explicit in the returned gaps; context volume
+   * can never create an unbounded release-analysis call.
+   */
+  async getOpenReleaseWork(repository: string): Promise<RepositoryOpenWorkObservation> {
+    const bugIssues: RepositoryOpenWorkObservation["bugIssues"] = [];
+    const openPullRequests: RepositoryOpenWorkObservation["openPullRequests"] = [];
+    const gaps: string[] = [];
+
+    for (let page = 1; page <= OPEN_WORK_MAX_PAGES; page += 1) {
+      const res = await this.#api(`GET /repos/${repository}/issues`, {
+        state: "open",
+        labels: "bug",
+        per_page: PER_PAGE,
+        page,
+      });
+      const issues = this.#parse(OpenIssues, res.data, `open bug issues page ${page}`);
+      for (const issue of issues) {
+        if (issue.pull_request !== undefined) continue;
+        bugIssues.push({
+          number: issue.number,
+          url: issue.html_url,
+          title: issue.title,
+          labels: issue.labels.map((label) => (typeof label === "string" ? label : label.name)),
+          ...(issue.updated_at ? { updatedAt: issue.updated_at } : {}),
+        });
+      }
+      if (issues.length < PER_PAGE) break;
+      if (page === OPEN_WORK_MAX_PAGES) {
+        gaps.push(
+          `open bug issue listing reached the ${OPEN_WORK_MAX_PAGES * PER_PAGE}-item bound`,
+        );
+      }
+    }
+
+    for (let page = 1; page <= OPEN_WORK_MAX_PAGES; page += 1) {
+      const res = await this.#api(`GET /repos/${repository}/pulls`, {
+        state: "open",
+        per_page: PER_PAGE,
+        page,
+      });
+      const pulls = this.#parse(OpenPullRequests, res.data, `open pull requests page ${page}`);
+      for (const pr of pulls) {
+        openPullRequests.push({
+          number: pr.number,
+          url: pr.html_url,
+          title: pr.title,
+          draft: pr.draft,
+          headSha: pr.head.sha,
+          headBranch: pr.head.ref,
+          baseBranch: pr.base.ref,
+          ...(pr.user?.login ? { author: pr.user.login } : {}),
+          ...(pr.updated_at ? { updatedAt: pr.updated_at } : {}),
+        });
+      }
+      if (pulls.length < PER_PAGE) break;
+      if (page === OPEN_WORK_MAX_PAGES) {
+        gaps.push(
+          `open pull request listing reached the ${OPEN_WORK_MAX_PAGES * PER_PAGE}-item bound`,
+        );
+      }
+    }
+
+    bugIssues.sort((a, b) => a.number - b.number);
+    openPullRequests.sort((a, b) => a.number - b.number);
+    return { complete: gaps.length === 0, bugIssues, openPullRequests, gaps };
+  }
+
   #parse<T>(schema: z.ZodType<T>, data: unknown, what: string): T {
     const parsed = schema.safeParse(data);
-    if (!parsed.success) throw new Error(`github-app: unexpected ${what} response shape: ${parsed.error.message}`);
+    if (!parsed.success)
+      throw new Error(`github-app: unexpected ${what} response shape: ${parsed.error.message}`);
     return parsed.data;
   }
 }
 
 /** A numeric `status` off an unknown error (Octokit's RequestError carries one), or null. */
 function statusOf(err: unknown): number | null {
-  if (typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number") {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    typeof (err as { status: unknown }).status === "number"
+  ) {
     return (err as { status: number }).status;
   }
   return null;

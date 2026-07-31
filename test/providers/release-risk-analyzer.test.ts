@@ -21,7 +21,11 @@ import type { ChangedFile, RevisionRange } from "../../src/providers/scm/port.js
  *  - flooding past the risk cap without saying so.
  */
 
-const RANGE: RevisionRange = { repository: "acme/web", baseSha: "a".repeat(40), headSha: "b".repeat(40) };
+const RANGE: RevisionRange = {
+  repository: "acme/web",
+  baseSha: "a".repeat(40),
+  headSha: "b".repeat(40),
+};
 
 /** A new-file patch: added lines get new-file line numbers 1..N. */
 function newFilePatch(lines: string[]): string {
@@ -38,7 +42,21 @@ interface RawCitation {
 }
 
 function risk(category: string, citations: RawCitation[], over: Record<string, unknown> = {}) {
-  return { category, scenario: "a plausible failure", affectedSurface: "the pricing path", impact: "wrong charges", citations, ...over };
+  return {
+    category,
+    scenario: "a plausible failure",
+    affectedSurface: "the pricing path",
+    blastRadius: "all invoices produced while the candidate is deployed",
+    impact: "wrong charges",
+    reversibility: "future calculations recover after rollback; issued invoices require correction",
+    detectability: "invoice reconciliation and customer reports",
+    rollback: "restore the prior pricing implementation and reconcile affected invoices",
+    uncertainty: "production invoice volume is not visible in the diff",
+    supportingEvidence: ["the changed line alters the pricing calculation"],
+    contradictingEvidence: [],
+    citations,
+    ...over,
+  };
 }
 
 function envelope(risks: unknown[], summary = "the range changes pricing"): string {
@@ -51,7 +69,13 @@ function fakeModel(text: string): ModelProvider {
 
 describe("ModelReleaseRiskAnalyst", () => {
   it("anchors release risks to real changed lines", async () => {
-    const files = [file("src/pay.ts", ["const rate = 0.2;", "export const fee = rate * 100;", "export const tax = fee;"])];
+    const files = [
+      file("src/pay.ts", [
+        "const rate = 0.2;",
+        "export const fee = rate * 100;",
+        "export const tax = fee;",
+      ]),
+    ];
     // One risk cites a REAL added line; two cite fabrications (a ghost file and a
     // non-existent line in a real file). Only the real one may survive.
     const model = fakeModel(
@@ -67,6 +91,10 @@ describe("ModelReleaseRiskAnalyst", () => {
     // The real cited risk is retained as model-asserted evidence.
     expect(result.risks).toHaveLength(1);
     expect(result.risks[0]!.category).toBe("data-integrity");
+    expect(result.risks[0]!.blastRadius).toContain("all invoices");
+    expect(result.risks[0]!.detectability).toContain("reconciliation");
+    expect(result.risks[0]!.rollback).toContain("prior pricing");
+    expect(result.risks[0]!.supportingEvidence).toHaveLength(1);
     expect(result.risks[0]!.citations).toEqual([{ path: "src/pay.ts", line: 1 }]);
 
     // The fabricated citations cannot enter the report as a risk — anywhere.
@@ -96,7 +124,10 @@ describe("ModelReleaseRiskAnalyst", () => {
     expect(failed.reviewedLines).toBe(0);
 
     // (b) Malformed output — reached the model, cannot use what it said.
-    const malformed = await new ModelReleaseRiskAnalyst(fakeModel("I am not JSON at all")).assess(RANGE, files);
+    const malformed = await new ModelReleaseRiskAnalyst(fakeModel("I am not JSON at all")).assess(
+      RANGE,
+      files,
+    );
     expect(malformed.risks).toEqual([]);
     expect(malformed.gaps.map((g) => g.code)).toContain("unparseable_output");
 
@@ -105,7 +136,9 @@ describe("ModelReleaseRiskAnalyst", () => {
     //     prefix passed off as the whole range.
     const cap = MAX_ADDED_LINES_PER_CHUNK * MAX_CHUNKS;
     const big = Array.from({ length: cap + 25 }, (_, i) => `const v${i} = ${i};`);
-    const truncated = await new ModelReleaseRiskAnalyst(fakeModel(envelope([]))).assess(RANGE, [file("src/big.ts", big)]);
+    const truncated = await new ModelReleaseRiskAnalyst(fakeModel(envelope([]))).assess(RANGE, [
+      file("src/big.ts", big),
+    ]);
     expect(truncated.gaps.map((g) => g.code)).toContain("input_truncated");
     expect(truncated.reviewedLines).toBe(cap);
     expect(truncated.totalLines).toBe(cap + 25);
@@ -114,8 +147,12 @@ describe("ModelReleaseRiskAnalyst", () => {
     //     and the overflow is reported, never silently dropped.
     const count = MAX_RISKS + 5;
     const wide = Array.from({ length: count }, (_, i) => `const w${i} = ${i};`);
-    const manyRisks = Array.from({ length: count }, (_, i) => risk("operations", [{ path: "src/wide.ts", line: i + 1 }]));
-    const capped = await new ModelReleaseRiskAnalyst(fakeModel(envelope(manyRisks))).assess(RANGE, [file("src/wide.ts", wide)]);
+    const manyRisks = Array.from({ length: count }, (_, i) =>
+      risk("operations", [{ path: "src/wide.ts", line: i + 1 }]),
+    );
+    const capped = await new ModelReleaseRiskAnalyst(fakeModel(envelope(manyRisks))).assess(RANGE, [
+      file("src/wide.ts", wide),
+    ]);
     expect(capped.risks).toHaveLength(MAX_RISKS);
     expect(capped.gaps.map((g) => g.code)).toContain("output_capped");
   });
@@ -124,7 +161,13 @@ describe("ModelReleaseRiskAnalyst", () => {
     // Related changes in SEPARATE files: a rate constant in one, its consumer in
     // another. The analyst can represent their interaction with both changes in
     // the risk's evidence.
-    const files = [file("src/rate.ts", ["export const rate = 0.2;"]), file("src/invoice.ts", ["import { rate } from './rate';", "export const total = (n) => n * rate;"])];
+    const files = [
+      file("src/rate.ts", ["export const rate = 0.2;"]),
+      file("src/invoice.ts", [
+        "import { rate } from './rate';",
+        "export const total = (n) => n * rate;",
+      ]),
+    ];
     const model = fakeModel(
       envelope([
         risk("cross-change-interaction", [

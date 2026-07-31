@@ -1,0 +1,62 @@
+contract_version: 1
+title: "Make claude-cli completions fail closed and tool-free"
+depends_on: []
+scenarios:
+  - id: terminal-completion-is-returned
+    given:
+      - "the claude CLI exits zero with a valid JSON result envelope"
+      - "the envelope reports a successful terminal end_turn completion"
+    when:
+      - "ClaudeCliModelProvider completes a model request"
+    then:
+      - "the provider returns the envelope result text"
+      - "the provider preserves its configured model identity"
+  - id: incomplete-or-invalid-completion-is-rejected
+    given:
+      - "the claude CLI exits zero with a max_tokens, tool_use, error, malformed, or metadata-incomplete envelope"
+    when:
+      - "ClaudeCliModelProvider completes a model request"
+    then:
+      - "the provider rejects instead of returning partial output as a successful completion"
+  - id: cli-runs-without-agent-tools
+    given:
+      - "ClaudeCliModelProvider invokes the authenticated local claude CLI"
+    when:
+      - "it starts a completion subprocess"
+    then:
+      - "the invocation requests structured JSON output"
+      - "the invocation disables built-in tools and ambient MCP tool access"
+  - id: subprocess-safety-is-preserved
+    given:
+      - "the claude CLI hangs, floods output, exits non-zero, or closes stdin early"
+    when:
+      - "ClaudeCliModelProvider manages the subprocess"
+    then:
+      - "the existing timeout, output bounds, error reporting, and single-settlement behavior remain enforced"
+required_facts:
+  - id: fact-envelope-integrity-covered
+    proves:
+      - terminal-completion-is-returned
+      - incomplete-or-invalid-completion-is-rejected
+    kind: unit-test
+    artifact:
+      path: test/providers/claude-cli.test.ts
+      change: update
+    command: npm test -- --run test/providers/claude-cli.test.ts -t "completion envelope"
+  - id: fact-tool-free-argv-covered
+    proves:
+      - cli-runs-without-agent-tools
+    kind: unit-test
+    artifact:
+      path: test/providers/claude-cli.test.ts
+      change: update
+    command: npm test -- --run test/providers/claude-cli.test.ts -t "invocation isolation"
+  - id: fact-subprocess-guards-retained
+    proves:
+      - subprocess-safety-is-preserved
+    kind: unit-test
+    artifact:
+      path: test/providers/claude-cli.test.ts
+      change: update
+    command: npm test -- --run test/providers/claude-cli.test.ts -t "subprocess safety"
+human_review: []

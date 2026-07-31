@@ -40,6 +40,8 @@ export interface NightlyEvidenceFinding {
   visibility: FindingVisibility;
   visibilityReason: string;
   resolution: FindingResolution;
+  /** Published child finding issue, when one exists. */
+  issue: { number: number; url: string } | null;
   /** Null exactly when no remediation is owed (a suppressed finding). */
   remediation: { state: RemediationState; reason: string } | null;
   /** Null when nothing was ever proposed for this occurrence. */

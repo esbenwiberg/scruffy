@@ -13,6 +13,7 @@ import type {
   IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
+  RepositoryOpenWorkObservation,
   RevisionRange,
   ScmReader,
   ScmWriter,
@@ -58,6 +59,10 @@ const MAX_CONTENT_BYTES = 1_000_000;
  * (→ the gate abstains) rather than hang the blocking poison path forever. */
 const GH_TIMEOUT_MS = 60_000;
 
+/** Context is useful, but must never turn a report into an unbounded backlog crawl. */
+const OPEN_WORK_PER_PAGE = 100;
+const OPEN_WORK_MAX_PAGES = 5;
+
 function defaultRunGh(args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("gh", args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -90,7 +95,8 @@ function defaultRunGh(args: string[], stdin?: string): Promise<string> {
     child.on("close", (code) =>
       settle(() => {
         if (code === 0) resolve(stdout);
-        else reject(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim() || "no stderr"}`));
+        else
+          reject(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim() || "no stderr"}`));
       }),
     );
     child.stdin.end(stdin ?? "");
@@ -142,7 +148,11 @@ export class GhCliScm implements ScmReader, ScmWriter {
   async getChangedFiles(subject: SubjectRevision): Promise<ChangedFile[]> {
     const base = await this.#associatedPrBase(subject);
     if (base !== null) {
-      return this.getChangedFilesInRange({ repository: subject.repository, baseSha: base, headSha: subject.commitSha });
+      return this.getChangedFilesInRange({
+        repository: subject.repository,
+        baseSha: base,
+        headSha: subject.commitSha,
+      });
     }
     // No associated PR: fall back to the head commit's own file list. This is a
     // narrower change set than a full PR diff (truncated context), but well-defined.
@@ -203,7 +213,10 @@ export class GhCliScm implements ScmReader, ScmWriter {
    * Only open PRs count: falling back to a closed PR's base would compute the diff
    * over a stale, irrelevant range. No open PR -> null -> scan the commit itself. */
   async #associatedPrBase(subject: SubjectRevision): Promise<string | null> {
-    const raw = await this.#runGh(["api", `repos/${subject.repository}/commits/${subject.commitSha}/pulls`]);
+    const raw = await this.#runGh([
+      "api",
+      `repos/${subject.repository}/commits/${subject.commitSha}/pulls`,
+    ]);
     const prs = this.#parseJson(raw);
     if (!Array.isArray(prs)) return null;
     const open = prs.find((p) => p?.state === "open");
@@ -220,8 +233,14 @@ export class GhCliScm implements ScmReader, ScmWriter {
    */
   async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
     try {
-      const raw = await this.#runGh(["api", `repos/${subject.repository}/contents/${path}`, "-f", `ref=${subject.commitSha}`]);
-      const data = this.#parseJson(raw) as { type?: unknown; encoding?: unknown; content?: unknown } | unknown[] | null;
+      const raw = await this.#runGh([
+        "api",
+        `repos/${subject.repository}/contents/${path}`,
+        "-f",
+        `ref=${subject.commitSha}`,
+      ]);
+      const data = this.#parseJson(raw) as
+        { type?: unknown; encoding?: unknown; content?: unknown } | unknown[] | null;
       if (Array.isArray(data)) {
         return { complete: false, path, reason: "not_found", detail: "path is a directory" };
       }
@@ -232,7 +251,12 @@ export class GhCliScm implements ScmReader, ScmWriter {
         return { complete: false, path, reason: "not_found", detail: `path is a ${data.type}` };
       }
       if (data.encoding !== "base64" || typeof data.content !== "string") {
-        return { complete: false, path, reason: "oversized", detail: "content not inline (file too large for the contents API)" };
+        return {
+          complete: false,
+          path,
+          reason: "oversized",
+          detail: "content not inline (file too large for the contents API)",
+        };
       }
       const buffer = Buffer.from(data.content, "base64");
       if (buffer.byteLength > MAX_CONTENT_BYTES) {
@@ -244,7 +268,12 @@ export class GhCliScm implements ScmReader, ScmWriter {
       return { complete: true, path, content: buffer.toString("utf8") };
     } catch (err) {
       if (isGhNotFound(err)) return { complete: false, path, reason: "not_found" };
-      return { complete: false, path, reason: "provider_error", detail: err instanceof Error ? err.message : String(err) };
+      return {
+        complete: false,
+        path,
+        reason: "provider_error",
+        detail: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -260,8 +289,13 @@ export class GhCliScm implements ScmReader, ScmWriter {
     const { repository, commitSha } = subject;
     const records: CandidateCiRecord[] = [];
 
-    const checkRunsRaw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}/check-runs?per_page=100`]);
-    const checkRuns = this.#parseCheckRuns((this.#parseJson(checkRunsRaw) as { check_runs?: unknown } | null)?.check_runs);
+    const checkRunsRaw = await this.#runGh([
+      "api",
+      `repos/${repository}/commits/${commitSha}/check-runs?per_page=100`,
+    ]);
+    const checkRuns = this.#parseCheckRuns(
+      (this.#parseJson(checkRunsRaw) as { check_runs?: unknown } | null)?.check_runs,
+    );
     for (const run of checkRuns) {
       records.push({
         context: run.name,
@@ -270,11 +304,16 @@ export class GhCliScm implements ScmReader, ScmWriter {
         // detectable downstream rather than assumed to match the candidate.
         sha: typeof run.head_sha === "string" ? run.head_sha : commitSha,
         source: "check-run",
-        ...(run.completed_at ?? run.started_at ? { updatedAt: (run.completed_at ?? run.started_at)! } : {}),
+        ...((run.completed_at ?? run.started_at)
+          ? { updatedAt: (run.completed_at ?? run.started_at)! }
+          : {}),
       });
     }
 
-    const statusesRaw = await this.#runGh(["api", `repos/${repository}/commits/${commitSha}/statuses?per_page=100`]);
+    const statusesRaw = await this.#runGh([
+      "api",
+      `repos/${repository}/commits/${commitSha}/statuses?per_page=100`,
+    ]);
     const statuses = this.#parseStatuses(this.#parseJson(statusesRaw));
     for (const status of statuses) {
       // The statuses endpoint is per-sha, so each record binds to the requested candidate.
@@ -288,6 +327,74 @@ export class GhCliScm implements ScmReader, ScmWriter {
     }
 
     return { sha: commitSha, records };
+  }
+
+  /**
+   * Context-only release snapshot: exact-label open bugs plus every open PR.
+   * Reads at most 500 of each; reaching the bound returns the observed records
+   * with an explicit gap rather than walking an unbounded repository backlog.
+   */
+  async getOpenReleaseWork(repository: string): Promise<RepositoryOpenWorkObservation> {
+    const gaps: string[] = [];
+    const bugIssues: RepositoryOpenWorkObservation["bugIssues"] = [];
+    const openPullRequests: RepositoryOpenWorkObservation["openPullRequests"] = [];
+
+    for (let page = 1; page <= OPEN_WORK_MAX_PAGES; page += 1) {
+      const raw = await this.#runGh([
+        "api",
+        `repos/${repository}/issues?state=open&labels=bug&per_page=${OPEN_WORK_PER_PAGE}&page=${page}`,
+      ]);
+      const issues = this.#parseOpenIssues(this.#parseJson(raw));
+      for (const issue of issues) {
+        // GitHub's issues endpoint also returns pull requests. PRs belong in the
+        // complete open-PR listing below, never masquerading as bug issues.
+        if (issue.pull_request !== undefined) continue;
+        bugIssues.push({
+          number: issue.number,
+          url: issue.html_url,
+          title: issue.title,
+          labels: issue.labels.map((label) => (typeof label === "string" ? label : label.name)),
+          ...(issue.updated_at ? { updatedAt: issue.updated_at } : {}),
+        });
+      }
+      if (issues.length < OPEN_WORK_PER_PAGE) break;
+      if (page === OPEN_WORK_MAX_PAGES) {
+        gaps.push(
+          `open bug issue listing reached the ${OPEN_WORK_MAX_PAGES * OPEN_WORK_PER_PAGE}-item bound`,
+        );
+      }
+    }
+
+    for (let page = 1; page <= OPEN_WORK_MAX_PAGES; page += 1) {
+      const raw = await this.#runGh([
+        "api",
+        `repos/${repository}/pulls?state=open&per_page=${OPEN_WORK_PER_PAGE}&page=${page}`,
+      ]);
+      const pulls = this.#parseOpenPullRequests(this.#parseJson(raw));
+      for (const pr of pulls) {
+        openPullRequests.push({
+          number: pr.number,
+          url: pr.html_url,
+          title: pr.title,
+          draft: pr.draft,
+          headSha: pr.head.sha,
+          headBranch: pr.head.ref,
+          baseBranch: pr.base.ref,
+          ...(pr.user?.login ? { author: pr.user.login } : {}),
+          ...(pr.updated_at ? { updatedAt: pr.updated_at } : {}),
+        });
+      }
+      if (pulls.length < OPEN_WORK_PER_PAGE) break;
+      if (page === OPEN_WORK_MAX_PAGES) {
+        gaps.push(
+          `open pull request listing reached the ${OPEN_WORK_MAX_PAGES * OPEN_WORK_PER_PAGE}-item bound`,
+        );
+      }
+    }
+
+    bugIssues.sort((a, b) => a.number - b.number);
+    openPullRequests.sort((a, b) => a.number - b.number);
+    return { complete: gaps.length === 0, bugIssues, openPullRequests, gaps };
   }
 
   // ── Writer (check-run effect -> commit status) ───────────────────────────────
@@ -320,14 +427,19 @@ export class GhCliScm implements ScmReader, ScmWriter {
     //     a check-run does, and probing for one would need an extra GET on this
     //     blocking write path (plus a TOCTOU race) for a value callers must treat as
     //     advisory anyway. It is left true; effects MUST NOT gate on it.
-    const id = String((this.#parseJson(raw) as { id?: unknown } | null)?.id ?? `${repository}@${commitSha}#${input.name}`);
+    const id = String(
+      (this.#parseJson(raw) as { id?: unknown } | null)?.id ??
+        `${repository}@${commitSha}#${input.name}`,
+    );
     return { id, created: true };
   }
 
   async openPullRequest(_input: PullRequestInput): Promise<PullRequestResult> {
     // Fix-PR writes are a later slice. Fail LOUDLY so a stray pull_request effect is
     // left pending by the dispatcher, never silently dropped.
-    throw new Error("openPullRequest is not enabled in the gh-cli adapter (poison posts a commit status only)");
+    throw new Error(
+      "openPullRequest is not enabled in the gh-cli adapter (poison posts a commit status only)",
+    );
   }
 
   // ── Writer (work-item issues) ────────────────────────────────────────────────
@@ -397,6 +509,46 @@ export class GhCliScm implements ScmReader, ScmWriter {
     }
     return statuses as GhStatus[];
   }
+
+  #parseOpenIssues(value: unknown): GhOpenIssue[] {
+    if (!Array.isArray(value)) throw new Error("gh response: open bug issues are not an array");
+    for (const issue of value) {
+      if (
+        typeof issue?.number !== "number" ||
+        typeof issue?.html_url !== "string" ||
+        typeof issue?.title !== "string" ||
+        !Array.isArray(issue?.labels) ||
+        issue.labels.some(
+          (label: unknown) =>
+            typeof label !== "string" &&
+            (typeof label !== "object" ||
+              label === null ||
+              typeof (label as { name?: unknown }).name !== "string"),
+        )
+      ) {
+        throw new Error("gh response: an open bug issue has an unexpected shape");
+      }
+    }
+    return value as GhOpenIssue[];
+  }
+
+  #parseOpenPullRequests(value: unknown): GhOpenPullRequest[] {
+    if (!Array.isArray(value)) throw new Error("gh response: open pull requests are not an array");
+    for (const pr of value) {
+      if (
+        typeof pr?.number !== "number" ||
+        typeof pr?.html_url !== "string" ||
+        typeof pr?.title !== "string" ||
+        typeof pr?.draft !== "boolean" ||
+        typeof pr?.head?.sha !== "string" ||
+        typeof pr?.head?.ref !== "string" ||
+        typeof pr?.base?.ref !== "string"
+      ) {
+        throw new Error("gh response: an open pull request has an unexpected shape");
+      }
+    }
+    return value as GhOpenPullRequest[];
+  }
 }
 
 /** A GitHub check-run entry (candidate-CI read). Only the fields we normalize. */
@@ -416,6 +568,26 @@ interface GhStatus {
   updated_at?: string;
 }
 
+interface GhOpenIssue {
+  number: number;
+  html_url: string;
+  title: string;
+  labels: (string | { name: string })[];
+  updated_at?: string;
+  pull_request?: unknown;
+}
+
+interface GhOpenPullRequest {
+  number: number;
+  html_url: string;
+  title: string;
+  draft: boolean;
+  head: { sha: string; ref: string };
+  base: { ref: string };
+  user?: { login?: string } | null;
+  updated_at?: string;
+}
+
 /** True when a `gh api` rejection is GitHub's 404, as reported in `gh`'s stderr text
  * (the CLI gives no structured status code, only "gh: Not Found (HTTP 404)"). */
 function isGhNotFound(err: unknown): boolean {
@@ -431,7 +603,9 @@ function isBinary(buffer: Buffer): boolean {
 
 /** Poison/gate conclusion -> commit-status state. Statuses have no `neutral`; an
  * abstention (indeterminate -> neutral) maps to `pending` (the non-committal state). */
-export function conclusionToState(conclusion: CheckRunInput["conclusion"]): "success" | "failure" | "pending" {
+export function conclusionToState(
+  conclusion: CheckRunInput["conclusion"],
+): "success" | "failure" | "pending" {
   switch (conclusion) {
     case "success":
       return "success";

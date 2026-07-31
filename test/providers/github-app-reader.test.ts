@@ -17,7 +17,12 @@ const SUBJECT: SubjectRevision = { repository: REPO, commitSha: HEAD };
 
 type Call = { route: string; params: Record<string, unknown> | undefined };
 
-function stub(handlers: { match: (route: string) => boolean; reply: (call: Call) => { status: number; data: unknown } }[]): {
+function stub(
+  handlers: {
+    match: (route: string) => boolean;
+    reply: (call: Call) => { status: number; data: unknown };
+  }[],
+): {
   api: GhApi;
   calls: Call[];
 } {
@@ -37,7 +42,11 @@ function httpError(status: number, message = `HTTP ${status}`): Error & { status
 }
 
 const ok = (data: unknown) => ({ status: 200, data });
-const file = (name: string, patch = `@@ -0,0 +1 @@\n+${name}`) => ({ filename: name, patch, additions: 1 });
+const file = (name: string, patch = `@@ -0,0 +1 @@\n+${name}`) => ({
+  filename: name,
+  patch,
+  additions: 1,
+});
 
 const isPulls = (r: string) => r.includes("/commits/") && r.endsWith("/pulls");
 const isCommit = (r: string) => r.includes("/commits/") && !r.endsWith("/pulls");
@@ -54,7 +63,9 @@ describe("GithubAppScmReader getChangedFiles", () => {
     const files = await reader.getChangedFiles(SUBJECT);
 
     expect(files.map((f) => f.path)).toEqual(["src/a.ts", "src/b.ts"]);
-    expect(calls.some((c) => isCompare(c.route) && c.route.includes(`${BASE}...${HEAD}`))).toBe(true);
+    expect(calls.some((c) => isCompare(c.route) && c.route.includes(`${BASE}...${HEAD}`))).toBe(
+      true,
+    );
   });
 
   it("falls back to the commit's own files when there is no open PR", async () => {
@@ -86,10 +97,16 @@ describe("GithubAppScmReader getChangedFiles", () => {
 
 describe("GithubAppScmReader getChangedFilesInRange", () => {
   it("a null base reads the head commit's own change set (never widened by an open PR)", async () => {
-    const { api, calls } = stub([{ match: isCommit, reply: () => ok({ files: [file("src/first.ts")] }) }]);
+    const { api, calls } = stub([
+      { match: isCommit, reply: () => ok({ files: [file("src/first.ts")] }) },
+    ]);
     const reader = new GithubAppScmReader({ api });
 
-    const files = await reader.getChangedFilesInRange({ repository: REPO, baseSha: null, headSha: HEAD });
+    const files = await reader.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: null,
+      headSha: HEAD,
+    });
 
     expect(files.map((f) => f.path)).toEqual(["src/first.ts"]);
     expect(calls.some((c) => isPulls(c.route) || isCompare(c.route))).toBe(false);
@@ -106,7 +123,11 @@ describe("GithubAppScmReader getChangedFilesInRange", () => {
     ]);
     const reader = new GithubAppScmReader({ api });
 
-    const files = await reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD });
+    const files = await reader.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: BASE,
+      headSha: HEAD,
+    });
 
     expect(files).toHaveLength(101);
     expect(calls.filter((c) => isCompare(c.route))).toHaveLength(2); // stopped on the short page
@@ -117,7 +138,11 @@ describe("GithubAppScmReader getChangedFilesInRange", () => {
     const { api, calls } = stub([{ match: isCompare, reply: () => ok({ files: sameFullPage }) }]);
     const reader = new GithubAppScmReader({ api });
 
-    const files = await reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD });
+    const files = await reader.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: BASE,
+      headSha: HEAD,
+    });
 
     expect(files).toHaveLength(100);
     expect(calls.filter((c) => isCompare(c.route))).toHaveLength(2); // page 2 added nothing new -> stop
@@ -135,16 +160,20 @@ describe("GithubAppScmReader getChangedFilesInRange", () => {
     ]);
     const reader = new GithubAppScmReader({ api });
 
-    await expect(reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/cap/);
+    await expect(
+      reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/cap/);
   });
 
   it("THROWS on a file with added lines but no patch (too large to diff — must not read as clean)", async () => {
-    const { api } = stub([{ match: isCompare, reply: () => ok({ files: [{ filename: "big.bin", additions: 42 }] }) }]);
+    const { api } = stub([
+      { match: isCompare, reply: () => ok({ files: [{ filename: "big.bin", additions: 42 }] }) },
+    ]);
     const reader = new GithubAppScmReader({ api });
 
-    await expect(reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(
-      /too large to diff/,
-    );
+    await expect(
+      reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/too large to diff/);
   });
 });
 
@@ -154,9 +183,21 @@ describe("GithubAppScmReader candidate CI", () => {
 
   const checkRuns = {
     check_runs: [
-      { name: "ci/build", status: "completed", conclusion: "success", head_sha: HEAD, completed_at: "2026-07-20T10:00:00Z" },
+      {
+        name: "ci/build",
+        status: "completed",
+        conclusion: "success",
+        head_sha: HEAD,
+        completed_at: "2026-07-20T10:00:00Z",
+      },
       { name: "ci/lint", status: "queued", conclusion: null, head_sha: HEAD },
-      { name: "ci/e2e", status: "completed", conclusion: "timed_out", head_sha: HEAD, completed_at: "2026-07-20T10:09:00Z" },
+      {
+        name: "ci/e2e",
+        status: "completed",
+        conclusion: "timed_out",
+        head_sha: HEAD,
+        completed_at: "2026-07-20T10:09:00Z",
+      },
     ],
   };
   const statuses = [
@@ -176,11 +217,35 @@ describe("GithubAppScmReader candidate CI", () => {
     expect(evidence.sha).toBe(HEAD);
     expect(evidence.records).toEqual(
       expect.arrayContaining([
-        { context: "ci/build", state: "success", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:00:00Z" },
+        {
+          context: "ci/build",
+          state: "success",
+          sha: HEAD,
+          source: "check-run",
+          updatedAt: "2026-07-20T10:00:00Z",
+        },
         { context: "ci/lint", state: "pending", sha: HEAD, source: "check-run" }, // not completed -> pending
-        { context: "ci/e2e", state: "timed-out", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:09:00Z" },
-        { context: "ci/test", state: "success", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:00:00Z" },
-        { context: "legacy/deploy", state: "error", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:02:00Z" },
+        {
+          context: "ci/e2e",
+          state: "timed-out",
+          sha: HEAD,
+          source: "check-run",
+          updatedAt: "2026-07-20T10:09:00Z",
+        },
+        {
+          context: "ci/test",
+          state: "success",
+          sha: HEAD,
+          source: "commit-status",
+          updatedAt: "2026-07-20T11:00:00Z",
+        },
+        {
+          context: "legacy/deploy",
+          state: "error",
+          sha: HEAD,
+          source: "commit-status",
+          updatedAt: "2026-07-20T11:02:00Z",
+        },
       ]),
     );
     expect(evidence.records.every((r) => r.sha === HEAD)).toBe(true);
@@ -198,14 +263,83 @@ describe("GithubAppScmReader candidate CI", () => {
       },
       { match: isCiStatuses, reply: () => ok([]) },
     ]);
-    await expect(new GithubAppScmReader({ api: failing }).getCandidateCi(SUBJECT)).rejects.toThrow(/500/);
+    await expect(new GithubAppScmReader({ api: failing }).getCandidateCi(SUBJECT)).rejects.toThrow(
+      /500/,
+    );
 
     // A malformed check-runs shape is schema-parsed and throws, never []-as-success.
     const { api: malformed } = stub([
       { match: isCheckRuns, reply: () => ok({ check_runs: [{ status: "completed" }] }) }, // missing `name`
       { match: isCiStatuses, reply: () => ok([]) },
     ]);
-    await expect(new GithubAppScmReader({ api: malformed }).getCandidateCi(SUBJECT)).rejects.toThrow(/unexpected/);
+    await expect(
+      new GithubAppScmReader({ api: malformed }).getCandidateCi(SUBJECT),
+    ).rejects.toThrow(/unexpected/);
+  });
+});
+
+describe("GithubAppScmReader release context", () => {
+  it("reads exact-label bug issues and all open PRs", async () => {
+    const { api, calls } = stub([
+      {
+        match: (route) => route === `GET /repos/${REPO}/issues`,
+        reply: () =>
+          ok([
+            {
+              number: 7,
+              html_url: "https://github.com/acme/widgets/issues/7",
+              title: "Widget corrupts cache",
+              labels: [{ name: "bug" }],
+              updated_at: "2026-07-31T10:00:00Z",
+            },
+            {
+              number: 8,
+              html_url: "https://github.com/acme/widgets/pull/8",
+              title: "PR from issues endpoint",
+              labels: ["bug"],
+              pull_request: {},
+            },
+          ]),
+      },
+      {
+        match: (route) => route === `GET /repos/${REPO}/pulls`,
+        reply: () =>
+          ok([
+            {
+              number: 8,
+              html_url: "https://github.com/acme/widgets/pull/8",
+              title: "Fix cache corruption",
+              draft: false,
+              head: { sha: HEAD, ref: "fix/cache" },
+              base: { ref: "main" },
+              user: { login: "alice" },
+              updated_at: "2026-07-31T11:00:00Z",
+            },
+          ]),
+      },
+    ]);
+    const reader = new GithubAppScmReader({ api });
+
+    const work = await reader.getOpenReleaseWork(REPO);
+
+    expect(work.complete).toBe(true);
+    expect(work.bugIssues).toHaveLength(1); // PR-shaped issue is filtered
+    expect(work.bugIssues[0]).toMatchObject({ number: 7, labels: ["bug"] });
+    expect(work.openPullRequests[0]).toMatchObject({ number: 8, headSha: HEAD, author: "alice" });
+    expect(calls.find((call) => call.route.endsWith("/issues"))?.params).toMatchObject({
+      labels: "bug",
+      state: "open",
+    });
+  });
+
+  it("throws on malformed release context", async () => {
+    const { api } = stub([
+      { match: (route) => route.endsWith("/issues"), reply: () => ok([{ number: 7 }]) },
+      { match: (route) => route.endsWith("/pulls"), reply: () => ok([]) },
+    ]);
+    await expect(new GithubAppScmReader({ api }).getOpenReleaseWork(REPO)).rejects.toThrow(
+      /unexpected open bug issues/,
+    );
   });
 });
 
@@ -221,14 +355,18 @@ describe("GithubAppScmReader error discipline", () => {
     ]);
     const reader = new GithubAppScmReader({ api });
 
-    await expect(reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/500/);
+    await expect(
+      reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/500/);
   });
 
   it("THROWS on an unexpected response shape (external boundary is schema-parsed)", async () => {
     const { api } = stub([{ match: isCompare, reply: () => ok({ files: "not-an-array" }) }]);
     const reader = new GithubAppScmReader({ api });
 
-    await expect(reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/unexpected/);
+    await expect(
+      reader.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/unexpected/);
   });
 });
 
@@ -244,7 +382,11 @@ describe("GithubAppScmReader error discipline", () => {
 const isInstallation = (r: string) => r === "GET /installation/repositories";
 const isBranch = (r: string) => r.includes("/branches/");
 
-const installedRepo = (name: string, defaultBranch: string, extra: Record<string, unknown> = {}) => ({
+const installedRepo = (
+  name: string,
+  defaultBranch: string,
+  extra: Record<string, unknown> = {},
+) => ({
   id: 100 + name.length,
   full_name: name,
   default_branch: defaultBranch,
@@ -260,7 +402,8 @@ describe("GithubAppScmReader listInstalledRepositories", () => {
     const { api, calls } = stub([
       {
         match: isInstallation,
-        reply: (call) => ok({ total_count: 3, repositories: pages[Number(call.params?.page ?? 1)] ?? [] }),
+        reply: (call) =>
+          ok({ total_count: 3, repositories: pages[Number(call.params?.page ?? 1)] ?? [] }),
       },
     ]);
     const reader = new GithubAppScmReader({ api });
@@ -281,7 +424,10 @@ describe("GithubAppScmReader listInstalledRepositories", () => {
 
   it("stops after one page when the first page already holds every repository", async () => {
     const { api, calls } = stub([
-      { match: isInstallation, reply: () => ok({ total_count: 1, repositories: [installedRepo("acme/widgets", "main")] }) },
+      {
+        match: isInstallation,
+        reply: () => ok({ total_count: 1, repositories: [installedRepo("acme/widgets", "main")] }),
+      },
     ]);
     const reader = new GithubAppScmReader({ api });
 
@@ -290,7 +436,9 @@ describe("GithubAppScmReader listInstalledRepositories", () => {
   });
 
   it("returns [] for an installation that genuinely has no repositories", async () => {
-    const { api } = stub([{ match: isInstallation, reply: () => ok({ total_count: 0, repositories: [] }) }]);
+    const { api } = stub([
+      { match: isInstallation, reply: () => ok({ total_count: 0, repositories: [] }) },
+    ]);
     const reader = new GithubAppScmReader({ api });
 
     expect(await reader.listInstalledRepositories()).toEqual([]);
@@ -305,7 +453,8 @@ describe("GithubAppScmReader listInstalledRepositories", () => {
         reply: (call) =>
           ok({
             total_count: 5,
-            repositories: Number(call.params?.page ?? 1) === 1 ? [installedRepo("acme/widgets", "main")] : [],
+            repositories:
+              Number(call.params?.page ?? 1) === 1 ? [installedRepo("acme/widgets", "main")] : [],
           }),
       },
     ]);
@@ -329,10 +478,14 @@ describe("GithubAppScmReader listInstalledRepositories", () => {
   });
 
   it("THROWS on an unexpected listing shape", async () => {
-    const { api } = stub([{ match: isInstallation, reply: () => ok({ repositories: [{ full_name: "acme/widgets" }] }) }]);
+    const { api } = stub([
+      { match: isInstallation, reply: () => ok({ repositories: [{ full_name: "acme/widgets" }] }) },
+    ]);
     const reader = new GithubAppScmReader({ api });
 
-    await expect(reader.listInstalledRepositories()).rejects.toThrow(/unexpected installation repositories/);
+    await expect(reader.listInstalledRepositories()).rejects.toThrow(
+      /unexpected installation repositories/,
+    );
   });
 });
 

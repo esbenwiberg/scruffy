@@ -1,0 +1,1669 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#090b0d" />
+    <title>Scruffy — Noise is not safety</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #f3f0e8;
+        --muted: #9ba2a4;
+        --dim: #596063;
+        --bg: #090b0d;
+        --panel: #111519;
+        --line: #252b2f;
+        --acid: #c8ff38;
+        --cyan: #5de4e7;
+        --amber: #ffbd59;
+        --red: #ff625f;
+        --violet: #b49cff;
+        --pad: clamp(1.4rem, 4.5vw, 5.5rem);
+        --radius: 1rem;
+        --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        --sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+      }
+      button:focus-visible,
+      [tabindex]:focus-visible {
+        outline: 2px solid var(--acid);
+        outline-offset: 4px;
+      }
+
+      .deck {
+        height: 100%;
+        position: relative;
+        isolation: isolate;
+      }
+      .deck::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 20;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+        background-size: 4rem 4rem;
+        mask-image: linear-gradient(to bottom, black, transparent 88%);
+      }
+
+      .slide {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        padding: max(1.25rem, env(safe-area-inset-top)) var(--pad)
+          max(1.25rem, env(safe-area-inset-bottom));
+        opacity: 0;
+        visibility: hidden;
+        transform: translateX(2.5rem);
+        transition:
+          opacity 0.38s ease,
+          transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1),
+          visibility 0.38s;
+        overflow: auto;
+        scrollbar-width: none;
+      }
+      .slide::-webkit-scrollbar {
+        display: none;
+      }
+      .slide.active {
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        z-index: 2;
+      }
+      .slide.was-active {
+        transform: translateX(-2.5rem);
+      }
+
+      .slide-head,
+      .slide-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        position: relative;
+        z-index: 3;
+      }
+      .slide-head {
+        min-height: 2.5rem;
+      }
+      .slide-foot {
+        align-self: end;
+        padding-inline: 5rem 7rem;
+        color: var(--dim);
+        font: 600 0.68rem/1 var(--mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+      .eyebrow {
+        color: var(--acid);
+        font: 700 0.68rem/1 var(--mono);
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .section-label {
+        color: var(--dim);
+        font: 600 0.65rem/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .content {
+        align-self: center;
+        width: 100%;
+        max-width: 92rem;
+        margin: 0 auto;
+        padding: clamp(1rem, 3vh, 2.8rem) 0;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: clamp(3.6rem, 11vw, 10rem);
+        line-height: 0.82;
+        letter-spacing: -0.075em;
+        font-weight: 850;
+      }
+      h2 {
+        max-width: 17ch;
+        font-size: clamp(2.35rem, 6.2vw, 6.7rem);
+        line-height: 0.93;
+        letter-spacing: -0.055em;
+        font-weight: 800;
+        text-wrap: balance;
+      }
+      h3 {
+        font-size: clamp(1.05rem, 1.7vw, 1.55rem);
+        line-height: 1.1;
+        letter-spacing: -0.025em;
+      }
+      .lede {
+        max-width: 46rem;
+        margin-top: 1.7rem;
+        color: var(--muted);
+        font-size: clamp(1rem, 1.65vw, 1.5rem);
+        line-height: 1.45;
+        text-wrap: balance;
+      }
+      .huge {
+        font-size: clamp(4rem, 13vw, 12rem);
+        line-height: 0.8;
+        font-weight: 850;
+        letter-spacing: -0.08em;
+      }
+      .acid {
+        color: var(--acid);
+      }
+      .cyan {
+        color: var(--cyan);
+      }
+      .amber {
+        color: var(--amber);
+      }
+      .red {
+        color: var(--red);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .strike {
+        color: var(--dim);
+        text-decoration: line-through;
+        text-decoration-thickness: 0.06em;
+      }
+      .mono {
+        font-family: var(--mono);
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(19rem, 0.9fr);
+        gap: clamp(2rem, 6vw, 7rem);
+        align-items: center;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.8rem;
+        margin-top: 2.2rem;
+      }
+      .card {
+        min-width: 0;
+        padding: clamp(1rem, 2vw, 1.7rem);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: linear-gradient(145deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.008));
+      }
+      .card .num {
+        display: block;
+        margin-bottom: 1.2rem;
+        color: var(--dim);
+        font: 700 0.7rem/1 var(--mono);
+      }
+      .card p {
+        margin-top: 0.65rem;
+        color: var(--muted);
+        font-size: clamp(0.83rem, 1.15vw, 1.02rem);
+        line-height: 1.45;
+      }
+      .card[data-tone="acid"] {
+        border-color: color-mix(in srgb, var(--acid) 35%, var(--line));
+      }
+      .card[data-tone="cyan"] {
+        border-color: color-mix(in srgb, var(--cyan) 35%, var(--line));
+      }
+      .card[data-tone="amber"] {
+        border-color: color-mix(in srgb, var(--amber) 35%, var(--line));
+      }
+
+      .agent-field {
+        position: relative;
+        min-height: min(52vh, 32rem);
+        border: 1px solid var(--line);
+        border-radius: 1.5rem;
+        overflow: hidden;
+        background: radial-gradient(circle at 50% 50%, rgba(200, 255, 56, 0.07), transparent 42%);
+      }
+      .agent-field::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          repeating-linear-gradient(0deg, transparent 0 2.2rem, rgba(255, 255, 255, 0.035) 2.25rem),
+          repeating-linear-gradient(90deg, transparent 0 2.2rem, rgba(255, 255, 255, 0.035) 2.25rem);
+      }
+      .agents {
+        position: absolute;
+        inset: 1.4rem;
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        gap: 0.55rem;
+        align-content: center;
+      }
+      .agent {
+        aspect-ratio: 1;
+        border: 1px solid color-mix(in srgb, var(--acid) 25%, var(--line));
+        border-radius: 0.35rem;
+        background: rgba(200, 255, 56, 0.08);
+        display: grid;
+        place-items: center;
+        color: var(--acid);
+        font: 700 clamp(0.55rem, 0.8vw, 0.75rem)/1 var(--mono);
+      }
+      .agent:nth-child(3n) {
+        transform: translateY(-0.35rem);
+      }
+      .agent:nth-child(4n) {
+        border-color: rgba(93, 228, 231, 0.35);
+        color: var(--cyan);
+        background: rgba(93, 228, 231, 0.07);
+      }
+      .human-node {
+        position: absolute;
+        bottom: 1.2rem;
+        right: 1.2rem;
+        padding: 0.8rem 1rem;
+        background: var(--ink);
+        color: var(--bg);
+        border-radius: 99px;
+        font: 800 0.72rem/1 var(--mono);
+        box-shadow: 0 0 0 0.45rem rgba(255, 255, 255, 0.06);
+      }
+
+      .collapse {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto 1fr;
+        gap: 1rem;
+        align-items: stretch;
+        margin-top: 3rem;
+      }
+      .collapse-item {
+        min-height: 12rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 1.4rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+      }
+      .collapse-item b {
+        font-size: clamp(1.3rem, 2.5vw, 2.5rem);
+        letter-spacing: -0.04em;
+      }
+      .collapse-item span {
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .arrow {
+        align-self: center;
+        color: var(--red);
+        font-size: 2rem;
+      }
+
+      .equation {
+        margin-top: 2.2rem;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        font: 750 clamp(1.1rem, 2.5vw, 2.25rem)/1.2 var(--mono);
+      }
+      .equation .pill {
+        padding: 0.7em 0.9em;
+        border: 1px solid var(--line);
+        border-radius: 99px;
+        background: var(--panel);
+      }
+
+      .gates {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.9rem;
+        margin-top: 2.5rem;
+      }
+      .gate {
+        position: relative;
+        min-height: clamp(17rem, 38vh, 27rem);
+        padding: clamp(1.2rem, 2.3vw, 2rem);
+        border: 1px solid var(--line);
+        border-radius: 1.3rem;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .gate::after {
+        content: attr(data-order);
+        position: absolute;
+        right: -0.04em;
+        bottom: -0.22em;
+        color: rgba(255, 255, 255, 0.035);
+        font-size: 11rem;
+        font-weight: 900;
+        line-height: 1;
+      }
+      .gate.poison {
+        border-top: 3px solid var(--red);
+      }
+      .gate.nightly {
+        border-top: 3px solid var(--cyan);
+      }
+      .gate.release {
+        border-top: 3px solid var(--amber);
+      }
+      .gate .when {
+        color: var(--dim);
+        font: 700 0.68rem/1 var(--mono);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+      .gate h3 {
+        margin-top: 1rem;
+        font-size: clamp(1.6rem, 3vw, 2.7rem);
+      }
+      .gate p {
+        margin-top: 1rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+      .gate .authority {
+        margin-top: auto;
+        padding-top: 2rem;
+        font: 750 0.76rem/1.4 var(--mono);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .kernel {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto 1fr;
+        align-items: center;
+        gap: clamp(0.6rem, 2vw, 2rem);
+        margin-top: 2.5rem;
+      }
+      .kernel-box {
+        min-height: 11rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 1.25rem;
+        display: grid;
+        align-content: center;
+        text-align: center;
+      }
+      .kernel-box strong {
+        font-size: clamp(1.2rem, 2vw, 2rem);
+      }
+      .kernel-box small {
+        margin-top: 0.6rem;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .kernel-arrow {
+        color: var(--dim);
+        font-size: 1.5rem;
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        margin-top: 2.5rem;
+        counter-reset: step;
+      }
+      .timeline > div {
+        position: relative;
+        padding: 2.4rem 1rem 0 0;
+        border-top: 2px solid var(--line);
+        counter-increment: step;
+      }
+      .timeline > div::before {
+        content: counter(step);
+        position: absolute;
+        top: -0.85rem;
+        left: 0;
+        width: 1.6rem;
+        height: 1.6rem;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--cyan);
+        color: var(--bg);
+        font: 800 0.7rem/1 var(--mono);
+      }
+      .timeline h3 {
+        margin-bottom: 0.6rem;
+      }
+      .timeline p {
+        max-width: 16rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
+
+      .trust {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-top: 2.4rem;
+      }
+      .trust-zone {
+        padding: clamp(1.3rem, 2.5vw, 2.2rem);
+        border: 1px solid var(--line);
+        border-radius: 1.2rem;
+      }
+      .trust-zone:first-child {
+        border-color: rgba(93, 228, 231, 0.3);
+      }
+      .trust-zone:last-child {
+        border-color: rgba(200, 255, 56, 0.3);
+      }
+      .trust-zone ul {
+        list-style: none;
+        margin: 1.3rem 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.72rem;
+      }
+      .trust-zone li {
+        color: var(--muted);
+      }
+      .trust-zone li::before {
+        content: "—";
+        margin-right: 0.7rem;
+        color: var(--dim);
+      }
+      .boundary {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        gap: 0.9rem;
+        color: var(--red);
+        font: 750 0.72rem/1 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .boundary::before,
+      .boundary::after {
+        content: "";
+        height: 1px;
+        flex: 1;
+        background: repeating-linear-gradient(90deg, var(--red) 0 7px, transparent 7px 13px);
+      }
+
+      .built-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.7rem;
+        margin-top: 2rem;
+      }
+      .built {
+        min-height: 8.5rem;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 0.8rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .built .status {
+        color: var(--acid);
+        font: 750 0.63rem/1 var(--mono);
+        letter-spacing: 0.1em;
+      }
+      .built p {
+        color: var(--muted);
+        font-size: 0.86rem;
+        line-height: 1.35;
+      }
+
+      .terminal {
+        overflow: hidden;
+        border: 1px solid #30373b;
+        border-radius: 1rem;
+        background: #050708;
+        box-shadow: 0 2rem 6rem rgba(0, 0, 0, 0.4);
+      }
+      .terminal-bar {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #252b2f;
+        color: var(--dim);
+        font: 0.65rem/1 var(--mono);
+      }
+      .terminal pre {
+        margin: 0;
+        padding: clamp(1.2rem, 2vw, 2rem);
+        overflow: auto;
+        color: #d6d9d4;
+        font: clamp(0.7rem, 1.15vw, 0.95rem)/1.8 var(--mono);
+      }
+      .prompt {
+        color: var(--acid);
+      }
+      .comment {
+        color: #657077;
+      }
+      .demo-steps {
+        display: grid;
+        gap: 0.7rem;
+      }
+      .demo-step {
+        display: grid;
+        grid-template-columns: 2rem 1fr;
+        gap: 0.8rem;
+        align-items: start;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .demo-step b {
+        width: 1.8rem;
+        height: 1.8rem;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--panel);
+        color: var(--ink);
+        font: 0.7rem/1 var(--mono);
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.8rem;
+        margin-top: 2.4rem;
+      }
+      .metric {
+        padding: 1.3rem;
+        border-left: 2px solid var(--acid);
+        background: linear-gradient(90deg, rgba(200, 255, 56, 0.055), transparent);
+      }
+      .metric strong {
+        display: block;
+        font-size: clamp(2rem, 4.5vw, 4.8rem);
+        letter-spacing: -0.07em;
+        line-height: 0.9;
+      }
+      .metric span {
+        display: block;
+        margin-top: 0.8rem;
+        color: var(--muted);
+        font-size: 0.8rem;
+        line-height: 1.35;
+      }
+      .disclaimer {
+        margin-top: 1.5rem;
+        padding: 0.8rem 1rem;
+        border: 1px solid rgba(255, 189, 89, 0.3);
+        border-radius: 0.6rem;
+        color: var(--amber);
+        font: 700 0.7rem/1.45 var(--mono);
+      }
+
+      .lessons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-top: 2rem;
+      }
+      .lesson {
+        padding: 1.4rem;
+        border-bottom: 1px solid var(--line);
+      }
+      .lesson b {
+        color: var(--acid);
+        font: 800 0.72rem/1 var(--mono);
+      }
+      .lesson h3 {
+        margin-top: 0.8rem;
+      }
+      .lesson p {
+        margin-top: 0.6rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .gap-list {
+        list-style: none;
+        margin: 2.5rem 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.55rem;
+      }
+      .gap-list li {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.95rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .gap-list .mark {
+        color: var(--amber);
+        font: 800 0.72rem/1 var(--mono);
+      }
+      .gap-list strong {
+        font-size: clamp(0.95rem, 1.45vw, 1.2rem);
+      }
+      .gap-list span:last-child {
+        color: var(--dim);
+        font: 0.68rem/1 var(--mono);
+        text-transform: uppercase;
+      }
+
+      .next-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 1rem;
+        margin-top: 2.5rem;
+      }
+      .next-main {
+        padding: clamp(1.3rem, 3vw, 2.6rem);
+        border: 1px solid rgba(200, 255, 56, 0.3);
+        border-radius: 1.2rem;
+        background: rgba(200, 255, 56, 0.04);
+      }
+      .next-main strong {
+        font-size: clamp(1.5rem, 3vw, 3rem);
+        letter-spacing: -0.04em;
+      }
+      .next-main p {
+        margin-top: 0.9rem;
+        max-width: 36rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .next-side {
+        display: grid;
+        gap: 0.7rem;
+      }
+      .next-side div {
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 0.8rem;
+      }
+      .next-side b {
+        display: block;
+        color: var(--cyan);
+        font: 0.7rem/1 var(--mono);
+      }
+      .next-side span {
+        display: block;
+        margin-top: 0.5rem;
+        color: var(--muted);
+      }
+
+      .closing {
+        text-align: center;
+      }
+      .closing h2 {
+        max-width: 14ch;
+        margin-inline: auto;
+      }
+      .closing .lede {
+        margin-inline: auto;
+      }
+      .signature {
+        display: inline-flex;
+        gap: 0.8rem;
+        align-items: center;
+        margin-top: 2.5rem;
+        padding: 0.8rem 1rem;
+        border: 1px solid var(--line);
+        border-radius: 99px;
+        color: var(--muted);
+        font: 0.72rem/1 var(--mono);
+      }
+      .signature i {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--acid);
+        box-shadow: 0 0 1rem var(--acid);
+      }
+
+      .controls {
+        position: fixed;
+        right: max(1rem, env(safe-area-inset-right));
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        z-index: 30;
+        display: flex;
+        gap: 0.45rem;
+      }
+      .control {
+        width: 2.35rem;
+        height: 2.35rem;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        background: rgba(9, 11, 13, 0.78);
+        color: var(--muted);
+        cursor: pointer;
+        backdrop-filter: blur(12px);
+      }
+      .control:hover {
+        color: var(--ink);
+        border-color: var(--dim);
+      }
+      .progress-track {
+        position: fixed;
+        z-index: 30;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 3px;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .progress {
+        width: 0;
+        height: 100%;
+        background: var(--acid);
+        transition: width 0.35s ease;
+      }
+      .counter {
+        position: fixed;
+        z-index: 30;
+        left: max(1rem, env(safe-area-inset-left));
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        color: var(--dim);
+        font: 700 0.68rem/1 var(--mono);
+        letter-spacing: 0.08em;
+      }
+
+      dialog {
+        width: min(34rem, calc(100% - 2rem));
+        border: 1px solid var(--line);
+        border-radius: 1rem;
+        padding: 0;
+        background: #111519;
+        color: var(--ink);
+        box-shadow: 0 2rem 6rem #000;
+      }
+      dialog::backdrop {
+        background: rgba(0, 0, 0, 0.72);
+        backdrop-filter: blur(5px);
+      }
+      .dialog-inner {
+        padding: 1.5rem;
+      }
+      .dialog-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.2rem;
+      }
+      .dialog-head button {
+        border: 0;
+        background: none;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 1.4rem;
+      }
+      .keys {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.7rem 1rem;
+        color: var(--muted);
+        align-items: center;
+      }
+      kbd {
+        min-width: 2rem;
+        padding: 0.35rem 0.5rem;
+        border: 1px solid #3a4247;
+        border-bottom-width: 2px;
+        border-radius: 0.35rem;
+        color: var(--ink);
+        text-align: center;
+        font: 0.7rem/1 var(--mono);
+      }
+      .notes {
+        display: none;
+      }
+
+      @media (max-width: 820px) {
+        .slide {
+          padding-inline: 1.25rem;
+        }
+        .split,
+        .next-grid {
+          grid-template-columns: 1fr;
+          gap: 1.5rem;
+        }
+        .agent-field {
+          min-height: 15rem;
+        }
+        .cards,
+        .gates {
+          grid-template-columns: 1fr;
+        }
+        .gate {
+          min-height: 11rem;
+        }
+        .collapse {
+          grid-template-columns: 1fr;
+          margin-top: 1.5rem;
+        }
+        .collapse-item {
+          min-height: 7.5rem;
+        }
+        .arrow {
+          transform: rotate(90deg);
+          justify-self: center;
+        }
+        .kernel {
+          grid-template-columns: 1fr;
+        }
+        .kernel-arrow {
+          transform: rotate(90deg);
+          justify-self: center;
+        }
+        .timeline {
+          grid-template-columns: 1fr 1fr;
+          row-gap: 1.5rem;
+        }
+        .trust,
+        .lessons {
+          grid-template-columns: 1fr;
+        }
+        .built-grid,
+        .metrics {
+          grid-template-columns: 1fr 1fr;
+        }
+        .content {
+          align-self: start;
+        }
+        h2 {
+          max-width: 19ch;
+        }
+        .slide-head {
+          margin-bottom: 0.5rem;
+        }
+        .section-label {
+          display: none;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .built-grid,
+        .metrics,
+        .timeline {
+          grid-template-columns: 1fr;
+        }
+        .agents {
+          grid-template-columns: repeat(6, 1fr);
+        }
+        .slide-foot {
+          padding-inline: 4.5rem 6rem;
+        }
+        .gap-list li {
+          grid-template-columns: auto 1fr;
+        }
+        .gap-list span:last-child {
+          display: none;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      @media print {
+        html,
+        body {
+          overflow: visible;
+          background: #fff;
+          color: #111;
+        }
+        .deck {
+          height: auto;
+        }
+        .slide {
+          position: relative;
+          opacity: 1;
+          visibility: visible;
+          transform: none;
+          width: 100%;
+          height: 100vh;
+          break-after: page;
+          color: #111;
+          background: #fff;
+        }
+        .controls,
+        .counter,
+        .progress-track {
+          display: none;
+        }
+        .muted,
+        .lede,
+        .card p,
+        .gate p,
+        .lesson p {
+          color: #444 !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="deck" aria-live="polite">
+      <section class="slide active" id="slide-1" data-title="Scruffy">
+        <header class="slide-head">
+          <span class="eyebrow">Scruffy / 2026</span
+          ><span class="section-label">An experiment in agent-scale assurance</span>
+        </header>
+        <div class="content">
+          <h1>SCRU<span class="acid">FF</span>Y</h1>
+          <p class="lede">
+            A three-gate review system built for a world where code arrives faster than humans can
+            read it.
+          </p>
+          <div class="equation">
+            <span class="pill">Noise</span><span class="muted">≠</span
+            ><span class="pill acid">Safety</span>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Two nerds. One walking skeleton.</span><span>Use → or Space</span>
+        </footer>
+        <aside class="notes">
+          Open with the tension, not the architecture. We are not claiming review is obsolete—we are
+          asking what assurance looks like when production scales beyond human reading speed.
+        </aside>
+      </section>
+
+      <section class="slide" id="slide-2" data-title="Agent-scale output">
+        <header class="slide-head">
+          <span class="eyebrow">01 / Pressure</span
+          ><span class="section-label">The coming agent-scale problem</span>
+        </header>
+        <div class="content split">
+          <div>
+            <h2>One developer.<br /><span class="acid">A hundred hands.</span></h2>
+            <p class="lede">
+              Coding agents do not wait for stand-up, lunch, or an empty review queue. They branch,
+              test, and propose in parallel.
+            </p>
+          </div>
+          <div class="agent-field" aria-label="Many parallel agents feeding one human reviewer">
+            <div class="agents" aria-hidden="true">
+              <span class="agent">A1</span><span class="agent">A2</span><span class="agent">A3</span
+              ><span class="agent">A4</span><span class="agent">A5</span
+              ><span class="agent">A6</span><span class="agent">A7</span
+              ><span class="agent">A8</span> <span class="agent">A9</span
+              ><span class="agent">A10</span><span class="agent">A11</span
+              ><span class="agent">A12</span><span class="agent">A13</span
+              ><span class="agent">A14</span><span class="agent">A15</span
+              ><span class="agent">A16</span> <span class="agent">A17</span
+              ><span class="agent">A18</span><span class="agent">A19</span
+              ><span class="agent">A20</span><span class="agent">A21</span
+              ><span class="agent">A22</span><span class="agent">A23</span
+              ><span class="agent">A24</span>
+            </div>
+            <span class="human-node">1 HUMAN REVIEWER</span>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Output parallelizes</span><span>Attention does not</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-3" data-title="Review collapse">
+        <header class="slide-head">
+          <span class="eyebrow">02 / Failure mode</span
+          ><span class="section-label">Why massive PR review collapses</span>
+        </header>
+        <div class="content">
+          <h2>The queue becomes the product.</h2>
+          <div class="collapse">
+            <div class="collapse-item">
+              <b>Volume</b><span>PRs arrive faster than reviewers can establish context.</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="collapse-item">
+              <b>Context loss</b
+              ><span>Huge diffs and constant switching erase deep understanding.</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="collapse-item">
+              <b>Rubber stamp</b><span>The ritual survives. The assurance quietly disappears.</span>
+            </div>
+          </div>
+          <p class="lede">
+            <span class="red">The dangerous outcome:</span> strict process theatre with weak
+            evidence.
+          </p>
+        </div>
+        <footer class="slide-foot">
+          <span>A scaling argument—not a universal measured law</span><span>03 / 16</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-4" data-title="Change the review unit">
+        <header class="slide-head">
+          <span class="eyebrow">03 / Reframe</span
+          ><span class="section-label">Review is not dead</span>
+        </header>
+        <div class="content">
+          <h2>
+            <span class="strike">Review every line.</span><br />Review the
+            <span class="acid">evidence.</span>
+          </h2>
+          <p class="lede">
+            Strict review is not dead. Strict <em>human</em> review of every PR is.
+          </p>
+          <div class="cards">
+            <article class="card" data-tone="acid">
+              <span class="num">01</span>
+              <h3>Automate the obvious</h3>
+              <p>Machines enforce narrow, defensible invariants at production speed.</p>
+            </article>
+            <article class="card" data-tone="cyan">
+              <span class="num">02</span>
+              <h3>Escalate uncertainty</h3>
+              <p>Abstention is a valid result—not a reason to invent confidence.</p>
+            </article>
+            <article class="card" data-tone="amber">
+              <span class="num">03</span>
+              <h3>Spend humans wisely</h3>
+              <p>Attention moves to exceptions, policy, and consequential release calls.</p>
+            </article>
+          </div>
+        </div>
+        <footer class="slide-foot"><span>Less ceremony</span><span>More assurance</span></footer>
+      </section>
+
+      <section class="slide" id="slide-5" data-title="Three gates">
+        <header class="slide-head">
+          <span class="eyebrow">04 / The model</span
+          ><span class="section-label">Three time horizons</span>
+        </header>
+        <div class="content">
+          <h2>Fast when frequent.<br />Deep when consequential.</h2>
+          <div class="gates">
+            <article class="gate poison" data-order="1">
+              <span class="when">Every PR</span>
+              <h3>Poison</h3>
+              <p>Catch only high-confidence exploitable security defects and silent data loss.</p>
+              <span class="authority red">Block · Allow · Abstain</span>
+            </article>
+            <article class="gate nightly" data-order="2">
+              <span class="when">Every night</span>
+              <h3>Deep review</h3>
+              <p>Use broader context, challenge findings, and propose narrow fix PRs.</p>
+              <span class="authority cyan">Report · Propose · Suppress</span>
+            </article>
+            <article class="gate release" data-order="3">
+              <span class="when">Before release</span>
+              <h3>Release</h3>
+              <p>Aggregate evidence across the whole candidate and surface exceptions.</p>
+              <span class="authority amber">Ship · Sign-off · Stop</span>
+            </article>
+          </div>
+        </div>
+        <footer class="slide-foot"><span>Depth ↑</span><span>Frequency ↓</span></footer>
+      </section>
+
+      <section class="slide" id="slide-6" data-title="Poison gate">
+        <header class="slide-head">
+          <span class="eyebrow red">Gate 01 / Poison</span
+          ><span class="section-label">Protect only what can justify blocking</span>
+        </header>
+        <div class="content">
+          <h2>Blocking is a privilege.</h2>
+          <p class="lede">
+            A model score cannot stop a merge. Poison needs deterministic support and adversarial
+            validation—or it abstains.
+          </p>
+          <div class="kernel">
+            <div class="kernel-box">
+              <strong>Diff + policy</strong
+              ><small>Immutable revision<br />Service-owned rules</small>
+            </div>
+            <span class="kernel-arrow">→</span>
+            <div class="kernel-box">
+              <strong>Evidence</strong
+              ><small>Analyzer finds it<br />Validator tries to refute it</small>
+            </div>
+            <span class="kernel-arrow">→</span>
+            <div class="kernel-box">
+              <strong><span class="red">BLOCK</span> / ALLOW</strong
+              ><small>Insufficient evidence?<br /><span class="acid">ABSTAIN honestly</span></small>
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Target: &lt;2 min p95 · &lt;$1 marginal cost p95</span
+          ><span>Shadow before authority</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-7" data-title="Nightly gate">
+        <header class="slide-head">
+          <span class="eyebrow cyan">Gate 02 / Nightly</span
+          ><span class="section-label">Review and propose—never block</span>
+        </header>
+        <div class="content">
+          <h2>Let the day settle.<br />Then look deeper.</h2>
+          <div class="timeline">
+            <div>
+              <h3>Range</h3>
+              <p>Review the day’s merged changes as one coherent unit.</p>
+            </div>
+            <div>
+              <h3>Falsify</h3>
+              <p>Challenge findings rather than asking a model to agree with itself.</p>
+            </div>
+            <div>
+              <h3>Fix</h3>
+              <p>Generate a narrow patch only when evidence and policy permit.</p>
+            </div>
+            <div>
+              <h3>Propose</h3>
+              <p>Open a PR. Repository-owned CI remains the judge. No auto-merge.</p>
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Measure severe findings and time saved</span><span>Not comment volume</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-8" data-title="Release gate">
+        <header class="slide-head">
+          <span class="eyebrow amber">Gate 03 / Release</span
+          ><span class="section-label">The last gate cannot shrug</span>
+        </header>
+        <div class="content split">
+          <div>
+            <h2>Review the release,<br />not just its PRs.</h2>
+            <p class="lede">
+              The unit of risk is the range from the previous release to the candidate—not the
+              isolated changes that composed it.
+            </p>
+          </div>
+          <div class="cards" style="grid-template-columns: 1fr">
+            <article class="card" data-tone="acid">
+              <h3 class="acid">SHIP</h3>
+              <p>Evidence supports publication.</p>
+            </article>
+            <article class="card" data-tone="amber">
+              <h3 class="amber">SIGN-OFF REQUIRED</h3>
+              <p>Consequential uncertainty gets a named human decision.</p>
+            </article>
+            <article class="card">
+              <h3 class="red">STOP</h3>
+              <p>Confirmed evidence crosses release policy.</p>
+            </article>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Aggregate poison + nightly + CI + release evidence</span
+          ><span>Visual QA: planned</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-9" data-title="Trust boundaries">
+        <header class="slide-head">
+          <span class="eyebrow">05 / Architecture</span
+          ><span class="section-label">The subject cannot redefine its judge</span>
+        </header>
+        <div class="content">
+          <h2>Separate the work from the authority.</h2>
+          <div class="trust">
+            <section class="trust-zone">
+              <span class="eyebrow cyan">Repositories own</span>
+              <ul>
+                <li>Application source and architecture</li>
+                <li>Builds, tests, runtimes, and CI</li>
+                <li>Dependency and service setup</li>
+                <li>Normal workflow artifacts</li>
+              </ul>
+            </section>
+            <section class="trust-zone">
+              <span class="eyebrow">Scruffy owns</span>
+              <ul>
+                <li>Gate and escalation policy</li>
+                <li>Evidence requirements and interpretation</li>
+                <li>Analyzer, model, and prompt versions</li>
+                <li>Waivers, credentials, and audit history</li>
+              </ul>
+            </section>
+            <div class="boundary">
+              Hostile-input boundary · agents hold no authority credentials
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Policy is read-only to review agents</span
+          ><span>Writes use minimal credentials</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-10" data-title="What we built">
+        <header class="slide-head">
+          <span class="eyebrow">06 / The walking skeleton</span
+          ><span class="section-label">Real core · faked edges where necessary</span>
+        </header>
+        <div class="content">
+          <h2>Not slides about software.<br /><span class="acid">Software.</span></h2>
+          <div class="built-grid">
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Three decision kernels</h3>
+              <p>Poison, nightly, and release.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Durable pipeline</h3>
+              <p>Postgres runs and transactional outbox.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Crash recovery</h3>
+              <p>Reconciliation, leases, and fencing.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Adversarial validation</h3>
+              <p>Critics try to falsify findings.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>GitHub adapters</h3>
+              <p>CLI shadow path plus App reader/writer.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Replay harnesses</h3>
+              <p>Cross-gate corpus and honest metrics.</p>
+            </div>
+            <div class="built">
+              <span class="status">BUILT</span>
+              <h3>Hosted path</h3>
+              <p>Signed webhook, durable ack, health probe.</p>
+            </div>
+            <div class="built">
+              <span class="status">SPIKE</span>
+              <h3>Hostile runner</h3>
+              <p>Local Docker isolation proof suite.</p>
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>One process + one database</span><span>No broker · no cache · no scheduler</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-11" data-title="Demo">
+        <header class="slide-head">
+          <span class="eyebrow">07 / Demo</span
+          ><span class="section-label">Use what exists—do not fake the cloud</span>
+        </header>
+        <div class="content split">
+          <div class="terminal" aria-label="Demo commands">
+            <div class="terminal-bar">scruffy — local terminal</div>
+            <pre><span class="comment"># 1. Prove the whole decision surface</span>
+<span class="prompt">$</span> npm run corpus:all
+
+<span class="comment"># 2. Shadow-review a controlled PR</span>
+<span class="prompt">$</span> npm run scruffy:review -- owner/repo 42
+
+<span class="comment"># 3. Review a branch range overnight</span>
+<span class="prompt">$</span> npm run scruffy:nightly -- owner/repo main
+
+<span class="comment"># 4. Judge a release candidate</span>
+<span class="prompt">$</span> npm run scruffy:release -- owner/repo vNext vPrev</pre>
+          </div>
+          <div class="demo-steps">
+            <div class="demo-step">
+              <b>1</b
+              ><span>Start deterministic: show every corpus lane and its expected decision.</span>
+            </div>
+            <div class="demo-step">
+              <b>2</b
+              ><span
+                >Then show one concrete finding and the evidence that survived validation.</span
+              >
+            </div>
+            <div class="demo-step">
+              <b>3</b><span>Point out the durable run and effect—not just console output.</span>
+            </div>
+            <div class="demo-step">
+              <b>4</b
+              ><span>Be explicit: the live GitHub App registration is still an operator step.</span>
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Recommended demo: corpus:all first</span
+          ><span>Have recorded output as fallback</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-12" data-title="Measurements">
+        <header class="slide-head">
+          <span class="eyebrow">08 / Measurements</span
+          ><span class="section-label">The service itself is not the bottleneck</span>
+        </header>
+        <div class="content">
+          <h2>Small enough to be boring.</h2>
+          <div class="metrics">
+            <div class="metric">
+              <strong>112<span class="acid">ms</span></strong
+              ><span>Median cold start<br />spawn → healthy</span>
+            </div>
+            <div class="metric">
+              <strong>68<span class="acid">MiB</span></strong
+              ><span>Resident memory<br />after boot</span>
+            </div>
+            <div class="metric">
+              <strong>0.6<span class="acid">ms</span></strong
+              ><span>Webhook → durable ack<br />p50</span>
+            </div>
+            <div class="metric">
+              <strong>6.5<span class="acid">ms</span></strong
+              ><span>Webhook → dispatch<br />p50</span>
+            </div>
+          </div>
+          <div class="disclaimer">
+            DEV LAPTOP · LOCAL POSTGRES · FAKED SCM EDGE · NOT CLOUD NUMBERS · NOT FULL GITHUB
+            END-TO-END LATENCY
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Measured 2026-07-24</span><span>Method is repeatable: npm run ops:measure</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-13" data-title="What surprised us">
+        <header class="slide-head">
+          <span class="eyebrow">09 / Lessons</span
+          ><span class="section-label">The interesting parts were not the prompts</span>
+        </header>
+        <div class="content">
+          <h2>Trust is mostly plumbing.</h2>
+          <div class="lessons">
+            <article class="lesson">
+              <b>01</b>
+              <h3>Abstention is a feature</h3>
+              <p>A system that can say “I do not know” is safer than one forced into confidence.</p>
+            </article>
+            <article class="lesson">
+              <b>02</b>
+              <h3>Durability changes the design</h3>
+              <p>A webhook is only a prompt. The reconciler—not delivery—is the authority.</p>
+            </article>
+            <article class="lesson">
+              <b>03</b>
+              <h3>Models cannot grant themselves power</h3>
+              <p>Deterministic evidence and policy must bound what model-backed analysis can do.</p>
+            </article>
+            <article class="lesson">
+              <b>04</b>
+              <h3>Passing tests is not proof</h3>
+              <p>
+                Generated fixes remain proposals because correlated mistakes survive green checks.
+              </p>
+            </article>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Evidence beats scores</span><span>Outcomes beat activity</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-14" data-title="Honest gaps">
+        <header class="slide-head">
+          <span class="eyebrow amber">10 / Honest gaps</span
+          ><span class="section-label">A walking skeleton is not a production claim</span>
+        </header>
+        <div class="content">
+          <h2>What we have <span class="amber">not</span> proved.</h2>
+          <ul class="gap-list">
+            <li>
+              <span class="mark">△</span
+              ><strong>Registered GitHub App + first outward live check-run</strong
+              ><span>Operator step</span>
+            </li>
+            <li>
+              <span class="mark">△</span
+              ><strong>Statistically meaningful representative corpus</strong
+              ><span>Small-n today</span>
+            </li>
+            <li>
+              <span class="mark">△</span
+              ><strong>Production-grade hostile-execution isolation</strong
+              ><span>Local half only</span>
+            </li>
+            <li>
+              <span class="mark">△</span><strong>Controlled visual QA and baseline policy</strong
+              ><span>Future work</span>
+            </li>
+            <li>
+              <span class="mark">△</span><strong>Merge queue / merge-group handling</strong
+              ><span>Not wired</span>
+            </li>
+          </ul>
+        </div>
+        <footer class="slide-foot">
+          <span>No autonomy without prospective evidence</span
+          ><span>Shadow → propose → authority</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-15" data-title="What next">
+        <header class="slide-head">
+          <span class="eyebrow">11 / Next</span
+          ><span class="section-label">Earn authority one boundary at a time</span>
+        </header>
+        <div class="content">
+          <h2>Turn the skeleton toward reality.</h2>
+          <div class="next-grid">
+            <section class="next-main">
+              <strong>Run it in shadow.</strong>
+              <p>
+                Register the App, replay representative history, observe real PRs, pre-register
+                thresholds, and let the evidence decide whether Scruffy deserves authority.
+              </p>
+            </section>
+            <div class="next-side">
+              <div>
+                <b>MEASURE</b><span>Precision, severe recall, false blocks, cost, latency.</span>
+              </div>
+              <div><b>PROTECT</b><span>Production sandbox and credential boundaries.</span></div>
+              <div><b>LEARN</b><span>Nightly value and human exception load.</span></div>
+            </div>
+          </div>
+        </div>
+        <footer class="slide-foot">
+          <span>Autonomy is earned prospectively</span><span>Not declared architecturally</span>
+        </footer>
+      </section>
+
+      <section class="slide" id="slide-16" data-title="Discussion">
+        <header class="slide-head">
+          <span class="eyebrow">Scruffy</span><span class="section-label">Discussion</span>
+        </header>
+        <div class="content closing">
+          <h2>What would you trust it to do <span class="acid">first?</span></h2>
+          <p class="lede">
+            Block one catastrophic defect class? Propose nightly fixes? Hold a release for sign-off?
+          </p>
+          <span class="signature"><i></i> github.com/esbenwiberg/scruffy</span>
+        </div>
+        <footer class="slide-foot">
+          <span>Noise is not safety.</span><span>Evidence might be.</span>
+        </footer>
+      </section>
+    </main>
+
+    <div class="counter" aria-hidden="true">
+      <span id="current">01</span> / <span id="total">16</span>
+    </div>
+    <nav class="controls" aria-label="Presentation controls">
+      <button class="control" id="helpButton" type="button" aria-label="Show keyboard shortcuts">
+        ?
+      </button>
+      <button class="control" id="fullscreenButton" type="button" aria-label="Toggle fullscreen">
+        ⛶
+      </button>
+    </nav>
+    <div class="progress-track" aria-hidden="true"><div class="progress" id="progress"></div></div>
+
+    <dialog id="helpDialog" aria-labelledby="helpTitle">
+      <div class="dialog-inner">
+        <div class="dialog-head">
+          <h3 id="helpTitle">Presentation controls</h3>
+          <button type="button" id="closeHelp" aria-label="Close help">×</button>
+        </div>
+        <div class="keys">
+          <kbd>→</kbd><span>Next slide</span><kbd>←</kbd><span>Previous slide</span> <kbd>Space</kbd
+          ><span>Next slide</span><kbd>Home</kbd><span>First slide</span> <kbd>End</kbd
+          ><span>Last slide</span><kbd>F</kbd><span>Toggle fullscreen</span> <kbd>?</kbd
+          ><span>Show or hide this help</span><kbd>Esc</kbd><span>Close overlay or fullscreen</span>
+        </div>
+      </div>
+    </dialog>
+
+    <script>
+      (() => {
+        "use strict";
+        const slides = [...document.querySelectorAll(".slide")];
+        const currentEl = document.getElementById("current");
+        const totalEl = document.getElementById("total");
+        const progressEl = document.getElementById("progress");
+        const helpDialog = document.getElementById("helpDialog");
+        const helpButton = document.getElementById("helpButton");
+        const closeHelp = document.getElementById("closeHelp");
+        const fullscreenButton = document.getElementById("fullscreenButton");
+        let current = 0;
+        let touchStartX = null;
+
+        totalEl.textContent = String(slides.length).padStart(2, "0");
+
+        function indexFromHash() {
+          const match = location.hash.match(/^#(?:slide-)?(\d+)$/);
+          if (!match) return 0;
+          return Math.min(slides.length - 1, Math.max(0, Number(match[1]) - 1));
+        }
+
+        function show(index, updateHash = true) {
+          const next = Math.min(slides.length - 1, Math.max(0, index));
+          slides.forEach((slide, i) => {
+            slide.classList.toggle("active", i === next);
+            slide.classList.toggle("was-active", i < next);
+            slide.setAttribute("aria-hidden", i === next ? "false" : "true");
+            if (i === next) slide.scrollTop = 0;
+          });
+          current = next;
+          currentEl.textContent = String(next + 1).padStart(2, "0");
+          progressEl.style.width = `${((next + 1) / slides.length) * 100}%`;
+          document.title = `${slides[next].dataset.title} — Scruffy`;
+          if (updateHash && location.hash !== `#${next + 1}`)
+            history.replaceState(null, "", `#${next + 1}`);
+        }
+
+        function next() {
+          show(current + 1);
+        }
+        function previous() {
+          show(current - 1);
+        }
+
+        document.addEventListener("keydown", (event) => {
+          if (helpDialog.open) {
+            if (event.key === "?" || event.key.toLowerCase() === "h") helpDialog.close();
+            return;
+          }
+          const key = event.key;
+          if (["ArrowRight", "PageDown", " "].includes(key)) {
+            event.preventDefault();
+            next();
+          } else if (["ArrowLeft", "PageUp"].includes(key)) {
+            event.preventDefault();
+            previous();
+          } else if (key === "Home") {
+            event.preventDefault();
+            show(0);
+          } else if (key === "End") {
+            event.preventDefault();
+            show(slides.length - 1);
+          } else if (key.toLowerCase() === "f") toggleFullscreen();
+          else if (key === "?" || key.toLowerCase() === "h") helpDialog.showModal();
+        });
+
+        document.querySelector(".deck").addEventListener("click", (event) => {
+          if (event.target.closest("button, dialog, a")) return;
+          if (event.clientX < window.innerWidth * 0.28) previous();
+          else next();
+        });
+
+        document.addEventListener(
+          "touchstart",
+          (event) => {
+            touchStartX = event.changedTouches[0].clientX;
+          },
+          { passive: true },
+        );
+        document.addEventListener(
+          "touchend",
+          (event) => {
+            if (touchStartX === null) return;
+            const delta = event.changedTouches[0].clientX - touchStartX;
+            if (Math.abs(delta) > 50) delta < 0 ? next() : previous();
+            touchStartX = null;
+          },
+          { passive: true },
+        );
+
+        async function toggleFullscreen() {
+          try {
+            if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+            else await document.exitFullscreen();
+          } catch (_) {
+            /* Fullscreen may be unavailable for local files or embedded previews. */
+          }
+        }
+
+        helpButton.addEventListener("click", () => helpDialog.showModal());
+        closeHelp.addEventListener("click", () => helpDialog.close());
+        helpDialog.addEventListener("click", (event) => {
+          if (event.target === helpDialog) helpDialog.close();
+        });
+        fullscreenButton.addEventListener("click", toggleFullscreen);
+        window.addEventListener("hashchange", () => show(indexFromHash(), false));
+        show(indexFromHash(), false);
+      })();
+    </script>
+  </body>
+</html>

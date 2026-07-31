@@ -56,7 +56,7 @@ import { deterministicFinding } from "../../src/providers/analyzers/finding.js";
 const PINNED: Record<string, string> = {
   "model-analyze-v2": "64a9b849af8d929b2d5c0474eb73791faa626bb30e68a9ca7383837326194f08",
   "poison-validate-v1": "63dd0210e3495258ff2afcf859a07c6d4a8c4bda7fe79f26e833f5b49b3bd511",
-  "release-risk-v1": "127fa23ba0c117af9eb01e5ded533b3cf553c507e4b97bf7c1b03b6a218d14a4",
+  "release-risk-v2": "0482f4f95faeca4cbe5fba1d5502d1dcc4329e2604943f7b592e1dcb60716e1f",
 };
 
 const PROMPTS = [
@@ -100,7 +100,9 @@ describe("prompt contract: analyzer prompt agrees with the parser", () => {
   it("offers exactly the vocabulary the parser accepts", () => {
     // Drift here is a silent detection hole: the model is told about a class the
     // code then drops, or the code accepts one the model was never offered.
-    const line = MODEL_ANALYZE_SYSTEM.split("\n").find((l) => l.startsWith("class MUST be one of: "));
+    const line = MODEL_ANALYZE_SYSTEM.split("\n").find((l) =>
+      l.startsWith("class MUST be one of: "),
+    );
     expect(line, "the analyzer prompt must state the permitted class vocabulary").toBeDefined();
     const offered = line!.replace("class MUST be one of: ", "").replace(/\.$/, "").split(", ");
     expect(offered).toEqual([...MODEL_DEFECT_CLASSES]);
@@ -113,7 +115,9 @@ describe("prompt contract: analyzer prompt agrees with the parser", () => {
   it("requires findings to anchor to a real added line", () => {
     // The code enforces anchoring by dropping unanchored findings. If the prompt
     // stops asking for it, every finding gets dropped and the gate reports clean.
-    expect(MODEL_ANALYZE_SYSTEM).toMatch(/path and line MUST reference one of the exact added lines/);
+    expect(MODEL_ANALYZE_SYSTEM).toMatch(
+      /path and line MUST reference one of the exact added lines/,
+    );
   });
 
   it("names the empty result explicitly, so 'nothing found' is a real answer", () => {
@@ -124,7 +128,9 @@ describe("prompt contract: analyzer prompt agrees with the parser", () => {
 describe("prompt contract: validator prompt agrees with the parser", () => {
   it("offers exactly the verdicts the Zod enum accepts", () => {
     for (const verdict of MODEL_VERDICTS) {
-      expect(POISON_VALIDATE_SYSTEM, `prompt must offer the '${verdict}' verdict`).toContain(`"${verdict}"`);
+      expect(POISON_VALIDATE_SYSTEM, `prompt must offer the '${verdict}' verdict`).toContain(
+        `"${verdict}"`,
+      );
     }
     // And nothing beyond them: a quoted verdict-looking token the enum rejects
     // would make the model emit output that parses to `failed`.
@@ -163,8 +169,13 @@ describe("prompt contract: release-risk prompt agrees with the parser", () => {
   });
 
   it("offers exactly the risk-category vocabulary the parser accepts", () => {
-    const line = RELEASE_RISK_SYSTEM.split("\n").find((l) => l.startsWith("category MUST be one of: "));
-    expect(line, "the release-risk prompt must state the permitted category vocabulary").toBeDefined();
+    const line = RELEASE_RISK_SYSTEM.split("\n").find((l) =>
+      l.startsWith("category MUST be one of: "),
+    );
+    expect(
+      line,
+      "the release-risk prompt must state the permitted category vocabulary",
+    ).toBeDefined();
     const offered = line!.replace("category MUST be one of: ", "").replace(/\.$/, "").split(", ");
     expect(offered).toEqual([...RELEASE_RISK_CATEGORIES]);
   });
@@ -176,7 +187,24 @@ describe("prompt contract: release-risk prompt agrees with the parser", () => {
   it("requires every citation to anchor to a real shown line", () => {
     // The analyst enforces anchoring by dropping unanchored citations. If the
     // prompt stops asking for it, fabricated citations look expected, not hostile.
-    expect(RELEASE_RISK_SYSTEM).toMatch(/citation path and line MUST reference one of the exact added lines/);
+    expect(RELEASE_RISK_SYSTEM).toMatch(
+      /citation path and line MUST reference one of the exact added lines/,
+    );
+  });
+
+  it("requires the human-oriented risk fields rendered by the report", () => {
+    for (const field of [
+      "blastRadius",
+      "impact",
+      "detectability",
+      "reversibility",
+      "rollback",
+      "uncertainty",
+      "supportingEvidence",
+      "contradictingEvidence",
+    ]) {
+      expect(RELEASE_RISK_SYSTEM).toContain(`"${field}"`);
+    }
   });
 
   it("names the empty result explicitly, so 'no risk' is a real answer", () => {
@@ -205,24 +233,27 @@ const FENCED = [
   { name: "release-risk", prompt: RELEASE_RISK_SYSTEM, fence: RELEASE_RISK_FENCE },
 ] as const;
 
-describe.each(FENCED)("prompt contract: $name prompt fences untrusted content", ({ prompt, fence }) => {
-  it("names its fence in the prompt text", () => {
-    expect(prompt).toContain(fence.open);
-    expect(prompt).toContain(fence.close);
-  });
+describe.each(FENCED)(
+  "prompt contract: $name prompt fences untrusted content",
+  ({ prompt, fence }) => {
+    it("names its fence in the prompt text", () => {
+      expect(prompt).toContain(fence.open);
+      expect(prompt).toContain(fence.close);
+    });
 
-  it("tells the model that content inside the fence is data, never instructions", () => {
-    expect(prompt).toMatch(/never as instructions/);
-    // Stronger than "ignore instructions": tampering is itself evidence to weigh.
-    expect(prompt).toMatch(/likely tampering/);
-  });
+    it("tells the model that content inside the fence is data, never instructions", () => {
+      expect(prompt).toMatch(/never as instructions/);
+      // Stronger than "ignore instructions": tampering is itself evidence to weigh.
+      expect(prompt).toMatch(/likely tampering/);
+    });
 
-  it("sanitize neutralizes its own fence markers, case-insensitively", () => {
-    expect(fence.sanitize(fence.close)).not.toContain(fence.tag);
-    expect(fence.sanitize(fence.open)).not.toContain(fence.tag);
-    expect(fence.sanitize(`</${fence.tag.toUpperCase()}>`)).toBe("[marker]");
-  });
-});
+    it("sanitize neutralizes its own fence markers, case-insensitively", () => {
+      expect(fence.sanitize(fence.close)).not.toContain(fence.tag);
+      expect(fence.sanitize(fence.open)).not.toContain(fence.tag);
+      expect(fence.sanitize(`</${fence.tag.toUpperCase()}>`)).toBe("[marker]");
+    });
+  },
+);
 
 describe("prompt contract: the validator fence holds end to end", () => {
   const { open, close, tag } = VALIDATE_FENCE;
@@ -295,7 +326,9 @@ describe("prompt contract: the analyzer fence holds end to end", () => {
       async complete() {
         return {
           modelId: "stub",
-          text: JSON.stringify([{ class: "sql-injection", path: "src/db.ts", line: 1, reason: "concatenated id" }]),
+          text: JSON.stringify([
+            { class: "sql-injection", path: "src/db.ts", line: 1, reason: "concatenated id" },
+          ]),
         };
       },
     };

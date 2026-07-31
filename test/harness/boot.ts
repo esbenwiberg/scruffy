@@ -76,6 +76,8 @@ export interface BootOptions {
    * suites that also make the lane applicable/required in `policy` need this.
    */
   releaseRisk?: ReleaseRiskAnalyst;
+  /** Disable legacy commit-check presentation for CD-native release tests. */
+  publishReleaseCheck?: boolean;
 }
 
 export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
@@ -102,6 +104,9 @@ export async function bootHarness(options: BootOptions = {}): Promise<Harness> {
     fixers: defaultFixers(),
     webhookSecret: WEBHOOK_SECRET,
     ...(options.releaseRisk ? { releaseRisk: options.releaseRisk } : {}),
+    ...(options.publishReleaseCheck !== undefined
+      ? { publishReleaseCheck: options.publishReleaseCheck }
+      : {}),
     ...(options.leaseMs !== undefined ? { leaseMs: options.leaseMs } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
   });

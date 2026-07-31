@@ -3,7 +3,12 @@ import { SystemClock, UuidIdGenerator } from "../platform/clock.js";
 import { createPool } from "../persistence/db.js";
 import { migrate } from "../persistence/migrate.js";
 import { Scruffy } from "../app/scruffy.js";
-import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "../providers/scm/port.js";
+import type {
+  ScmInstallationReader,
+  ScmLifecycleReader,
+  ScmReader,
+  ScmWriter,
+} from "../providers/scm/port.js";
 import {
   createScmInstallationReader,
   createScmLifecycleReader,
@@ -19,6 +24,7 @@ import {
   defaultFixers,
   defaultPolicy,
   defaultValidator,
+  releaseRiskAnalyst,
 } from "../providers/registry.js";
 import { createModelProvider, resolveBackend } from "../providers/models/factory.js";
 import { createWebhookServer } from "./http.js";
@@ -157,7 +163,8 @@ function positiveInt(env: Record<string, string | undefined>, name: string): num
   const raw = env[name];
   if (raw === undefined || raw === "") return null;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name}='${raw}' is not a positive integer`);
+  if (!Number.isInteger(value) || value <= 0)
+    throw new Error(`${name}='${raw}' is not a positive integer`);
   return value;
 }
 
@@ -173,8 +180,14 @@ async function main(): Promise<void> {
   // SCRUFFY_SCM_READER/_WRITER (or missing App credential) fails at boot rather
   // than mid-run. With both set to github-app the server runs fully
   // App-authenticated — no gh login or GH_TOKEN required.
-  const { scmReader, scmWriter, scmLifecycleReader, scmInstallationReader, readerBackend, writerBackend } =
-    createScmBackends();
+  const {
+    scmReader,
+    scmWriter,
+    scmLifecycleReader,
+    scmInstallationReader,
+    readerBackend,
+    writerBackend,
+  } = createScmBackends();
   // Resolved before the DB too: a cadence that cannot possibly run (or a typo in one
   // of its intervals) must stop the boot, not produce silent empty nights.
   let nightlySchedule: ResolvedNightlySchedule | null;
@@ -205,7 +218,9 @@ async function main(): Promise<void> {
     analyzers: defaultAnalyzers(),
     validator: defaultValidator(),
     fixers: defaultFixers(),
-    ...(model !== undefined ? { model } : {}),
+    ...(model !== undefined ? { model, releaseRisk: releaseRiskAnalyst(model) } : {}),
+    // Full release narratives belong to deployment jobs, never commit/PR checks.
+    publishReleaseCheck: false,
     ...(scmLifecycleReader !== null ? { scmLifecycleReader } : {}),
     ...(scmInstallationReader !== null ? { scmInstallationReader } : {}),
     ...(nightlySchedule !== null

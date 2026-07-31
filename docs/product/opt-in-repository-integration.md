@@ -152,7 +152,7 @@ GitHub write:
    conflicting, stale, or policy-weakening output opens no PR and leaves the child
    issue actionable with an explicit reason;
 6. reconcile repository CI, human merges, and human issue closures; a merged fix
-   moves its child to *awaiting verification*, and only a verification against the
+   moves its child to _awaiting verification_, and only a verification against the
    immutable post-merge head clears it;
 7. close the parent only when required coverage is complete and every child is
    verified resolved or explicitly dismissed.
@@ -189,7 +189,8 @@ immutable post-merge head, and an indeterminate verification keeps the item open
 ## Release workflow
 
 Release authority belongs in a controlled workflow, not in a custom Scruffy
-approval UI.
+approval UI. The evidence, LLM-assessment, clean-report, and outcome semantics
+are defined in [`release-risk-report.md`](release-risk-report.md).
 
 The target behavior is:
 
@@ -273,9 +274,9 @@ cannot satisfy.
    measurements.
 3. Wire optional model analysis into deeper gates without putting it on poison's
    deterministic critical path.
-4. Add default-branch nightly scheduling for installed repositories. *(Built:
+4. Add default-branch nightly scheduling for installed repositories. _(Built:
    the scheduler, the durable self-review/fix lifecycle, and the morning
-   parent/check summary. Not yet exercised against a live GitHub installation.)*
+   parent/check summary. Not yet exercised against a live GitHub installation.)_
 5. Build the controlled release workflow and protected-environment sign-off.
 6. Grant authority only after the corresponding shadow evidence meets the product
    thresholds.
