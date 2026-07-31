@@ -4,6 +4,10 @@ import { Finding } from "../evidence/types.js";
 import { WHOLE_ANALYSIS, type AnalysisCoverage } from "../evidence/coverage.js";
 import type { ReleaseDecision } from "../../gates/release/decision.js";
 import type { ReleaseEvidencePolicy } from "../policy/types.js";
+import {
+  ReleaseOutstandingWork,
+  type ReleaseOutstandingWork as ReleaseOutstandingWorkType,
+} from "./outstanding-work.js";
 
 /**
  * The versioned, schema-validated ReleaseRiskReport — the first-class, inspectable
@@ -63,11 +67,15 @@ export const ReleaseRisk = z.object({
   category: ReleaseRiskCategory,
   scenario: z.string().min(1),
   affectedSurface: z.string().min(1),
+  /** Explicit scope of likely harm, distinct from the component immediately touched. */
+  blastRadius: z.string().min(1).optional(),
   impact: z.string().min(1),
   reversibility: z.string().optional(),
   detectability: z.string().optional(),
   rollback: z.string().optional(),
   uncertainty: z.string().optional(),
+  supportingEvidence: z.array(z.string().min(1)).optional(),
+  contradictingEvidence: z.array(z.string().min(1)).optional(),
   citations: z.array(ReleaseRiskCitation).min(1),
 });
 export type ReleaseRisk = z.infer<typeof ReleaseRisk>;
@@ -190,6 +198,8 @@ export const ReleaseRiskReport = z.object({
   changeSummary: z.string(),
   evidenceLanes: z.array(EvidenceLane),
   risks: z.array(ReleaseRisk),
+  /** Additive for v1 compatibility: older persisted reports legitimately omit it. */
+  outstandingWork: ReleaseOutstandingWork.optional(),
   findings: z.array(Finding),
   decision: ReleaseDecisionSchema,
 });
@@ -226,7 +236,9 @@ function canonicalize(value: unknown): unknown {
  * key insertion order, so re-triggering one idempotent run recomputes the SAME id.
  */
 export function computeReportId(content: ReleaseReportContent): string {
-  const digest = createHash("sha256").update(JSON.stringify(canonicalize(content))).digest("hex");
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalize(content)))
+    .digest("hex");
   return `rr_${digest}`;
 }
 
@@ -281,6 +293,8 @@ export interface AssembleReleaseReportInput {
   releaseRisk?: ReleaseRiskLaneInput;
   /** The candidate-CI lane, when policy declares it (03+). */
   candidateCi?: CandidateCiLaneInput;
+  /** Factual repository/nightly context. Never consumed by the decision kernel. */
+  outstandingWork?: ReleaseOutstandingWorkType;
   /**
    * Service-owned lane declarations. When present, each lane's required/applicable
    * booleans are read from policy rather than assumed. Absent for the slice-01
@@ -378,7 +392,10 @@ function candidateCiLane(candidateSha: string, input: CandidateCiLaneInput): Evi
 }
 
 /** Default lane declaration for callers that predate policy-declared lanes. */
-const IMPLICIT_LANE: { required: boolean; applicable: boolean } = { required: true, applicable: true };
+const IMPLICIT_LANE: { required: boolean; applicable: boolean } = {
+  required: true,
+  applicable: true,
+};
 
 export function assembleReleaseReport(input: AssembleReleaseReportInput): ReleaseRiskReport {
   const llm = input.releaseRisk;
@@ -390,7 +407,15 @@ export function assembleReleaseReport(input: AssembleReleaseReportInput): Releas
       input.provenance.analyzers,
       decls?.["source-analysis"] ?? IMPLICIT_LANE,
     ),
-    ...(llm ? [releaseRiskLane(input.subject.candidateSha, llm, decls?.["release-risk-llm"] ?? IMPLICIT_LANE)] : []),
+    ...(llm
+      ? [
+          releaseRiskLane(
+            input.subject.candidateSha,
+            llm,
+            decls?.["release-risk-llm"] ?? IMPLICIT_LANE,
+          ),
+        ]
+      : []),
     ...(input.candidateCi ? [candidateCiLane(input.subject.candidateSha, input.candidateCi)] : []),
   ];
   const content: ReleaseReportContent = {
@@ -400,12 +425,21 @@ export function assembleReleaseReport(input: AssembleReleaseReportInput): Releas
     provenance: {
       analyzers: input.provenance.analyzers,
       // Model provenance is carried at the report level only when an analyst ran.
-      ...(llm?.modelId !== undefined ? { modelId: llm.modelId } : input.provenance.modelId !== undefined ? { modelId: input.provenance.modelId } : {}),
-      ...(llm ? { promptVersion: llm.promptVersion } : input.provenance.promptVersion !== undefined ? { promptVersion: input.provenance.promptVersion } : {}),
+      ...(llm?.modelId !== undefined
+        ? { modelId: llm.modelId }
+        : input.provenance.modelId !== undefined
+          ? { modelId: input.provenance.modelId }
+          : {}),
+      ...(llm
+        ? { promptVersion: llm.promptVersion }
+        : input.provenance.promptVersion !== undefined
+          ? { promptVersion: input.provenance.promptVersion }
+          : {}),
     },
     changeSummary: llm?.changeSummary ?? input.changeSummary ?? "",
     evidenceLanes,
     risks: llm?.risks ?? input.risks ?? [],
+    ...(input.outstandingWork !== undefined ? { outstandingWork: input.outstandingWork } : {}),
     findings: input.findings,
     decision: input.decision,
   };

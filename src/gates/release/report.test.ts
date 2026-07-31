@@ -10,6 +10,7 @@ import {
 import type { ReleaseDecision } from "./decision.js";
 import { COMPLETE_COVERAGE } from "../../domain/evidence/coverage.js";
 import type { Finding } from "../../domain/evidence/types.js";
+import { unavailableOutstandingWork } from "../../domain/release/outstanding-work.js";
 
 /**
  * Report identity is the load-bearing contract of this slice: the reportId must be
@@ -54,7 +55,12 @@ const FINDING: Finding = {
   defectClass: "leaked-credential",
   subject: { repository: REPO, commitSha: CAND },
   primaryRegion: { path: "src/config.ts", startLine: 1, endLine: 1, snippet: "AKIA..." },
-  provenance: { analyzerId: "secret-scan", analyzerVersion: "1", modelId: null, promptVersion: null },
+  provenance: {
+    analyzerId: "secret-scan",
+    analyzerVersion: "1",
+    modelId: null,
+    promptVersion: null,
+  },
   supporting: [{ trust: "deterministic", statement: "matches AWS key shape" }],
   contradicting: [],
   completeness: { requiredEvidencePresent: true, contextTruncated: false },
@@ -75,13 +81,20 @@ function baseInput(over: Partial<AssembleReleaseReportInput> = {}): AssembleRele
 
 describe("release report", () => {
   it("release report identity and SHA binding", () => {
-    const idOf = (over: Partial<AssembleReleaseReportInput> = {}): string => assembleReleaseReport(baseInput(over)).reportId;
+    const idOf = (over: Partial<AssembleReleaseReportInput> = {}): string =>
+      assembleReleaseReport(baseInput(over)).reportId;
     const base = idOf();
 
     // Not a constant / candidate-only id: the SUBJECT bindings all move it.
-    expect(idOf({ subject: { repository: REPO, previousReleaseSha: OTHER, candidateSha: CAND } })).not.toBe(base); // base sha
-    expect(idOf({ subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: OTHER } })).not.toBe(base); // candidate sha
-    expect(idOf({ subject: { repository: "acme/other", previousReleaseSha: PREV, candidateSha: CAND } })).not.toBe(base); // repository
+    expect(
+      idOf({ subject: { repository: REPO, previousReleaseSha: OTHER, candidateSha: CAND } }),
+    ).not.toBe(base); // base sha
+    expect(
+      idOf({ subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: OTHER } }),
+    ).not.toBe(base); // candidate sha
+    expect(
+      idOf({ subject: { repository: "acme/other", previousReleaseSha: PREV, candidateSha: CAND } }),
+    ).not.toBe(base); // repository
     expect(idOf({ policyVersion: "policy-v2" })).not.toBe(base); // policy version
 
     // Evidence content moves it: a different findings set is different evidence.
@@ -89,6 +102,12 @@ describe("release report", () => {
 
     // Decision content moves it.
     expect(idOf({ decision: STOP })).not.toBe(base);
+
+    // Context is not decision authority, but it is evidence displayed to the
+    // signer and therefore remains content-bound to the report identity.
+    expect(idOf({ outstandingWork: unavailableOutstandingWork("context unavailable") })).not.toBe(
+      base,
+    );
 
     // Volatile generatedAt does NOT move it.
     expect(idOf({ generatedAt: "2030-01-01T12:34:56.000Z" })).toBe(base);
@@ -154,7 +173,14 @@ describe("release report", () => {
               category: "cross-change-interaction",
               scenario: "rate and its consumer diverge",
               affectedSurface: "pricing",
+              blastRadius: "all invoices produced during the rollout",
               impact: "wrong charges",
+              detectability: "invoice reconciliation",
+              reversibility: "new invoices recover; issued invoices need correction",
+              rollback: "restore the prior rate and reconcile invoices",
+              uncertainty: "production invoice volume is unknown",
+              supportingEvidence: ["rate and consumer changed together"],
+              contradictingEvidence: [],
               citations: [
                 { path: "src/rate.ts", line: 1 },
                 { path: "src/invoice.ts", line: 2 },
@@ -164,15 +190,18 @@ describe("release report", () => {
           gaps: [],
           reviewedLines: 3,
           totalLines: 3,
-          analyzer: { id: "release-risk-analyst", version: "1.0.0" },
+          analyzer: { id: "release-risk-analyst", version: "1.1.0" },
           modelId: "fake-model",
-          promptVersion: "release-risk-v1",
+          promptVersion: "release-risk-v2",
         },
       }),
     );
 
     // Both lanes present, coverage-first order preserved (source, then llm).
-    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual(["source-analysis", "release-risk-llm"]);
+    expect(report.evidenceLanes.map((l) => l.laneId)).toEqual([
+      "source-analysis",
+      "release-risk-llm",
+    ]);
     const llm = report.evidenceLanes.find((l) => l.laneId === "release-risk-llm")!;
     expect(llm.status).toBe("complete");
     expect(llm.subjectSha).toBe(CAND);
@@ -181,8 +210,9 @@ describe("release report", () => {
     expect(report.changeSummary).toBe("adjusts pricing across two files");
     expect(report.risks).toHaveLength(1);
     expect(report.risks[0]!.category).toBe("cross-change-interaction");
+    expect(report.risks[0]!.blastRadius).toContain("all invoices");
     expect(report.provenance.modelId).toBe("fake-model");
-    expect(report.provenance.promptVersion).toBe("release-risk-v1");
+    expect(report.provenance.promptVersion).toBe("release-risk-v2");
 
     // Round-trips through the read boundary unchanged.
     expect(() => parseReleaseReport(JSON.parse(JSON.stringify(report)))).not.toThrow();
@@ -197,8 +227,8 @@ describe("release report", () => {
           gaps: [{ code: "provider_unavailable", detail: "provider down" }],
           reviewedLines: 0,
           totalLines: 5,
-          analyzer: { id: "release-risk-analyst", version: "1.0.0" },
-          promptVersion: "release-risk-v1",
+          analyzer: { id: "release-risk-analyst", version: "1.1.0" },
+          promptVersion: "release-risk-v2",
         },
       }),
     );
@@ -207,7 +237,7 @@ describe("release report", () => {
     expect(llm.gaps).toEqual(["provider_unavailable: provider down"]);
     // No model reached → no modelId recorded, but the prompt version still is.
     expect(report.provenance.modelId).toBeUndefined();
-    expect(report.provenance.promptVersion).toBe("release-risk-v1");
+    expect(report.provenance.promptVersion).toBe("release-risk-v2");
   });
 
   it("assembles a schema-valid report with a single source-analysis lane", () => {
@@ -218,7 +248,11 @@ describe("release report", () => {
 
     expect(parsed.reportVersion).toBe("1");
     expect(parsed.reportId).toBe(report.reportId);
-    expect(parsed.subject).toEqual({ repository: REPO, previousReleaseSha: PREV, candidateSha: CAND });
+    expect(parsed.subject).toEqual({
+      repository: REPO,
+      previousReleaseSha: PREV,
+      candidateSha: CAND,
+    });
     expect(parsed.evidenceLanes).toHaveLength(1);
     expect(parsed.evidenceLanes[0]!.laneId).toBe("source-analysis");
     expect(parsed.evidenceLanes[0]!.status).toBe("complete");

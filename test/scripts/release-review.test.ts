@@ -3,7 +3,10 @@ import {
   parseReleaseArgs,
   formatReleaseReport,
   checkReportCongruence,
-  SHADOW_RUNBOOK,
+  CD_RUNBOOK,
+  formatGithubStepSummary,
+  formatGithubOutputs,
+  releaseCdExitCode,
 } from "../../scripts/release-review.js";
 import { assembleReleaseReport } from "../../src/domain/release/report.js";
 import { releaseToCheck, CheckRunPayload } from "../../src/effects/check-run.js";
@@ -81,7 +84,11 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     evidence: {
       "source-analysis": { applicable: true, required: true },
       "release-risk-llm": { applicable: true, required: true },
-      "candidate-ci": { applicable: true, required: true, requiredContexts: ["ci/build", "ci/tests"] },
+      "candidate-ci": {
+        applicable: true,
+        required: true,
+        requiredContexts: ["ci/build", "ci/tests"],
+      },
     },
   };
 
@@ -112,16 +119,23 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
             category: "data-integrity",
             scenario: "purge deletes rows a migration still reads",
             affectedSurface: "orders",
+            blastRadius: "all orders processed before rollback completes",
             impact: "data loss",
+            detectability: "row-count reconciliation after the purge",
+            reversibility: "deleted rows require backup restoration",
+            rollback: "disable the purge worker and restore affected rows from backup",
+            uncertainty: "backup recovery time is not established",
+            supportingEvidence: ["the worker deletes rows read by the migration"],
+            contradictingEvidence: ["the change includes a feature flag"],
             citations: [{ path: "src/purge.ts", line: 3 }],
           },
         ],
         gaps: [],
         reviewedLines: 5,
         totalLines: 5,
-        analyzer: { id: "release-risk-analyst", version: "1.0.0" },
+        analyzer: { id: "release-risk-analyst", version: "1.1.0" },
         modelId: "fake-model",
-        promptVersion: "release-risk-v1",
+        promptVersion: "release-risk-v2",
       },
       candidateCi: {
         required: true,
@@ -129,6 +143,42 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
         status: "partial",
         observations: ["ci/tests: success"],
         gaps: ["required context 'ci/build' is missing for the candidate"],
+      },
+      outstandingWork: {
+        contextOnly: true,
+        repository: {
+          status: "complete",
+          bugLabel: "bug",
+          bugIssues: [
+            {
+              number: 12,
+              url: "https://github.com/acme/web/issues/12",
+              title: "Purge can race migration",
+              labels: ["bug"],
+            },
+          ],
+          openPullRequests: [
+            {
+              number: 15,
+              url: "https://github.com/acme/web/pull/15",
+              title: "Release candidate",
+              draft: false,
+              headSha: CAND,
+              headBranch: "release/candidate",
+              baseBranch: "main",
+              candidate: true,
+            },
+          ],
+          gaps: [],
+        },
+        nightly: {
+          status: "partial",
+          reportsConsidered: 1,
+          requiredCoverageComplete: false,
+          parentIssues: [{ number: 20, url: "https://github.com/acme/web/issues/20" }],
+          findings: [],
+          gaps: ["one nightly report has incomplete required coverage"],
+        },
       },
     });
 
@@ -150,7 +200,23 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     expect(out).toContain("MISSING EVIDENCE");
     // Model risk + its citation.
     expect(out).toContain("purge deletes rows a migration still reads");
+    expect(out).toContain("all orders processed before rollback completes");
+    expect(out).toContain("row-count reconciliation");
+    expect(out).toContain("restore affected rows from backup");
+    expect(out).toContain("backup recovery time is not established");
+    expect(out).toContain("the worker deletes rows");
+    expect(out).toContain("the change includes a feature flag");
     expect(out).toContain("src/purge.ts:3");
+    // Bugs remain visible; open PRs are counted but collapsed as future work.
+    expect(out).toContain("bug #12");
+    expect(out).toContain("1 open PR(s)");
+    expect(out).toContain("Open PRs are future work");
+    expect(out).not.toContain("PR #15");
+    expect(out).toContain("context only");
+    // The exact SHA/report-bound responsibility statement is prominent.
+    expect(out).toContain("HUMAN RESPONSIBILITY");
+    expect(out).toContain("personally accept responsibility");
+    expect(out).toContain(report.reportId);
     // Change summary + outcome.
     expect(out).toContain("adds a background purge job");
     expect(out).toContain("sign-off-required");
@@ -158,13 +224,30 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
     // Coverage is rendered BEFORE finding totals.
     expect(out.indexOf("Coverage (evidence lanes):")).toBeLessThan(out.indexOf("Findings —"));
 
-    // The runbook note documents a shadow-only operator command.
-    expect(SHADOW_RUNBOOK.join("\n")).toMatch(/npm run scruffy:release/);
-    expect(SHADOW_RUNBOOK.join("\n")).toMatch(/advisory/i);
+    // CD-native presentation writes the report and stable routing outputs into
+    // Actions-owned files; it never asks for or advertises a PR/commit check.
+    const jobSummary = formatGithubStepSummary(report);
+    expect(jobSummary).toContain("Scruffy release risk report");
+    expect(jobSummary).toContain(report.reportId);
+    expect(jobSummary).toContain("Full deployment evidence");
+    expect(formatGithubOutputs(report)).toContain("outcome=sign-off-required");
+    expect(formatGithubOutputs(report)).toContain("signoff_required=true");
+    expect(releaseCdExitCode(report.decision.outcome)).toBe(0); // route to protected environment
+    expect(releaseCdExitCode("ship")).toBe(0);
+    expect(releaseCdExitCode("stop")).toBe(1);
+    expect(releaseCdExitCode("indeterminate")).toBe(1);
+    expect(CD_RUNBOOK.join("\n")).toMatch(/npm run scruffy:release/);
+    expect(CD_RUNBOOK.join("\n")).toMatch(/never posts a commit status or check/i);
   });
 
   it("flags a report/check mismatch and confirms agreement for a congruent pair", () => {
-    const decision = evaluateRelease([], POLICY, COMPLETE_COVERAGE, { retainedRiskCount: 0, complete: true }, { required: true, complete: true });
+    const decision = evaluateRelease(
+      [],
+      POLICY,
+      COMPLETE_COVERAGE,
+      { retainedRiskCount: 0, complete: true },
+      { required: true, complete: true },
+    );
     const report = assembleReleaseReport({
       subject: { repository: REPO, previousReleaseSha: PREV, candidateSha: CAND },
       policyVersion: "policy-v1",
@@ -179,11 +262,17 @@ describe("formatReleaseReport (operator output from the persisted report)", () =
         gaps: [],
         reviewedLines: 2,
         totalLines: 2,
-        analyzer: { id: "release-risk-analyst", version: "1.0.0" },
+        analyzer: { id: "release-risk-analyst", version: "1.1.0" },
         modelId: "fake-model",
-        promptVersion: "release-risk-v1",
+        promptVersion: "release-risk-v2",
       },
-      candidateCi: { required: true, applicable: true, status: "complete", observations: [], gaps: [] },
+      candidateCi: {
+        required: true,
+        applicable: true,
+        status: "complete",
+        observations: [],
+        gaps: [],
+      },
     });
 
     // The check rendered from the same report is congruent.

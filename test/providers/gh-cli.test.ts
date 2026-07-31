@@ -16,7 +16,10 @@ const BASE = "b".repeat(40);
 const SUBJECT: SubjectRevision = { repository: REPO, commitSha: HEAD };
 
 /** A gh stub that dispatches canned responses by matching the endpoint in args, and records calls. */
-function stub(handlers: { match: (args: string[]) => boolean; reply: string }[]): { runGh: RunGh; calls: string[][] } {
+function stub(handlers: { match: (args: string[]) => boolean; reply: string }[]): {
+  runGh: RunGh;
+  calls: string[][];
+} {
   const calls: string[][] = [];
   const runGh: RunGh = async (args) => {
     calls.push(args);
@@ -32,6 +35,8 @@ const isPulls = (a: string[]) => a.some((s) => s.endsWith("/pulls"));
 const isStatus = (a: string[]) => a.some((s) => s.includes("/statuses/"));
 const isCheckRuns = (a: string[]) => a.some((s) => s.includes("/check-runs"));
 const isCiStatuses = (a: string[]) => a.some((s) => s.includes("/statuses?"));
+const isOpenIssues = (a: string[]) => a.some((s) => s.includes("/issues?state=open&labels=bug"));
+const isOpenPulls = (a: string[]) => a.some((s) => s.includes("/pulls?state=open"));
 
 // A slurped compare page: one real diff, one binary/rename file with NO patch.
 const comparePage = JSON.stringify([
@@ -49,7 +54,11 @@ describe("GhCliScm reader", () => {
     const { runGh } = stub([{ match: isCompare, reply: comparePage }]);
     const scm = new GhCliScm({ runGh });
 
-    const files = await scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD });
+    const files = await scm.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: BASE,
+      headSha: HEAD,
+    });
 
     expect(files).toEqual([
       { path: "src/config.ts", patch: "@@ -0,0 +1,1 @@\n+export const KEY = 'x';" },
@@ -76,7 +85,10 @@ describe("GhCliScm reader", () => {
   it("falls back to the commit's own files when no PR is associated", async () => {
     const { runGh, calls } = stub([
       { match: isPulls, reply: "[]" }, // no associated PR
-      { match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)), reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }) },
+      {
+        match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)),
+        reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }),
+      },
     ]);
     const scm = new GhCliScm({ runGh });
 
@@ -90,28 +102,43 @@ describe("GhCliScm reader", () => {
       throw new Error("gh api exited 1: HTTP 404");
     };
     const scm = new GhCliScm({ runGh });
-    await expect(scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/404/);
+    await expect(
+      scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/404/);
   });
 
   it("THROWS when the compare hits GitHub's 300-file cap (partial diff must not scan as clean)", async () => {
-    const files = Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}.ts`, patch: "@@ -0,0 +1,1 @@\n+1" }));
+    const files = Array.from({ length: 300 }, (_, i) => ({
+      filename: `f${i}.ts`,
+      patch: "@@ -0,0 +1,1 @@\n+1",
+    }));
     const { runGh } = stub([{ match: isCompare, reply: JSON.stringify([{ files }]) }]);
     const scm = new GhCliScm({ runGh });
-    await expect(scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/cap|too large/i);
+    await expect(
+      scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/cap|too large/i);
   });
 
   it("THROWS when a text file has added lines but no patch (too large to diff — must abstain, not scan clean)", async () => {
     const page = JSON.stringify([{ files: [{ filename: "huge.sql", additions: 5000 }] }]); // no patch
     const { runGh } = stub([{ match: isCompare, reply: page }]);
     const scm = new GhCliScm({ runGh });
-    await expect(scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/no patch|too large/i);
+    await expect(
+      scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD }),
+    ).rejects.toThrow(/no patch|too large/i);
   });
 
   it("does NOT throw for binary/rename files (no added lines, no patch)", async () => {
-    const page = JSON.stringify([{ files: [{ filename: "logo.png", additions: 0 }, { filename: "moved.ts" }] }]);
+    const page = JSON.stringify([
+      { files: [{ filename: "logo.png", additions: 0 }, { filename: "moved.ts" }] },
+    ]);
     const { runGh } = stub([{ match: isCompare, reply: page }]);
     const scm = new GhCliScm({ runGh });
-    const files = await scm.getChangedFilesInRange({ repository: REPO, baseSha: BASE, headSha: HEAD });
+    const files = await scm.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: BASE,
+      headSha: HEAD,
+    });
     expect(files).toEqual([
       { path: "logo.png", patch: "" },
       { path: "moved.ts", patch: "" },
@@ -124,11 +151,18 @@ describe("GhCliScm reader", () => {
     // silently widening the null-base scan. The fix bypasses PR resolution.
     const { runGh, calls } = stub([
       { match: isPulls, reply: JSON.stringify([{ state: "open", base: { sha: BASE } }]) },
-      { match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)), reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }) },
+      {
+        match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)),
+        reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }),
+      },
     ]);
     const scm = new GhCliScm({ runGh });
 
-    const files = await scm.getChangedFilesInRange({ repository: REPO, baseSha: null, headSha: HEAD });
+    const files = await scm.getChangedFilesInRange({
+      repository: REPO,
+      baseSha: null,
+      headSha: HEAD,
+    });
 
     expect(files).toEqual([{ path: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }]);
     expect(calls.some(isPulls)).toBe(false); // PR resolution bypassed entirely
@@ -138,7 +172,10 @@ describe("GhCliScm reader", () => {
   it("ignores a closed-only PR and scans the commit itself (stale base would be wrong)", async () => {
     const { runGh, calls } = stub([
       { match: isPulls, reply: JSON.stringify([{ state: "closed", base: { sha: BASE } }]) },
-      { match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)), reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }) },
+      {
+        match: (a) => a.some((s) => s.endsWith(`/commits/${HEAD}`)),
+        reply: JSON.stringify({ files: [{ filename: "a.ts", patch: "@@ -0,0 +1,1 @@\n+1" }] }),
+      },
     ]);
     const scm = new GhCliScm({ runGh });
     const files = await scm.getChangedFiles(SUBJECT);
@@ -150,9 +187,21 @@ describe("GhCliScm reader", () => {
 describe("GhCliScm candidate CI", () => {
   const checkRuns = JSON.stringify({
     check_runs: [
-      { name: "ci/build", status: "completed", conclusion: "success", head_sha: HEAD, completed_at: "2026-07-20T10:00:00Z" },
+      {
+        name: "ci/build",
+        status: "completed",
+        conclusion: "success",
+        head_sha: HEAD,
+        completed_at: "2026-07-20T10:00:00Z",
+      },
       { name: "ci/lint", status: "in_progress", conclusion: null, head_sha: HEAD },
-      { name: "ci/flaky", status: "completed", conclusion: "cancelled", head_sha: HEAD, completed_at: "2026-07-20T10:05:00Z" },
+      {
+        name: "ci/flaky",
+        status: "completed",
+        conclusion: "cancelled",
+        head_sha: HEAD,
+        completed_at: "2026-07-20T10:05:00Z",
+      },
     ],
   });
   const statuses = JSON.stringify([
@@ -174,11 +223,35 @@ describe("GhCliScm candidate CI", () => {
     // its context, source, and the EXACT candidate SHA it was gathered for.
     expect(evidence.records).toEqual(
       expect.arrayContaining([
-        { context: "ci/build", state: "success", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:00:00Z" },
+        {
+          context: "ci/build",
+          state: "success",
+          sha: HEAD,
+          source: "check-run",
+          updatedAt: "2026-07-20T10:00:00Z",
+        },
         { context: "ci/lint", state: "pending", sha: HEAD, source: "check-run" }, // not completed -> pending
-        { context: "ci/flaky", state: "cancelled", sha: HEAD, source: "check-run", updatedAt: "2026-07-20T10:05:00Z" },
-        { context: "ci/test", state: "success", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:00:00Z" },
-        { context: "legacy/deploy", state: "failure", sha: HEAD, source: "commit-status", updatedAt: "2026-07-20T11:01:00Z" },
+        {
+          context: "ci/flaky",
+          state: "cancelled",
+          sha: HEAD,
+          source: "check-run",
+          updatedAt: "2026-07-20T10:05:00Z",
+        },
+        {
+          context: "ci/test",
+          state: "success",
+          sha: HEAD,
+          source: "commit-status",
+          updatedAt: "2026-07-20T11:00:00Z",
+        },
+        {
+          context: "legacy/deploy",
+          state: "failure",
+          sha: HEAD,
+          source: "commit-status",
+          updatedAt: "2026-07-20T11:01:00Z",
+        },
       ]),
     );
     expect(evidence.records.every((r) => r.sha === HEAD)).toBe(true);
@@ -199,6 +272,77 @@ describe("GhCliScm candidate CI", () => {
       { match: isCiStatuses, reply: "[]" },
     ]);
     await expect(new GhCliScm({ runGh }).getCandidateCi(SUBJECT)).rejects.toThrow(/check_runs/);
+  });
+});
+
+describe("GhCliScm release context", () => {
+  it("reads exact-label bug issues and every open PR as provider-neutral metadata", async () => {
+    const { runGh } = stub([
+      {
+        match: isOpenIssues,
+        reply: JSON.stringify([
+          {
+            number: 7,
+            html_url: "https://github.com/acme/widgets/issues/7",
+            title: "Widget corrupts cache",
+            labels: [{ name: "bug" }],
+            updated_at: "2026-07-31T10:00:00Z",
+          },
+          {
+            number: 8,
+            html_url: "https://github.com/acme/widgets/pull/8",
+            title: "A PR returned by issues",
+            labels: [{ name: "bug" }],
+            pull_request: {},
+          },
+        ]),
+      },
+      {
+        match: isOpenPulls,
+        reply: JSON.stringify([
+          {
+            number: 8,
+            html_url: "https://github.com/acme/widgets/pull/8",
+            title: "Fix cache corruption",
+            draft: false,
+            head: { sha: HEAD, ref: "fix/cache" },
+            base: { ref: "main" },
+            user: { login: "alice" },
+            updated_at: "2026-07-31T11:00:00Z",
+          },
+        ]),
+      },
+    ]);
+
+    const work = await new GhCliScm({ runGh }).getOpenReleaseWork(REPO);
+
+    expect(work.complete).toBe(true);
+    expect(work.bugIssues).toEqual([
+      {
+        number: 7,
+        url: "https://github.com/acme/widgets/issues/7",
+        title: "Widget corrupts cache",
+        labels: ["bug"],
+        updatedAt: "2026-07-31T10:00:00Z",
+      },
+    ]);
+    expect(work.openPullRequests[0]).toMatchObject({
+      number: 8,
+      headSha: HEAD,
+      headBranch: "fix/cache",
+      baseBranch: "main",
+      author: "alice",
+    });
+  });
+
+  it("throws on malformed context instead of recording an empty backlog", async () => {
+    const { runGh } = stub([
+      { match: isOpenIssues, reply: JSON.stringify([{ number: 7 }]) },
+      { match: isOpenPulls, reply: "[]" },
+    ]);
+    await expect(new GhCliScm({ runGh }).getOpenReleaseWork(REPO)).rejects.toThrow(
+      /unexpected shape/,
+    );
   });
 });
 

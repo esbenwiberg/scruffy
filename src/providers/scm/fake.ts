@@ -14,6 +14,7 @@ import type {
   IssueUpsertResult,
   PullRequestInput,
   PullRequestResult,
+  RepositoryOpenWorkObservation,
   RevisionRange,
   ScmInstallationReader,
   ScmLifecycleReader,
@@ -93,9 +94,15 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
   /** Seed full immutable content for `path` at `subject`. Plain string convenience overload seeds a complete read. */
   seedFileContent(subject: SubjectRevision, path: string, content: string): void;
   seedFileContent(subject: SubjectRevision, path: string, result: FileContentResult): void;
-  seedFileContent(subject: SubjectRevision, path: string, contentOrResult: string | FileContentResult): void {
+  seedFileContent(
+    subject: SubjectRevision,
+    path: string,
+    contentOrResult: string | FileContentResult,
+  ): void {
     const result: FileContentResult =
-      typeof contentOrResult === "string" ? { complete: true, path, content: contentOrResult } : contentOrResult;
+      typeof contentOrResult === "string"
+        ? { complete: true, path, content: contentOrResult }
+        : contentOrResult;
     this.#fileContent.set(this.#contentKey(subject, path), result);
   }
 
@@ -108,7 +115,13 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
   }
 
   async getFileContent(subject: SubjectRevision, path: string): Promise<FileContentResult> {
-    return this.#fileContent.get(this.#contentKey(subject, path)) ?? { complete: false, path, reason: "not_found" };
+    return (
+      this.#fileContent.get(this.#contentKey(subject, path)) ?? {
+        complete: false,
+        path,
+        reason: "not_found",
+      }
+    );
   }
 
   /** Seed honest candidate-CI evidence for a candidate SHA (tests/harness). */
@@ -120,7 +133,41 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     // No seed is a genuinely CI-less candidate (empty records), NOT a failed read:
     // the fake never simulates an API fault. A required context then reads as
     // missing -> the lane is incomplete -> sign-off, exactly as intended.
-    return this.#candidateCi.get(this.#subjectKey(subject)) ?? { sha: subject.commitSha, records: [] };
+    return (
+      this.#candidateCi.get(this.#subjectKey(subject)) ?? { sha: subject.commitSha, records: [] }
+    );
+  }
+
+  /** Context-only view over the fake's currently open issues and PRs. */
+  async getOpenReleaseWork(repository: string): Promise<RepositoryOpenWorkObservation> {
+    const bugIssues = this.#issues
+      .filter(
+        (issue) =>
+          issue.repository === repository &&
+          issue.state === "open" &&
+          issue.input.labels.some((label) => label.toLowerCase() === "bug"),
+      )
+      .map((issue) => ({
+        number: issue.ref.number,
+        url: issue.ref.url,
+        title: issue.input.title,
+        labels: [...issue.input.labels],
+      }))
+      .sort((a, b) => a.number - b.number);
+    const openPullRequests = [...this.#pullRequests.values()]
+      .filter((pr) => pr.repository === repository && pr.state === "open")
+      .map((pr) => ({
+        number: pr.number,
+        url: pr.url,
+        title: pr.input.title,
+        draft: pr.draft,
+        headSha: pr.headSha,
+        headBranch: pr.branch,
+        baseBranch: pr.input.baseBranch ?? "default",
+        author: "scruffy[bot]",
+      }))
+      .sort((a, b) => a.number - b.number);
+    return { complete: true, bugIssues, openPullRequests, gaps: [] };
   }
 
   async upsertCheckRun(input: CheckRunInput): Promise<CheckRunResult> {
@@ -156,7 +203,13 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     if (existing) {
       // Idempotent: keep the number/head, update the payload, report not-created.
       existing.input = input;
-      return { number: existing.number, url: existing.url, headSha: existing.headSha, draft: existing.draft, created: false };
+      return {
+        number: existing.number,
+        url: existing.url,
+        headSha: existing.headSha,
+        draft: existing.draft,
+        created: false,
+      };
     }
 
     const { repository, commitSha } = input.subject;
@@ -173,7 +226,11 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
       const sha = fakeSha(`${input.proposalId}:commit`);
       this.#branches.set(branchKey, {
         sha,
-        message: fixCommitMessage({ title: input.title, proposalId: input.proposalId, reviewedSha: commitSha }),
+        message: fixCommitMessage({
+          title: input.title,
+          proposalId: input.proposalId,
+          reviewedSha: commitSha,
+        }),
       });
     }
 
@@ -204,7 +261,9 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
       if (edit.expectedOriginal === undefined) continue;
       const read = await this.getFileContent(input.subject, edit.path);
       if (!read.complete) {
-        throw new Error(`fake-scm: cannot read ${edit.path} at ${input.subject.commitSha} (${read.reason})`);
+        throw new Error(
+          `fake-scm: cannot read ${edit.path} at ${input.subject.commitSha} (${read.reason})`,
+        );
       }
       const lines = read.content.split("\n");
       const actual = lines.slice(edit.startLine - 1, edit.endLine).join("\n");
@@ -240,7 +299,10 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     return this.#branches.get(`${repository}#${branch}`)?.sha ?? null;
   }
 
-  async getIssueState(_repository: string, number: number): Promise<ExternalIssueObservation | null> {
+  async getIssueState(
+    _repository: string,
+    number: number,
+  ): Promise<ExternalIssueObservation | null> {
     // An explicitly simulated HUMAN closure wins: it carries an actor and reason,
     // which is exactly what distinguishes a dismissal from Scruffy's own close.
     const closed = this.#issueState.get(number);
@@ -290,7 +352,9 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
       throw fault;
     }
     if (this.#installed === null) {
-      throw new Error("fake-scm: no installed repositories seeded — call seedInstalledRepositories() first");
+      throw new Error(
+        "fake-scm: no installed repositories seeded — call seedInstalledRepositories() first",
+      );
     }
     return this.#installed.map((repo) => ({ ...repo }));
   }
@@ -359,12 +423,15 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
   }
 
   #pull(repository: string, number: number): FakePullRequest | undefined {
-    return [...this.#pullRequests.values()].find((pr) => pr.repository === repository && pr.number === number);
+    return [...this.#pullRequests.values()].find(
+      (pr) => pr.repository === repository && pr.number === number,
+    );
   }
 
   #requirePull(repository: string, number: number): FakePullRequest {
     const record = this.#pull(repository, number);
-    if (record === undefined) throw new Error(`fake-scm: no pull request #${number} in ${repository}`);
+    if (record === undefined)
+      throw new Error(`fake-scm: no pull request #${number} in ${repository}`);
     return record;
   }
 
@@ -403,7 +470,12 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     };
     // Never closed on create, whatever the caller asked for: publishing an issue
     // already closed would hide brand-new work from the humans it is meant for.
-    this.#issues.push({ repository: input.repository, ref, input: { ...input, body }, state: "open" });
+    this.#issues.push({
+      repository: input.repository,
+      ref,
+      input: { ...input, body },
+      state: "open",
+    });
     return ref;
   }
 
@@ -425,11 +497,15 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
   }
 
   #issueByMarker(repository: string, marker: string): FakeIssue | undefined {
-    return this.#issues.find((issue) => issue.repository === repository && issue.input.body.includes(marker));
+    return this.#issues.find(
+      (issue) => issue.repository === repository && issue.input.body.includes(marker),
+    );
   }
 
   #issueByNumber(repository: string, number: number): FakeIssue | undefined {
-    return this.#issues.find((issue) => issue.repository === repository && issue.ref.number === number);
+    return this.#issues.find(
+      (issue) => issue.repository === repository && issue.ref.number === number,
+    );
   }
 
   /** Test/harness introspection. */

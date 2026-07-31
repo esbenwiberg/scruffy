@@ -839,14 +839,13 @@ export class RunStore implements NightlyRunStore {
 
   /**
    * Atomically, for a release run: move analyzing -> terminal, record the
-   * first-class report, the (denormalized) decision and its findings, and enqueue
-   * the outbox check effect — ALL in one transaction. An external effect can never
-   * be recorded without its state change, and a terminal report can never land
-   * without its effect (or vice versa). Mirrors commitDecision (poison): one
-   * aggregate outcome, one advisory check effect. Release owns no watermark (it is
-   * triggered per candidate), so there is nothing to advance here.
+   * first-class report and the (denormalized) decision and its findings — ALL in
+   * one transaction. A legacy shadow check effect may be supplied, but CD-native
+   * callers deliberately omit it and render the persisted report into the Actions
+   * deployment job summary instead. Release owns no watermark (it is triggered per
+   * candidate), so there is nothing to advance here.
    *
-   * Both the report (keyed by run_id) and the outbox row (keyed by
+   * The report (keyed by run_id) and any optional outbox row (keyed by
    * run_id/external_id) dedupe with `on conflict ... do nothing`, so re-driving one
    * idempotent run persists at most one report and one effect.
    */
@@ -858,7 +857,8 @@ export class RunStore implements NightlyRunStore {
     decision: ReleaseDecision;
     report: ReleaseRiskReport;
     findings: Finding[];
-    effect: OutboxEffect;
+    /** Legacy shadow commit check. CD-native runs omit this. */
+    effect?: OutboxEffect;
     /** Fencing token from the claim; the commit only lands if the lease still matches. */
     fenceLease?: string;
   }): Promise<boolean> {
@@ -868,10 +868,11 @@ export class RunStore implements NightlyRunStore {
 
       const now = this.clock.now();
       const report = params.report;
-      // Serialize the effect payload FIRST: a payload that cannot be serialized
-      // must abort the whole transaction (rolling back the transition/report/
-      // decision) rather than leaving a terminal report with no effect.
-      const effectPayload = JSON.stringify(params.effect.payload);
+      // When a legacy shadow effect is requested, serialize it FIRST: a payload
+      // that cannot be serialized must abort the whole transaction. CD-native
+      // runs omit the effect entirely; the persisted report is their output.
+      const effectPayload =
+        params.effect === undefined ? undefined : JSON.stringify(params.effect.payload);
       await client.query(
         `insert into release_reports
            (run_id, report_id, report_version, repository, previous_release_sha, candidate_sha, policy_version, report, generated_at, created_at)
@@ -904,19 +905,21 @@ export class RunStore implements NightlyRunStore {
           now,
         ],
       );
-      await client.query(
-        `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
-         values ($1, $2, $3, $4, $5, 'pending', 0, $6)
-         on conflict (run_id, external_id) do nothing`,
-        [
-          this.ids.next("obx"),
-          params.runId,
-          params.effect.effectType,
-          params.effect.externalId,
-          effectPayload,
-          now,
-        ],
-      );
+      if (params.effect !== undefined) {
+        await client.query(
+          `insert into outbox (id, run_id, effect_type, external_id, payload, status, attempts, created_at)
+           values ($1, $2, $3, $4, $5, 'pending', 0, $6)
+           on conflict (run_id, external_id) do nothing`,
+          [
+            this.ids.next("obx"),
+            params.runId,
+            params.effect.effectType,
+            params.effect.externalId,
+            effectPayload,
+            now,
+          ],
+        );
+      }
       return true;
     });
   }

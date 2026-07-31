@@ -5,15 +5,31 @@ import type { EffectivePolicy } from "../../domain/policy/types.js";
 import type { Validator } from "../../domain/validation/port.js";
 import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader, RevisionRange } from "../../providers/scm/port.js";
-import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
+import type {
+  ReleaseRiskAnalyst,
+  ReleaseRiskAssessment,
+} from "../../providers/release-risk/port.js";
 import type { RunStore, OutboxEffect } from "../../persistence/runs.js";
-import { RELEASE_CHECK_NAME, releaseToCheck, type CheckRunPayload } from "../../effects/check-run.js";
+import {
+  RELEASE_CHECK_NAME,
+  releaseToCheck,
+  type CheckRunPayload,
+} from "../../effects/check-run.js";
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { CandidateCiEvaluation } from "./candidate-ci.js";
 import type { ReleaseDecision } from "./decision.js";
-import { assembleReleaseReport, type ReleaseRiskReport, type ReleaseRiskLaneInput } from "../../domain/release/report.js";
+import {
+  assembleReleaseReport,
+  type ReleaseRiskReport,
+  type ReleaseRiskLaneInput,
+} from "../../domain/release/report.js";
 import { analysisFailed } from "../../domain/evidence/coverage.js";
+import {
+  unavailableOutstandingWork,
+  type ReleaseOutstandingWork,
+  type ReleaseOutstandingWorkReader,
+} from "../../domain/release/outstanding-work.js";
 
 export interface ReleaseServiceDeps {
   runs: RunStore;
@@ -27,6 +43,14 @@ export interface ReleaseServiceDeps {
    * absent the release path is source-analysis only (the slice-01 behavior).
    */
   releaseRisk?: ReleaseRiskAnalyst;
+  /** Context-only backlog/nightly reader. Its output never enters the decision kernel. */
+  outstandingWork?: ReleaseOutstandingWorkReader;
+  /**
+   * Legacy shadow surface: post a commit check. CD-native wiring sets false and
+   * renders the persisted report in the deployment job instead. Default true for
+   * backwards-compatible harnesses and explicit shadow consumers.
+   */
+  publishCheck?: boolean;
   /** Injected clock for the report's generatedAt stamp (excluded from identity). */
   clock: Clock;
   /** Lease duration for an analysis claim. Default 60s. */
@@ -70,11 +94,13 @@ export class ReleaseService {
   readonly #leaseMs: number;
   readonly #maxAttempts: number;
   readonly #owner: string;
+  readonly #publishCheck: boolean;
 
   constructor(private readonly deps: ReleaseServiceDeps) {
     this.#leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS;
     this.#maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.#owner = deps.owner ?? "release-worker";
+    this.#publishCheck = deps.publishCheck ?? true;
   }
 
   get maxAttempts(): number {
@@ -112,29 +138,37 @@ export class ReleaseService {
         baseSha: run.baseSha,
         headSha: run.subject.commitSha,
       };
-      const { findings, decision, releaseRisk, candidateCi } = await withLeaseHeartbeat(runs, run.id, lease, this.#leaseMs, () =>
-        runReleaseAnalysis(range, {
-          scm: this.deps.scm,
-          analyzers: this.deps.analyzers,
-          validator: this.deps.validator,
-          policy: this.deps.policy.release,
-          ...(this.deps.releaseRisk ? { releaseRisk: this.deps.releaseRisk } : {}),
-        }),
+      const [analysis, outstandingWork] = await withLeaseHeartbeat(
+        runs,
+        run.id,
+        lease,
+        this.#leaseMs,
+        () =>
+          Promise.all([
+            runReleaseAnalysis(range, {
+              scm: this.deps.scm,
+              analyzers: this.deps.analyzers,
+              validator: this.deps.validator,
+              policy: this.deps.policy.release,
+              ...(this.deps.releaseRisk ? { releaseRisk: this.deps.releaseRisk } : {}),
+            }),
+            this.#readOutstandingWork(run),
+          ]),
       );
+      const { findings, decision, releaseRisk, candidateCi } = analysis;
 
-      // Assemble ONE report for this terminal analysis. The advisory check is
-      // rendered FROM the report, so decision/report/check cannot diverge.
-      const report = this.#assembleReport(run, findings, decision, releaseRisk, candidateCi);
-      const check = releaseToCheck(report);
-      const payload: CheckRunPayload = {
-        subject: run.subject,
-        externalId: this.#externalId(run),
-        name: RELEASE_CHECK_NAME,
-        conclusion: check.conclusion,
-        title: check.title,
-        summary: check.summary,
-      };
-      const effect: OutboxEffect = { effectType: "check_run", externalId: payload.externalId, payload };
+      // Assemble ONE report for this terminal analysis. Context is packaged but
+      // was not passed to runReleaseAnalysis/evaluateRelease, so backlog state can
+      // never acquire decision authority by accident.
+      const report = this.#assembleReport(
+        run,
+        findings,
+        decision,
+        releaseRisk,
+        candidateCi,
+        outstandingWork,
+      );
+      const effect = this.#publishCheck ? this.#checkEffect(run, report) : undefined;
 
       await runs.commitReleaseDecision({
         runId: run.id,
@@ -144,7 +178,7 @@ export class ReleaseService {
         decision,
         report,
         findings,
-        effect,
+        ...(effect !== undefined ? { effect } : {}),
         fenceLease: lease,
       });
     } catch (err) {
@@ -170,7 +204,11 @@ export class ReleaseService {
     });
   }
 
-  async #abstain(run: EvaluationRun, message: string, opts: { from: RunState; fenceLease?: string }): Promise<void> {
+  async #abstain(
+    run: EvaluationRun,
+    message: string,
+    opts: { from: RunState; fenceLease?: string },
+  ): Promise<void> {
     const empty: ReleaseDecision = {
       outcome: "indeterminate",
       reasons: [],
@@ -181,16 +219,17 @@ export class ReleaseService {
     // Even an abstention is a terminal analysis and gets ONE SHA-bound report — the
     // check is rendered from it, so the advisory summary can never claim more than
     // the report holds. The failed source lane makes the blindness explicit.
-    const report = this.#assembleReport(run, [], empty);
-    const check = releaseToCheck(report);
-    const payload: CheckRunPayload = {
-      subject: run.subject,
-      externalId: this.#externalId(run),
-      name: RELEASE_CHECK_NAME,
-      conclusion: check.conclusion,
-      title: check.title,
-      summary: check.summary,
-    };
+    const report = this.#assembleReport(
+      run,
+      [],
+      empty,
+      undefined,
+      undefined,
+      unavailableOutstandingWork(
+        "release analysis failed before outstanding-work context could be established",
+      ),
+    );
+    const effect = this.#publishCheck ? this.#checkEffect(run, report) : undefined;
     await this.deps.runs.commitReleaseDecision({
       runId: run.id,
       from: opts.from,
@@ -199,7 +238,7 @@ export class ReleaseService {
       decision: empty,
       report,
       findings: [],
-      effect: { effectType: "check_run", externalId: payload.externalId, payload },
+      ...(effect !== undefined ? { effect } : {}),
       ...(opts.fenceLease !== undefined ? { fenceLease: opts.fenceLease } : {}),
     });
   }
@@ -217,6 +256,7 @@ export class ReleaseService {
     decision: ReleaseDecision,
     releaseRisk?: ReleaseRiskAssessment,
     candidateCi?: CandidateCiEvaluation,
+    outstandingWork?: ReleaseOutstandingWork,
   ): ReleaseRiskReport {
     return assembleReleaseReport({
       subject: {
@@ -232,7 +272,10 @@ export class ReleaseService {
       // Lane required/applicable booleans come from service-owned policy, not an
       // assumption — every policy-declared lane appears with its true posture.
       laneDeclarations: this.deps.policy.release.evidence,
-      ...(releaseRisk ? { releaseRisk: this.#releaseRiskLane(releaseRisk, this.deps.releaseRisk!) } : {}),
+      ...(outstandingWork !== undefined ? { outstandingWork } : {}),
+      ...(releaseRisk
+        ? { releaseRisk: this.#releaseRiskLane(releaseRisk, this.deps.releaseRisk!) }
+        : {}),
       ...(candidateCi
         ? {
             candidateCi: {
@@ -247,8 +290,24 @@ export class ReleaseService {
     });
   }
 
+  async #readOutstandingWork(run: EvaluationRun): Promise<ReleaseOutstandingWork> {
+    if (this.deps.outstandingWork === undefined) {
+      return unavailableOutstandingWork("outstanding-work context reader is not configured");
+    }
+    try {
+      return await this.deps.outstandingWork.read(run.subject);
+    } catch (error) {
+      return unavailableOutstandingWork(
+        `outstanding-work context read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   /** Map the analyst's assessment onto the report's release-risk lane input. */
-  #releaseRiskLane(assessment: ReleaseRiskAssessment, analyst: ReleaseRiskAnalyst): ReleaseRiskLaneInput {
+  #releaseRiskLane(
+    assessment: ReleaseRiskAssessment,
+    analyst: ReleaseRiskAnalyst,
+  ): ReleaseRiskLaneInput {
     return {
       changeSummary: assessment.changeSummary,
       risks: assessment.risks,
@@ -259,6 +318,19 @@ export class ReleaseService {
       ...(assessment.provenance.modelId !== null ? { modelId: assessment.provenance.modelId } : {}),
       promptVersion: assessment.provenance.promptVersion,
     };
+  }
+
+  #checkEffect(run: EvaluationRun, report: ReleaseRiskReport): OutboxEffect {
+    const check = releaseToCheck(report);
+    const payload: CheckRunPayload = {
+      subject: run.subject,
+      externalId: this.#externalId(run),
+      name: RELEASE_CHECK_NAME,
+      conclusion: check.conclusion,
+      title: check.title,
+      summary: check.summary,
+    };
+    return { effectType: "check_run", externalId: payload.externalId, payload };
   }
 
   #externalId(run: EvaluationRun): string {

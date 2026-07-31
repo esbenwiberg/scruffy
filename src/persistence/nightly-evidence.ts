@@ -57,6 +57,8 @@ interface FindingRow {
   visibility_reason: string;
   resolution: string;
   remediation: unknown;
+  issue_number: number | null;
+  issue_url: string | null;
   proposal_id: string | null;
   delivery: string | null;
   ci: string | null;
@@ -74,7 +76,9 @@ interface FindingRow {
 export class NightlyEvidenceStore implements NightlyEvidenceReadPort {
   constructor(private readonly pool: Pool) {}
 
-  async reports(input: NightlyEvidenceQueryInput & { limit: number }): Promise<NightlyEvidenceReport[]> {
+  async reports(
+    input: NightlyEvidenceQueryInput & { limit: number },
+  ): Promise<NightlyEvidenceReport[]> {
     const rows = await this.pool.query<ReportRow>(
       `select r.report_id, r.repository, r.branch, r.base_sha, r.head_sha, r.policy_version,
               r.required_coverage_complete, r.coverage, r.summary, r.created_at,
@@ -118,7 +122,10 @@ export class NightlyEvidenceStore implements NightlyEvidenceReadPort {
           code: gap.code,
           detail: gap.detail,
         })),
-        parentIssue: row.parent_number === null || row.parent_url === null ? null : { number: row.parent_number, url: row.parent_url },
+        parentIssue:
+          row.parent_number === null || row.parent_url === null
+            ? null
+            : { number: row.parent_number, url: row.parent_url },
         findings: await this.#findings(row.report_id),
         createdAt: row.created_at,
       });
@@ -132,6 +139,7 @@ export class NightlyEvidenceStore implements NightlyEvidenceReadPort {
       // newest immutable subject, never an older, more convenient one.
       `select f.occurrence_id, f.finding_key, f.rule_id, f.defect_class, f.path,
               f.start_line, f.end_line, f.visibility, f.visibility_reason, f.resolution, f.remediation,
+              wpub.external_number as issue_number, wpub.external_url as issue_url,
               p.proposal_id, p.delivery, p.ci, p.ci_head_sha, p.merge_state,
               p.pr_number, p.pr_url, p.delivery_error,
               w.dismissed_at,
@@ -140,6 +148,7 @@ export class NightlyEvidenceStore implements NightlyEvidenceReadPort {
          from nightly_report_findings f
          left join nightly_fix_proposals p on p.occurrence_id = f.occurrence_id
          left join nightly_work_items w on w.occurrence_id = f.occurrence_id
+         left join nightly_work_item_publications wpub on wpub.work_item_id = w.work_item_id
          left join lateral (
            select outcome, detail, subject_sha
              from nightly_finding_verifications nv
@@ -171,7 +180,12 @@ function toEvidenceFinding(row: FindingRow): NightlyEvidenceFinding {
     visibility: FindingVisibility.parse(row.visibility),
     visibilityReason: row.visibility_reason,
     resolution: FindingResolution.parse(row.resolution),
-    remediation: remediation === null ? null : { state: remediation.state, reason: remediation.reason },
+    issue:
+      row.issue_number === null || row.issue_url === null
+        ? null
+        : { number: row.issue_number, url: row.issue_url },
+    remediation:
+      remediation === null ? null : { state: remediation.state, reason: remediation.reason },
     proposal:
       row.proposal_id === null
         ? null
@@ -181,7 +195,10 @@ function toEvidenceFinding(row: FindingRow): NightlyEvidenceFinding {
             ci: ProposalCiState.parse(row.ci),
             ciHeadSha: row.ci_head_sha,
             merge: ProposalMergeState.parse(row.merge_state),
-            pullRequest: row.pr_number === null || row.pr_url === null ? null : { number: row.pr_number, url: row.pr_url },
+            pullRequest:
+              row.pr_number === null || row.pr_url === null
+                ? null
+                : { number: row.pr_number, url: row.pr_url },
             deliveryError: row.delivery_error,
           },
     verification:

@@ -8,6 +8,7 @@ import { NightlyScheduleStore } from "../persistence/nightly-schedule.js";
 import { NightlyEvidenceStore } from "../persistence/nightly-evidence.js";
 import { NightlyScheduler, type NightlyTickResult } from "./nightly-scheduler.js";
 import { NightlyEvidenceQuery } from "./nightly-evidence-query.js";
+import { ReleaseOutstandingWorkQuery } from "./release-outstanding-work.js";
 import { EffectsDispatcher } from "../effects/dispatcher.js";
 import { FixReconciler, type FixReconcileResult } from "./fix-reconciler.js";
 import { PatchAppliedVerifier, type PostMergeVerifier } from "../gates/nightly/verify.js";
@@ -24,7 +25,12 @@ import type { ReleaseRiskAnalyst } from "../providers/release-risk/port.js";
 import type { Validator } from "../domain/validation/port.js";
 import type { Fixer } from "../providers/fixers/port.js";
 import type { ModelProvider } from "../providers/models/port.js";
-import type { ScmInstallationReader, ScmLifecycleReader, ScmReader, ScmWriter } from "../providers/scm/port.js";
+import type {
+  ScmInstallationReader,
+  ScmLifecycleReader,
+  ScmReader,
+  ScmWriter,
+} from "../providers/scm/port.js";
 import { verifyAndParseWebhook } from "../ingest/webhook.js";
 
 /**
@@ -94,6 +100,12 @@ export interface ScruffyDeps {
    * corpus replay never make a model call.
    */
   releaseRisk?: ReleaseRiskAnalyst;
+  /**
+   * Legacy shadow commit-check presentation. CD entrypoints set false so the
+   * heavyweight release report exists only in the deployment job/report surface,
+   * never on a pull request sharing the candidate SHA.
+   */
+  publishReleaseCheck?: boolean;
   webhookSecret: string;
   /** Optional overrides for the poison analysis lease and retry bound. */
   leaseMs?: number;
@@ -165,15 +177,22 @@ export class Scruffy {
     this.release = new ReleaseService({
       runs: this.runs,
       scm: deps.scmReader,
+      outstandingWork: new ReleaseOutstandingWorkQuery(deps.scmReader, this.nightlyEvidence),
       analyzers: deps.analyzers,
       validator: deps.validator,
       policy: deps.policy,
       clock: deps.clock,
+      publishCheck: deps.publishReleaseCheck ?? true,
       ...(deps.releaseRisk ? { releaseRisk: deps.releaseRisk } : {}),
       ...(deps.leaseMs !== undefined ? { leaseMs: deps.leaseMs } : {}),
       ...(deps.maxAttempts !== undefined ? { maxAttempts: deps.maxAttempts } : {}),
     });
-    this.dispatcher = new EffectsDispatcher(this.outbox, deps.scmWriter, this.publications, this.fixes);
+    this.dispatcher = new EffectsDispatcher(
+      this.outbox,
+      deps.scmWriter,
+      this.publications,
+      this.fixes,
+    );
     this.reconciler = new Reconciler(this.runs, this.poison, this.nightly, this.release);
     this.fixReconciler =
       deps.scmLifecycleReader === undefined
@@ -196,7 +215,9 @@ export class Scruffy {
             cadenceMs: deps.nightlySchedule.cadenceMs,
             leaseMs: deps.nightlySchedule.leaseMs ?? DEFAULT_SCHEDULE_LEASE_MS,
             owner: deps.nightlySchedule.owner ?? "nightly-scheduler",
-            ...(deps.nightlySchedule.batchSize !== undefined ? { batchSize: deps.nightlySchedule.batchSize } : {}),
+            ...(deps.nightlySchedule.batchSize !== undefined
+              ? { batchSize: deps.nightlySchedule.batchSize }
+              : {}),
           });
   }
 
@@ -214,7 +235,8 @@ export class Scruffy {
         claimed: 0,
         reviewed: 0,
         outcomes: [],
-        listingError: "no nightly schedule configured (needs an installation-capable SCM reader and a cadence)",
+        listingError:
+          "no nightly schedule configured (needs an installation-capable SCM reader and a cadence)",
       };
     }
     return this.nightlyScheduler.tick();
@@ -236,7 +258,13 @@ export class Scruffy {
    */
   async reconcileFixes(): Promise<FixReconcileResult> {
     if (this.fixReconciler === null) {
-      return { proposalsObserved: 0, verificationsRecorded: 0, dismissalsRecorded: 0, resolutionsChanged: 0, parentsClosed: 0 };
+      return {
+        proposalsObserved: 0,
+        verificationsRecorded: 0,
+        dismissalsRecorded: 0,
+        resolutionsChanged: 0,
+        parentsClosed: 0,
+      };
     }
     return this.fixReconciler.reconcile();
   }
@@ -262,7 +290,10 @@ export class Scruffy {
    * Full inbound path: verify + parse a webhook, then reconcile the poison run.
    * Returns the evaluation run id when a run was driven.
    */
-  async handleWebhook(signature: string, rawBody: string): Promise<{ handled: boolean; runId?: string }> {
+  async handleWebhook(
+    signature: string,
+    rawBody: string,
+  ): Promise<{ handled: boolean; runId?: string }> {
     const result = await verifyAndParseWebhook(this.deps.webhookSecret, signature, rawBody);
     if (result.kind === "ignored") return { handled: false };
     const run = await this.poison.evaluate(result.subject);
@@ -279,7 +310,10 @@ export class Scruffy {
   async acceptWebhook(
     signature: string,
     rawBody: string,
-  ): Promise<{ accepted: false; reason: string } | { accepted: true; runId: string; subject: SubjectRevision }> {
+  ): Promise<
+    | { accepted: false; reason: string }
+    | { accepted: true; runId: string; subject: SubjectRevision }
+  > {
     const result = await verifyAndParseWebhook(this.deps.webhookSecret, signature, rawBody);
     if (result.kind === "ignored") return { accepted: false, reason: result.reason };
     const run = await this.runs.ensureRun(result.subject, "poison", this.deps.policy.version);
@@ -292,7 +326,12 @@ export class Scruffy {
    * is a no-op. The head is parsed through SubjectRevision so a malformed sha is
    * rejected at the boundary, not deep in the DB.
    */
-  async runNightly(input: { repository: string; branch: string; head: string; base?: string | null }): Promise<ReviewResult> {
+  async runNightly(input: {
+    repository: string;
+    branch: string;
+    head: string;
+    base?: string | null;
+  }): Promise<ReviewResult> {
     const subject = SubjectRevision.parse({ repository: input.repository, commitSha: input.head });
     // Parse `base` at the boundary like runRelease does for prevRelease, so a
     // malformed base is rejected here with a clear SubjectRevision error rather
@@ -300,7 +339,9 @@ export class Scruffy {
     // nightly review relies on: undefined => use the watermark; null => explicit
     // first-ever base; a sha => validated override.
     const base =
-      input.base == null ? input.base : SubjectRevision.parse({ repository: input.repository, commitSha: input.base }).commitSha;
+      input.base == null
+        ? input.base
+        : SubjectRevision.parse({ repository: input.repository, commitSha: input.base }).commitSha;
     return this.nightly.review({
       repository: subject.repository,
       branch: input.branch,
@@ -316,10 +357,20 @@ export class Scruffy {
    * candidate and prev-release shas are parsed at the boundary so a malformed sha
    * is rejected here, not deep in the DB.
    */
-  async runRelease(input: { repository: string; candidate: string; prevRelease?: string | null }): Promise<EvaluationRun> {
-    const subject = SubjectRevision.parse({ repository: input.repository, commitSha: input.candidate });
+  async runRelease(input: {
+    repository: string;
+    candidate: string;
+    prevRelease?: string | null;
+  }): Promise<EvaluationRun> {
+    const subject = SubjectRevision.parse({
+      repository: input.repository,
+      commitSha: input.candidate,
+    });
     const prevRelease =
-      input.prevRelease == null ? null : SubjectRevision.parse({ repository: input.repository, commitSha: input.prevRelease }).commitSha;
+      input.prevRelease == null
+        ? null
+        : SubjectRevision.parse({ repository: input.repository, commitSha: input.prevRelease })
+            .commitSha;
     return this.release.review({
       repository: subject.repository,
       candidate: subject.commitSha,

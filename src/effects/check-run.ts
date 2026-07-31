@@ -5,6 +5,7 @@ import type { PoisonDecision } from "../gates/poison/decision.js";
 import { requiredCoverageGaps, type NightlyReport } from "../domain/findings/work-graph.js";
 import { nightlyReviewTitle } from "../domain/findings/morning-summary.js";
 import type { ReleaseRiskReport } from "../domain/release/report.js";
+import { signoffResponsibility } from "../domain/release/signoff.js";
 
 export const CHECK_NAME = "scruffy/poison";
 export const NIGHTLY_CHECK_NAME = "scruffy/nightly";
@@ -30,7 +31,10 @@ export type CheckRunPayload = z.infer<typeof CheckRunPayload>;
  * `neutral`, never `failure` — abstention is not a block, it escalates to a
  * deeper gate. In shadow mode this check is not a required status.
  */
-export function decisionToCheck(decision: PoisonDecision): { conclusion: CheckConclusion; title: string } {
+export function decisionToCheck(decision: PoisonDecision): {
+  conclusion: CheckConclusion;
+  title: string;
+} {
   switch (decision.outcome) {
     case "block":
       return { conclusion: "failure", title: "Poison gate: blocked" };
@@ -68,7 +72,11 @@ export function nightlyCheckExternalId(repository: string, commitSha: string): s
  * Rendering from the durable report (rather than the in-flight decision) keeps the
  * check and the persisted truth in agreement by construction.
  */
-export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclusion; title: string; summary: string } {
+export function nightlyToCheck(report: NightlyReport): {
+  conclusion: CheckConclusion;
+  title: string;
+  summary: string;
+} {
   const { surfaced, suppressed, proposals } = report.summary;
   const gaps = requiredCoverageGaps(report.coverage);
 
@@ -89,7 +97,9 @@ export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclu
       (f) =>
         `- [${f.remediation?.state ?? "none"}] ${f.defectClass} at ${f.region.path}:${f.region.startLine} (${f.visibilityReason})`,
     );
-  const gapLines = gaps.map((g) => `- [coverage] ${g.analyzerId}: ${g.code} — ${g.detail || "no detail reported"}`);
+  const gapLines = gaps.map(
+    (g) => `- [coverage] ${g.analyzerId}: ${g.code} — ${g.detail || "no detail reported"}`,
+  );
 
   const summary = [
     `surfaced: ${surfaced}, proposed fixes: ${proposals}, suppressed (audit only): ${suppressed}, required coverage gaps: ${gaps.length}.`,
@@ -102,7 +112,10 @@ export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclu
         ]
       : []),
     ...(proposals > 0
-      ? ["", "Proposed fixes open as pull requests for human review and are never auto-merged; a green CI run is not proof of correctness."]
+      ? [
+          "",
+          "Proposed fixes open as pull requests for human review and are never auto-merged; a green CI run is not proof of correctness.",
+        ]
       : []),
   ].join("\n");
 
@@ -124,7 +137,11 @@ export function nightlyToCheck(report: NightlyReport): { conclusion: CheckConclu
  * A concise summary intentionally omits bulky cleared evidence but preserves the
  * candidate, report id, outcome, coverage state, and every holding finding/gap.
  */
-export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckConclusion; title: string; summary: string } {
+export function releaseToCheck(report: ReleaseRiskReport): {
+  conclusion: CheckConclusion;
+  title: string;
+  summary: string;
+} {
   const decision = report.decision;
   const { stopped, escalated, cleared, notRelevant } = decision.summary;
   const reviewed = stopped + escalated + cleared + notRelevant;
@@ -182,7 +199,10 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
 
   const findingLines = decision.dispositions
     .filter((d) => d.effect === "stops" || d.effect === "escalates")
-    .map((d) => `- [${d.effect}] ${d.defectClass} at ${d.region.path}:${d.region.startLine} (${d.reason})`);
+    .map(
+      (d) =>
+        `- [${d.effect}] ${d.defectClass} at ${d.region.path}:${d.region.startLine} (${d.reason})`,
+    );
   // Coverage BEFORE finding totals: a clean count over incomplete coverage is not
   // a clean bill of health. Surface every lane's status and its explicit gaps.
   const laneLines = report.evidenceLanes.flatMap((lane) => [
@@ -193,30 +213,103 @@ export function releaseToCheck(report: ReleaseRiskReport): { conclusion: CheckCo
   // A concise summary omits bulky cleared evidence but must preserve every
   // HOLDING model risk — a retained model risk is unresolved and forced sign-off,
   // so it can never be silently dropped from the advisory summary.
-  const riskLines = report.risks.map(
-    (r) => `- [risk] ${r.category}: ${r.scenario} (${r.citations.map((c) => `${c.path}:${c.line}`).join(", ")})`,
-  );
+  const riskLines = report.risks.flatMap((r) => [
+    `- [risk] ${r.category}: ${singleLine(r.scenario)}`,
+    `    affected surface: ${singleLine(r.affectedSurface)}`,
+    `    blast radius: ${singleLine(r.blastRadius ?? "not established by this report version")}`,
+    `    impact: ${singleLine(r.impact)}`,
+    `    detectability: ${singleLine(r.detectability ?? "not established")}`,
+    `    reversibility: ${singleLine(r.reversibility ?? "not established")}`,
+    `    rollback: ${singleLine(r.rollback ?? "not established")}`,
+    `    uncertainty: ${singleLine(r.uncertainty ?? "none stated")}`,
+    `    supporting evidence: ${singleLine(r.supportingEvidence?.join("; ") || "none stated")}`,
+    `    contradicting evidence: ${singleLine(r.contradictingEvidence?.join("; ") || "none stated")}`,
+    `    citations: ${singleLine(r.citations.map((c) => `${c.path}:${c.line}`).join(", "))}`,
+  ]);
+  const workLines = releaseWorkLines(report);
   const reasons = decision.reasons.length > 0 ? decision.reasons.join(", ") : "(none)";
   const summary = [
     `candidate: ${report.subject.candidateSha}`,
     `previous release: ${report.subject.previousReleaseSha ?? "(first release)"}`,
     `report: ${report.reportId} (v${report.reportVersion}, policy ${report.policyVersion})`,
     `outcome: ${decision.outcome} — reasons: ${reasons}.`,
+    ...(decision.outcome === "sign-off-required"
+      ? [
+          "",
+          "HUMAN RESPONSIBILITY — approval does not transfer responsibility to Scruffy:",
+          signoffResponsibility(report),
+        ]
+      : []),
     "",
     // Coverage FIRST — before any finding total — so incomplete evidence can never
     // hide behind a clean-looking finding count.
     "coverage:",
     ...laneLines,
-    ...(incompleteLanes.length ? ["", `holding gaps: ${incompleteLanes.map((l) => l.laneId).join(", ")} not complete.`] : []),
+    ...(incompleteLanes.length
+      ? ["", `holding gaps: ${incompleteLanes.map((l) => l.laneId).join(", ")} not complete.`]
+      : []),
     "",
     `findings — stopped: ${stopped}, escalated: ${escalated}, cleared: ${cleared}, not-relevant: ${notRelevant}.`,
     ...(findingLines.length ? ["", ...findingLines] : []),
-    ...(riskLines.length ? ["", `model risks — ${riskCount} unresolved:`, ...riskLines] : []),
+    ...(riskLines.length
+      ? ["", `model risks — ${riskCount} unresolved (model-authored, advisory):`, ...riskLines]
+      : []),
+    ...(workLines.length ? ["", ...workLines] : []),
     "",
     "Shadow mode: this check is advisory and does not block publication.",
   ].join("\n");
 
   return { conclusion: "neutral", title, summary };
+}
+
+const CHECK_CONTEXT_ITEM_LIMIT = 10;
+
+/** Concise view; the persisted report retains the complete bounded snapshot. */
+function releaseWorkLines(report: ReleaseRiskReport): string[] {
+  const work = report.outstandingWork;
+  if (work === undefined) return [];
+
+  const lines = [
+    "outstanding work — CONTEXT ONLY; backlog state does not change the release outcome:",
+    `- repository context: ${work.repository.status}; ${work.repository.bugIssues.length} open bug issue(s), ${work.repository.openPullRequests.length} open PR(s)`,
+    ...work.repository.gaps.map((gap) => `    gap: ${singleLine(gap)}`),
+  ];
+  for (const issue of work.repository.bugIssues.slice(0, CHECK_CONTEXT_ITEM_LIMIT)) {
+    lines.push(`    bug #${issue.number}: ${singleLine(issue.title)} — ${issue.url}`);
+  }
+  if (work.repository.bugIssues.length > CHECK_CONTEXT_ITEM_LIMIT) {
+    lines.push(
+      `    ... ${work.repository.bugIssues.length - CHECK_CONTEXT_ITEM_LIMIT} more bug issue(s) retained in the report`,
+    );
+  }
+
+  if (work.repository.openPullRequests.length > 0) {
+    lines.push("    open PR details collapsed: future work, not part of the release candidate");
+  }
+
+  lines.push(
+    `- Scruffy nightly context: ${work.nightly.status}; ${work.nightly.reportsConsidered} report(s), ${work.nightly.findings.length} unresolved tracked finding(s)`,
+  );
+  for (const gap of work.nightly.gaps) lines.push(`    gap: ${singleLine(gap)}`);
+  for (const finding of work.nightly.findings.slice(0, CHECK_CONTEXT_ITEM_LIMIT)) {
+    lines.push(
+      `    [${finding.resolution}] ${finding.defectClass} at ${finding.path}:${finding.startLine}` +
+        (finding.issue ? ` — ${finding.issue.url}` : ""),
+    );
+  }
+  if (work.nightly.findings.length > CHECK_CONTEXT_ITEM_LIMIT) {
+    lines.push(
+      `    ... ${work.nightly.findings.length - CHECK_CONTEXT_ITEM_LIMIT} more tracked finding(s) retained in the report`,
+    );
+  }
+  return lines;
+}
+
+function singleLine(value: string): string {
+  return value
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .slice(0, 180);
 }
 
 export function toCheckRunInput(payload: CheckRunPayload): CheckRunInput {

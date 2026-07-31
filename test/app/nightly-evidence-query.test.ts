@@ -64,6 +64,7 @@ function finding(overrides: Partial<NightlyEvidenceFinding> = {}): NightlyEviden
     visibility: "surfaced",
     visibilityReason: "reportable defect class",
     resolution: "open",
+    issue: null,
     remediation: { state: "proposed", reason: "deterministic fixer produced a patch" },
     proposal: null,
     verification: null,
@@ -94,7 +95,9 @@ function report(overrides: Partial<NightlyEvidenceReport> = {}): NightlyEvidence
 class RecordingReader implements NightlyEvidenceReadPort {
   readonly calls: (NightlyEvidenceQueryInput & { limit: number })[] = [];
   constructor(private readonly rows: NightlyEvidenceReport[] = []) {}
-  async reports(input: NightlyEvidenceQueryInput & { limit: number }): Promise<NightlyEvidenceReport[]> {
+  async reports(
+    input: NightlyEvidenceQueryInput & { limit: number },
+  ): Promise<NightlyEvidenceReport[]> {
     this.calls.push({ ...input });
     return this.rows;
   }
@@ -106,7 +109,12 @@ describe("NightlyEvidenceQuery", () => {
     const snapshot = await new NightlyEvidenceQuery(reader).forRepository({ repository: REPO });
 
     expect(reader.calls[0]).toEqual({ repository: REPO, limit: 20 });
-    expect(snapshot).toMatchObject({ repository: REPO, branch: null, candidateSha: null, requiredCoverageComplete: true });
+    expect(snapshot).toMatchObject({
+      repository: REPO,
+      branch: null,
+      candidateSha: null,
+      requiredCoverageComplete: true,
+    });
     expect(snapshot.reports).toHaveLength(1);
   });
 
@@ -123,7 +131,10 @@ describe("NightlyEvidenceQuery", () => {
   });
 
   it("reports a candidate with NO nightly evidence as not completely reviewed", async () => {
-    const snapshot = await new NightlyEvidenceQuery(new RecordingReader([])).forCandidate(REPO, HEAD);
+    const snapshot = await new NightlyEvidenceQuery(new RecordingReader([])).forCandidate(
+      REPO,
+      HEAD,
+    );
     // "Never reviewed" and "reviewed and clean" must not produce the same answer:
     // this is the one property a later release aggregation is allowed to lean on.
     expect(snapshot.requiredCoverageComplete).toBe(false);
@@ -133,13 +144,17 @@ describe("NightlyEvidenceQuery", () => {
 
   it("is READ-ONLY: neither the port nor the query exposes a way to mutate lifecycle state", () => {
     const query = new NightlyEvidenceQuery(new RecordingReader());
-    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(query)).filter((name) => name !== "constructor");
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(query)).filter(
+      (name) => name !== "constructor",
+    );
     expect(methods.sort()).toEqual(["forCandidate", "forRepository"]);
     // The read port itself has exactly one method, so no adapter can smuggle a
     // write in behind this boundary.
-    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(new RecordingReader())).filter((n) => n !== "constructor")).toEqual(
-      ["reports"],
-    );
+    expect(
+      Object.getOwnPropertyNames(Object.getPrototypeOf(new RecordingReader())).filter(
+        (n) => n !== "constructor",
+      ),
+    ).toEqual(["reports"]);
   });
 });
 
@@ -179,13 +194,20 @@ describe("summarizeNightlyEvidence", () => {
               },
             }),
             // Suppressed findings are audit records, not open work.
-            finding({ occurrenceId: "occ-refuted", visibility: "suppressed", resolution: "open", remediation: null }),
+            finding({
+              occurrenceId: "occ-refuted",
+              visibility: "suppressed",
+              resolution: "open",
+              remediation: null,
+            }),
           ],
         }),
         report({
           reportId: "report-2",
           requiredCoverageComplete: false,
-          coverageGaps: [{ analyzerId: "model-analyzer", code: "provider_unavailable", detail: "429" }],
+          coverageGaps: [
+            { analyzerId: "model-analyzer", code: "provider_unavailable", detail: "429" },
+          ],
           findings: [
             finding({ occurrenceId: "occ-resolved", resolution: "resolved" }),
             finding({ occurrenceId: "occ-dismissed", resolution: "dismissed", dismissed: true }),
@@ -210,23 +232,26 @@ describe("summarizeNightlyEvidence", () => {
   });
 
   it("does not count a queued proposal as having reached a human", () => {
-    const snapshot = summarizeNightlyEvidence({ repository: REPO, branch: null, candidateSha: null }, [
-      report({
-        findings: [
-          finding({
-            proposal: {
-              proposalId: "prop-1",
-              delivery: "queued",
-              ci: "unknown",
-              ciHeadSha: null,
-              merge: "open",
-              pullRequest: null,
-              deliveryError: null,
-            },
-          }),
-        ],
-      }),
-    ]);
+    const snapshot = summarizeNightlyEvidence(
+      { repository: REPO, branch: null, candidateSha: null },
+      [
+        report({
+          findings: [
+            finding({
+              proposal: {
+                proposalId: "prop-1",
+                delivery: "queued",
+                ci: "unknown",
+                ciHeadSha: null,
+                merge: "open",
+                pullRequest: null,
+                deliveryError: null,
+              },
+            }),
+          ],
+        }),
+      ],
+    );
     expect(snapshot.openProposals).toBe(0);
     expect(snapshot.failedProposals).toBe(0);
   });
@@ -257,7 +282,9 @@ describe("the release boundary", () => {
       const source = await readFile(join(RELEASE_DIR, file), "utf8");
       for (const needle of forbidden) {
         expect(source, `${file} must not import ${needle}`).not.toContain(`from "${needle}`);
-        expect(source, `${file} must not import ${needle}`).not.toMatch(new RegExp(`from "[^"]*${needle}[^"]*"`));
+        expect(source, `${file} must not import ${needle}`).not.toMatch(
+          new RegExp(`from "[^"]*${needle}[^"]*"`),
+        );
       }
     }
   });
@@ -270,8 +297,18 @@ describe("the release boundary", () => {
       ruleId: "secret-scan/aws",
       defectClass: "leaked-credential",
       subject: { repository: REPO, commitSha: CANDIDATE },
-      primaryRegion: { path: "src/config.ts", startLine: 3, endLine: 3, snippet: "AWS key literal (redacted)" },
-      provenance: { analyzerId: "secret-scan", analyzerVersion: "1", modelId: null, promptVersion: null },
+      primaryRegion: {
+        path: "src/config.ts",
+        startLine: 3,
+        endLine: 3,
+        snippet: "AWS key literal (redacted)",
+      },
+      provenance: {
+        analyzerId: "secret-scan",
+        analyzerVersion: "1",
+        modelId: null,
+        promptVersion: null,
+      },
       supporting: [{ trust: "deterministic", statement: "matches AWS key shape" }],
       contradicting: [],
       completeness: { requiredEvidencePresent: true, contextTruncated: false },
@@ -295,7 +332,9 @@ describe("the release boundary", () => {
     // release check to a blocking status.
     expect(check.conclusion).toBe("neutral");
     expect(check.title).toMatch(/^Release gate: STOP/);
-    expect(check.summary).toContain("Shadow mode: this check is advisory and does not block publication.");
+    expect(check.summary).toContain(
+      "Shadow mode: this check is advisory and does not block publication.",
+    );
     expect(RELEASE_CHECK_NAME).toBe("scruffy/release");
   });
 });
