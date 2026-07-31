@@ -6,9 +6,11 @@ import {
   CreateAttestationInput,
   CreateAuthorizationInput,
   ReleaseApprovalAttestation,
+  ReleaseReportRequestObservation,
   ReleaseShadowAuthorization,
   computeAttestationId,
   computeAuthorizationId,
+  computeReportRequestId,
   sameGithubIdentity,
   type ReleaseApprovalAttestation as ReleaseApprovalAttestationType,
   type ReleaseShadowAuthorization as ReleaseShadowAuthorizationType,
@@ -64,6 +66,15 @@ export class ReleaseAuthorityService {
   async requestReport(identity: WorkflowIdentity, raw: unknown): Promise<ReleaseRiskReport> {
     const input = HostedReleaseRequest.parse(raw);
     this.#requireRepository(identity, input.repository);
+    // The report request is the PRE-approval step. A token that already carries a
+    // protected-Environment claim belongs to the attestation gate, not here — reject
+    // it rather than accepting it as the pre-approval observation.
+    if (identity.environment !== null) {
+      throw new ReleaseAuthorityError(
+        "report request must not carry a protected Environment claim",
+        403,
+      );
+    }
     if (input.targetEnvironment !== this.deps.targetEnvironment) {
       throw new ReleaseAuthorityError("target environment is not allowlisted", 403);
     }
@@ -78,7 +89,35 @@ export class ReleaseAuthorityService {
     if (report === null) {
       throw new ReleaseAuthorityError("release report is not yet available", 409);
     }
+    // Persist THIS workflow attempt's exact request observation BEFORE returning the
+    // report. The report may pre-exist from an earlier idempotent analysis, so the
+    // durable ordering proof must be recorded here, not inferred later.
+    await this.#recordReportRequest(identity, report);
     return report;
+  }
+
+  async #recordReportRequest(identity: WorkflowIdentity, report: ReleaseRiskReport): Promise<void> {
+    const content = {
+      requestVersion: "1" as const,
+      reportId: report.reportId,
+      envelope: report.subject,
+      workflowRef: identity.workflowRef,
+      runId: identity.runId,
+      runAttempt: identity.runAttempt,
+    };
+    const observation = ReleaseReportRequestObservation.parse({
+      ...content,
+      requestId: computeReportRequestId(content),
+      observedAt: this.deps.clock.now().toISOString(),
+    });
+    try {
+      await this.deps.store.putReportRequest(observation);
+    } catch (error) {
+      if (error instanceof ReleaseAuthorityIntegrityError) {
+        throw new ReleaseAuthorityError(error.message, 409);
+      }
+      throw error;
+    }
   }
 
   async getReport(identity: WorkflowIdentity, reportId: string): Promise<ReleaseRiskReport> {
@@ -111,6 +150,28 @@ export class ReleaseAuthorityService {
       );
     }
 
+    // Same-run ordering proof: a durable prior report-request observation must bind
+    // THIS exact report, envelope, pinned workflow ref, run, and attempt. A report
+    // that merely pre-exists is not enough — the attesting attempt must have recorded
+    // its own request first.
+    const requestContent = {
+      requestVersion: "1" as const,
+      reportId: report.reportId,
+      envelope: report.subject,
+      workflowRef: identity.workflowRef,
+      runId: identity.runId,
+      runAttempt: identity.runAttempt,
+    };
+    const observation = await this.deps.store.getReportRequest(
+      computeReportRequestId(requestContent),
+    );
+    if (observation === null) {
+      throw new ReleaseAuthorityError(
+        "no durable report request precedes this approval in the same workflow attempt",
+        409,
+      );
+    }
+
     let history;
     try {
       history = await this.deps.approvals.getWorkflowRunApprovals(
@@ -123,6 +184,9 @@ export class ReleaseAuthorityService {
     if (history.runAttempt !== identity.runAttempt) {
       throw new ReleaseAuthorityError("workflow run attempt does not match approval history", 409);
     }
+    // Only an unambiguous `approved` reviewer for the configured protected Environment
+    // supports attestation. `pending`/`rejected` entries are represented honestly and
+    // simply do not count as approvals.
     const approvals = history.approvals.filter(
       (approval) =>
         approval.environment === this.deps.approvalEnvironment && approval.state === "approved",
@@ -134,9 +198,6 @@ export class ReleaseAuthorityService {
       throw new ReleaseAuthorityError("protected-environment approval is absent or ambiguous", 409);
     }
     const approval = [...distinctReviewers.values()][0]!;
-    if (new Date(approval.reviewedAt).getTime() < new Date(report.generatedAt).getTime()) {
-      throw new ReleaseAuthorityError("protected-environment approval predates the report", 409);
-    }
     if (!sameGithubIdentity(identity.actor, approval.reviewer)) {
       throw new ReleaseAuthorityError(
         "authenticated actor is not the protected-environment reviewer",
@@ -144,22 +205,31 @@ export class ReleaseAuthorityService {
       );
     }
 
+    // GitHub supplies no review timestamp; provenance records the service-owned
+    // verification instead of inventing one.
+    const verifiedAt = this.deps.clock.now().toISOString();
     const content = {
-      attestationVersion: "1" as const,
+      attestationVersion: "2" as const,
       reportId: report.reportId,
       envelope: report.subject,
       approvalEnvironment: this.deps.approvalEnvironment,
       workflow: identity,
+      requestObservationId: observation.requestId,
       rationale: input.rationale,
       responsibilityAccepted: true as const,
       responsibilityAccepter: input.responsibilityAccepter,
       reviewer: approval.reviewer,
-      reviewedAt: approval.reviewedAt,
+      verificationProvenance: {
+        source: "github-actions-approval-history" as const,
+        approvalState: "approved" as const,
+        runAttempt: identity.runAttempt,
+      },
     };
     const attestation = ReleaseApprovalAttestation.parse({
       ...content,
       attestationId: computeAttestationId(content),
-      createdAt: this.deps.clock.now().toISOString(),
+      approvalVerifiedAt: verifiedAt,
+      createdAt: verifiedAt,
     });
     try {
       return await this.deps.store.putAttestation(attestation);

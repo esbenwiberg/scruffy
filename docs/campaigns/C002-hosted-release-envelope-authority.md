@@ -300,11 +300,27 @@ complete.
 - OIDC verification checks GitHub issuer/JWKS, fixed audience, lifetime,
   repository/name ID, pinned `job_workflow_ref`, run/attempt, actor, and required
   Environment posture.
-- The App approval reader uses only the workflow-run approvals GET endpoint;
-  attestation requires non-empty rationale and equality among actor, accepter,
-  and actual reviewer stable identities.
-- Terminal persistence re-reads the latest exact report and, when required, the
-  exact same-run attestation in the authorization transaction.
+- The App approval reader parses GitHub's documented workflow-run review-history
+  shape faithfully — `approved`, `rejected`, and `pending` states with no review
+  timestamp (GitHub exposes none) — and fails closed on malformed data.
+- Ordering is service-owned, not inferred from a provider timestamp. The
+  pre-approval report-request job durably records a runtime-schema-valid
+  request observation binding the exact report and envelope to the pinned
+  workflow ref, run id, and run attempt before the report is returned; exact
+  retries are idempotent and conflicts fail closed. A report request carrying a
+  protected-Environment claim is rejected as the wrong posture.
+- Attestation (schema v2) requires that same-attempt request observation plus a
+  non-empty rationale and equality among actor, accepter, and the sole actual
+  `approved` reviewer stable identities, and records an honest service-owned
+  approval-verification time and verification provenance rather than a
+  GitHub-supplied review time. Historical v1 attestations remain audit-readable
+  but are ineligible for new terminal authorization.
+- Terminal persistence re-reads the latest exact report, the matching request
+  observation, and the exact same-run v2 attestation in the authorization
+  transaction; mutation, supersession, removal, wrong run/attempt, or an old
+  attestation version refuses without partial state.
+- Additive migration `0013_report_request_ordering.sql` adds the request-observation
+  table and attestation versioning after `0012` without rewriting history.
 - The Azure backend uses the official Foundry SDK and managed-identity Entra
   scope `https://ai.azure.com/.default`; Bicep parameterizes an existing
   same-resource-group Foundry account/deployment and the read-only OIDC client

@@ -139,7 +139,11 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
     try {
       const identity = await verifier.verify(
         authorization.slice("Bearer ".length),
-        operation.kind === "attest" ? { requireEnvironment: authority.approvalEnvironment } : {},
+        operation.kind === "attest"
+          ? { requireEnvironment: authority.approvalEnvironment }
+          : operation.kind === "request-report"
+            ? { forbidEnvironment: true }
+            : {},
       );
       if (operation.kind === "get-report") {
         return json(res, 200, await authority.getReport(identity, operation.reportId));
