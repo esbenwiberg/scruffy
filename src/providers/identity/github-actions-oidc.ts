@@ -126,7 +126,10 @@ export class GithubActionsOidcVerifier {
         "GitHub Actions OIDC token must not carry an Environment claim for a report request",
       );
     }
-    if (options.requireEnvironment !== undefined && claims.environment !== options.requireEnvironment) {
+    if (
+      options.requireEnvironment !== undefined &&
+      claims.environment !== options.requireEnvironment
+    ) {
       throw new GithubActionsOidcError(
         "GitHub Actions OIDC Environment does not match the protected gate",
       );

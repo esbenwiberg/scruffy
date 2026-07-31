@@ -120,16 +120,16 @@ describe("GitHub Actions OIDC trust pressure", () => {
     await expect(
       verifier.verify(environmentToken, { requireEnvironment: TRUST.approvalEnvironment }),
     ).resolves.toMatchObject({ environment: TRUST.approvalEnvironment });
-    await expect(
-      verifier.verify(environmentToken, { forbidEnvironment: true }),
-    ).rejects.toThrow(/must not carry an Environment claim/);
+    await expect(verifier.verify(environmentToken, { forbidEnvironment: true })).rejects.toThrow(
+      /must not carry an Environment claim/,
+    );
 
     // A token with NO Environment claim is the REPORT-REQUEST (pre-approval) posture:
     // accepted as a request, rejected when a protected Environment is required.
     const requestToken = await token({ environment: undefined });
-    await expect(
-      verifier.verify(requestToken, { forbidEnvironment: true }),
-    ).resolves.toMatchObject({ environment: null });
+    await expect(verifier.verify(requestToken, { forbidEnvironment: true })).resolves.toMatchObject(
+      { environment: null },
+    );
     await expect(
       verifier.verify(requestToken, { requireEnvironment: TRUST.approvalEnvironment }),
     ).rejects.toThrow(/Environment does not match/);

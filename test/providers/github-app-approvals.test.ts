@@ -89,22 +89,20 @@ describe("GithubAppWorkflowApprovalReader", () => {
       new GithubAppWorkflowApprovalReader(malformed).getWorkflowRunApprovals("acme/widgets", "456"),
     ).rejects.toThrow();
     // An unknown state outside GitHub's documented vocabulary still fails closed.
-    const unknownState = vi
-      .fn()
-      .mockImplementation(async (route: string) =>
-        route.endsWith("/approvals")
-          ? {
-              status: 200,
-              data: [
-                {
-                  state: "escalated",
-                  user: { login: "x", id: 1 },
-                  environments: [{ name: "scruffy-production-signoff" }],
-                },
-              ],
-            }
-          : { status: 200, data: { run_attempt: 1 } },
-      );
+    const unknownState = vi.fn().mockImplementation(async (route: string) =>
+      route.endsWith("/approvals")
+        ? {
+            status: 200,
+            data: [
+              {
+                state: "escalated",
+                user: { login: "x", id: 1 },
+                environments: [{ name: "scruffy-production-signoff" }],
+              },
+            ],
+          }
+        : { status: 200, data: { run_attempt: 1 } },
+    );
     await expect(
       new GithubAppWorkflowApprovalReader(unknownState).getWorkflowRunApprovals(
         "acme/widgets",

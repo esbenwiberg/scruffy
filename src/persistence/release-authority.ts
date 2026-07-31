@@ -118,9 +118,7 @@ export class ReleaseAuthorityStore {
     });
   }
 
-  async getReportRequest(
-    requestId: string,
-  ): Promise<ReleaseReportRequestObservationType | null> {
+  async getReportRequest(requestId: string): Promise<ReleaseReportRequestObservationType | null> {
     const result = await this.pool.query<{ observation: unknown }>(
       "select observation from release_report_requests where request_id = $1",
       [requestId],
@@ -168,9 +166,7 @@ export class ReleaseAuthorityStore {
    * Audit read: returns either historical v1 or active v2 attestation data. Callers
    * that authorize must additionally require v2 (see putAuthorization).
    */
-  async getAttestation(
-    attestationId: string,
-  ): Promise<StoredReleaseApprovalAttestation | null> {
+  async getAttestation(attestationId: string): Promise<StoredReleaseApprovalAttestation | null> {
     const result = await this.pool.query<{ attestation: unknown }>(
       "select attestation from release_approval_attestations where attestation_id = $1",
       [attestationId],

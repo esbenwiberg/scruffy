@@ -156,12 +156,18 @@ No confirmed stop controls the outcome, but at least one consequential risk or
 coverage gap remains unresolved. The report must say exactly what requires the
 human decision.
 
-A protected GitHub Environment requests an authorized reviewer. Approval is
-bound to the candidate SHA and report identifier and records the approver,
-timestamp, and stated exception rationale. Because GitHub Environment review
-comments are optional, the controlled workflow must separately require the
-exact candidate SHA, report identifier, a non-empty rationale, and an explicit
-responsibility acknowledgement before entering the environment gate.
+A protected GitHub Environment requests an authorized reviewer. GitHub's review
+history establishes the actual reviewer, state, and Environment, but it exposes
+no review timestamp; the service does not invent one. Ordering is instead proven
+durably: the pre-approval report-request job records that this exact workflow
+attempt requested the exact report before the protected Environment can attest,
+and the attestation stamps an honest service-owned approval-verification time and
+verification provenance. Approval is bound to the candidate SHA and report
+identifier and records the approver, the service-owned verification time, and the
+stated exception rationale. Because GitHub Environment review comments are
+optional, the controlled workflow must separately require the exact candidate
+SHA, report identifier, a non-empty rationale, and an explicit responsibility
+acknowledgement before entering the environment gate.
 
 Every approval surface must state:
 

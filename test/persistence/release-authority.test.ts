@@ -227,9 +227,7 @@ describeDb("terminal ordering revalidation", () => {
       ],
     );
     await expect(
-      store.putAuthorization(
-        authorizationFor(report, v1Id, { ...identity, runAttempt: 2 }),
-      ),
+      store.putAuthorization(authorizationFor(report, v1Id, { ...identity, runAttempt: 2 })),
     ).rejects.toThrow(/ineligible/);
     expect(await count("release_shadow_authorizations")).toBe("0");
 

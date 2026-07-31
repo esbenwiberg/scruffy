@@ -96,10 +96,7 @@ export class ReleaseAuthorityService {
     return report;
   }
 
-  async #recordReportRequest(
-    identity: WorkflowIdentity,
-    report: ReleaseRiskReport,
-  ): Promise<void> {
+  async #recordReportRequest(identity: WorkflowIdentity, report: ReleaseRiskReport): Promise<void> {
     const content = {
       requestVersion: "1" as const,
       reportId: report.reportId,

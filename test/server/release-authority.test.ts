@@ -130,9 +130,9 @@ describeDb("hosted release report protocol", () => {
       }),
     ).rejects.toMatchObject({ status: 403 });
     // A report request carrying a protected-Environment claim is the wrong posture.
-    await expect(
-      authority.requestReport(identity, envelope(SHIP_CAND)),
-    ).rejects.toMatchObject({ status: 403 });
+    await expect(authority.requestReport(identity, envelope(SHIP_CAND))).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });
 
