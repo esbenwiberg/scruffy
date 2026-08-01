@@ -10,8 +10,7 @@ import { parse } from "yaml";
  * They are not a substitute for the later live GitHub run.
  */
 
-const ENDPOINT =
-  "https://scruffy-shadow.gentlebeach-f5d64525.swedencentral.azurecontainerapps.io";
+const ENDPOINT = "https://scruffy-shadow.gentlebeach-f5d64525.swedencentral.azurecontainerapps.io";
 const AUDIENCE = "scruffy-release";
 const APPROVAL_ENVIRONMENT = "scruffy-production-signoff";
 const REVIEW_JOB = "review-and-ship-authorize";
@@ -147,7 +146,7 @@ describe("release-authority-shadow reusable workflow", () => {
     expect(script).toMatch(/case\s+"\$outcome"\s+in/);
     // ship -> terminal authorization with null attestation, shadowOnly required
     expect(script).toContain("/authorizations");
-    expect(script).toContain('.attestationId == null and .shadowOnly == true');
+    expect(script).toContain(".attestationId == null and .shadowOnly == true");
     // sign-off-required routes to the protected job (no authorization here)
     expect(script).toContain("sign-off-required)");
     expect(script).toContain("routing to the protected sign-off Environment");
@@ -218,7 +217,11 @@ describe("release-authority-shadow reusable workflow", () => {
       "statuses",
       "contents-write",
     ];
-    for (const scope of [doc.permissions, job(REVIEW_JOB).permissions, job(EXCEPTION_JOB).permissions]) {
+    for (const scope of [
+      doc.permissions,
+      job(REVIEW_JOB).permissions,
+      job(EXCEPTION_JOB).permissions,
+    ]) {
       expect(scope).toEqual(LEAST_PRIVILEGE);
       for (const perm of forbiddenPerms) {
         expect(Object.prototype.hasOwnProperty.call(scope, perm)).toBe(false);
