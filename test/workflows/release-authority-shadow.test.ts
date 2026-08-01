@@ -130,7 +130,9 @@ describe("release-authority-shadow reusable workflow", () => {
       expect(script).not.toContain("https://token.actions.githubusercontent.com/*)");
       expect(script).not.toContain("OIDC token endpoint is not the expected GitHub issuer");
       // Validation of the request URL precedes its use to fetch a token.
-      const validation = script.indexOf("assert_trusted_oidc_request_url \"$ACTIONS_ID_TOKEN_REQUEST_URL\"");
+      const validation = script.indexOf(
+        'assert_trusted_oidc_request_url "$ACTIONS_ID_TOKEN_REQUEST_URL"',
+      );
       const tokenFetch = script.indexOf("audience=${SCRUFFY_AUDIENCE}");
       expect(validation).toBeGreaterThanOrEqual(0);
       expect(tokenFetch).toBeGreaterThan(validation);
