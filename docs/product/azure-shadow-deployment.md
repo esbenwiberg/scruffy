@@ -158,6 +158,38 @@ that same-resource-group Foundry account and requests Entra tokens for
 GitHub App separately needs `Actions: read` to retrieve workflow-run approval
 history. Both RBAC and App permission changes are human gates.
 
+### Reusable shadow release-authority workflow (pinned by full SHA)
+
+A service-controlled reusable workflow is now available at
+`.github/workflows/release-authority-shadow.yml`. A disposable caller repository
+invokes it pinned to an immutable full commit SHA:
+
+```yaml
+uses: esbenwiberg/scruffy/.github/workflows/release-authority-shadow.yml@<full-sha>
+```
+
+The stable shadow endpoint
+`https://scruffy-shadow.gentlebeach-f5d64525.swedencentral.azurecontainerapps.io`
+and the `scruffy-release` OIDC audience are **service-controlled literals fixed
+inside the pinned workflow**. The endpoint must **never become a caller input**:
+a caller-supplied endpoint would let the short-lived OIDC token be exfiltrated.
+The workflow requests the report in a non-Environment job and performs sign-off
+attestation plus authorization inside the protected `scruffy-production-signoff`
+Environment job; it holds only `contents: read` and `id-token: write` and emits
+no deployment, publication, or SCM effect.
+
+The following remain **separate human gates that merging this code does not
+perform**: updating the disposable caller's own workflow, adding the caller
+repository ID and reusable-workflow ref to Scruffy's Azure OIDC allowlist,
+changing the protected Environment's administrator-bypass option, deploying a new
+Azure Container App revision, and executing any live GitHub Actions run.
+
+The immediate OIDC proof exercises the hosted service's **fake / no-model
+backend** and is **partial only** — it proves protocol mechanics and **cannot
+earn the real-model campaign criterion**. A real Foundry backend remains
+**deferred until a separately provisioned resource exists** in `ewi-sandboxes`;
+it is not abandoned or silently replaced.
+
 ## 4. Enable and verify the webhook
 
 The deployment prints an endpoint shaped like:

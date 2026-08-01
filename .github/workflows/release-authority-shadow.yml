@@ -1,0 +1,369 @@
+# Service-controlled reusable workflow that exercises Scruffy's hosted OIDC
+# release-authority protocol in shadow-only mode. A disposable caller repository
+# invokes it by an immutable full commit SHA:
+#
+#   uses: esbenwiberg/scruffy/.github/workflows/release-authority-shadow.yml@<full-sha>
+#
+# The caller must grant `id-token: write` (a called workflow cannot elevate
+# beyond the caller's permissions). The Scruffy endpoint, OIDC audience, and the
+# protected approval Environment are FIXED service-controlled literals and must
+# never be exposed as caller inputs — an endpoint input would enable OIDC-token
+# exfiltration. This workflow validates every response field needed for routing,
+# never prints tokens/authorization headers/full reports/full attestations, and
+# creates NO release, package, image, deployment, check, status, issue, PR, or
+# other SCM effect. Every authorization is `shadowOnly: true`.
+name: Scruffy release-authority shadow
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Full 40-character lowercase candidate commit SHA.
+        required: true
+        type: string
+      previous_release_sha:
+        description: Full 40-character lowercase previous release SHA; empty only for a first release.
+        required: false
+        type: string
+        default: ""
+      artifact_digest:
+        description: Artifact digest as sha256:<64 lowercase hex>, supplied by the caller's build.
+        required: true
+        type: string
+      target_environment:
+        description: Target environment; the hosted allowlist expects shadow-production.
+        required: true
+        type: string
+      exception_rationale:
+        description: Exception rationale; optional at dispatch, required and non-empty for a sign-off.
+        required: false
+        type: string
+        default: ""
+      responsibility_accepted:
+        description: Explicit responsibility acceptance; must be true for a sign-off.
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      report_id:
+        description: The hosted release report identifier.
+        value: ${{ jobs.review-and-ship-authorize.outputs.report_id }}
+      outcome:
+        description: The report outcome (ship or sign-off-required).
+        value: ${{ jobs.review-and-ship-authorize.outputs.outcome }}
+      authorization_id:
+        description: The terminal shadow authorization identifier, from whichever path authorized.
+        value: ${{ jobs.review-and-ship-authorize.outputs.authorization_id || jobs.attest-and-authorize-exception.outputs.authorization_id }}
+      signoff_used:
+        description: Whether the protected sign-off path was taken.
+        value: ${{ jobs.review-and-ship-authorize.outputs.outcome == 'sign-off-required' }}
+
+# Least privilege: read-only contents as a baseline, plus id-token because every
+# authority call needs a fresh short-lived OIDC token. No workflow, SCM, package,
+# deployment, checks, issues, or pull-request write authority is granted.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # PRE-approval job. It carries NO GitHub Environment, so its OIDC token has no
+  # `environment` claim (the hosted report request rejects a token that does).
+  # It validates the complete envelope BEFORE acquiring any token, requests the
+  # report, and — only for `ship` — posts the terminal authorization itself.
+  review-and-ship-authorize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      report_id: ${{ steps.review.outputs.report_id }}
+      outcome: ${{ steps.review.outputs.outcome }}
+      authorization_id: ${{ steps.review.outputs.authorization_id }}
+    steps:
+      - name: Request report and auto-authorize ship
+        id: review
+        env:
+          # Fixed service-controlled literals — never caller inputs.
+          SCRUFFY_ENDPOINT: https://scruffy-shadow.gentlebeach-f5d64525.swedencentral.azurecontainerapps.io
+          SCRUFFY_AUDIENCE: scruffy-release
+          # Caller-supplied envelope fields, passed through the environment so no
+          # untrusted value is interpolated into the shell body.
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PREVIOUS_RELEASE_SHA: ${{ inputs.previous_release_sha }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          fail() { echo "release-authority-shadow: $1" >&2; exit 1; }
+
+          # --- 1. Validate the COMPLETE envelope before requesting a token ---
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || fail "candidate_sha must be a full 40-character lowercase SHA"
+          if [[ -n "$PREVIOUS_RELEASE_SHA" ]]; then
+            [[ "$PREVIOUS_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              || fail "previous_release_sha must be empty or a full 40-character lowercase SHA"
+          fi
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fail "artifact_digest must be sha256:<64 lowercase hex>"
+          [[ "$TARGET_ENVIRONMENT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+            || fail "target_environment is malformed"
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+            || fail "repository is malformed"
+
+          # Build the exact envelope ONCE and reuse it verbatim for the report
+          # request and any authorization, so they remain byte-for-byte bound.
+          envelope_file="$workdir/envelope.json"
+          jq -cn \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg candidateSha "$CANDIDATE_SHA" \
+            --arg previousReleaseSha "$PREVIOUS_RELEASE_SHA" \
+            --arg artifactDigest "$ARTIFACT_DIGEST" \
+            --arg targetEnvironment "$TARGET_ENVIRONMENT" \
+            '{repository: $repository, candidateSha: $candidateSha, previousReleaseSha: (if $previousReleaseSha == "" then null else $previousReleaseSha end), artifactDigest: $artifactDigest, targetEnvironment: $targetEnvironment}' \
+            > "$envelope_file"
+
+          # --- 2. Acquire a short-lived OIDC token from the fixed GitHub issuer ---
+          : "${ACTIONS_ID_TOKEN_REQUEST_URL:?OIDC token request URL is unavailable; the caller must grant id-token: write}"
+          : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?OIDC request token is unavailable}"
+          case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+            https://token.actions.githubusercontent.com/*) : ;;
+            *) fail "OIDC token endpoint is not the expected GitHub issuer" ;;
+          esac
+
+          # The request bearer and the resulting JWT are written to
+          # permission-restricted curl config files (umask 077) so they never
+          # appear in process arguments, job outputs, or logs.
+          oidc_cfg="$workdir/oidc.cfg"
+          printf 'header = "Authorization: Bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$oidc_cfg"
+          token_response="$workdir/token.json"
+          curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 \
+            --config "$oidc_cfg" --header "Accept: application/json" \
+            --output "$token_response" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SCRUFFY_AUDIENCE}" \
+            || fail "OIDC token request failed"
+          jwt="$(jq -er '.value' < "$token_response")" || fail "OIDC token response was malformed"
+          auth_cfg="$workdir/auth.cfg"
+          printf 'header = "Authorization: Bearer %s"\n' "$jwt" > "$auth_cfg"
+          unset jwt
+
+          # --- 3. Request the hosted release report for the exact envelope ---
+          report_file="$workdir/report.json"
+          status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 \
+            --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
+            --data-binary "@$envelope_file" \
+            --output "$report_file" --write-out '%{http_code}' \
+            "${SCRUFFY_ENDPOINT}/v1/release-reports")" || fail "release report request failed"
+          if [[ "$status" != "200" ]]; then
+            echo "release-authority-shadow: report request returned HTTP ${status}: $(jq -r '.error // "request failed"' < "$report_file" 2>/dev/null || echo "request failed")" >&2
+            exit 1
+          fi
+
+          report_id="$(jq -er '.reportId' < "$report_file")" || fail "report response is missing reportId"
+          outcome="$(jq -er '.decision.outcome' < "$report_file")" || fail "report response is missing an outcome"
+          [[ "$report_id" =~ ^rr_[0-9a-f]{64}$ ]] || fail "report id is malformed"
+          jq -e --slurpfile expected "$envelope_file" '.subject == $expected[0]' < "$report_file" > /dev/null \
+            || fail "report subject does not match the requested envelope"
+
+          {
+            echo "report_id=$report_id"
+            echo "outcome=$outcome"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Scruffy shadow release authority"
+            echo "- report: \`${report_id}\`"
+            echo "- outcome: \`${outcome}\`"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          # --- 4. Route strictly on the validated outcome ---
+          case "$outcome" in
+            ship)
+              # Automatic terminal shadow authorization with the exact envelope
+              # and NO attestation.
+              auth_body="$workdir/auth-body.json"
+              jq -cn --slurpfile envelope "$envelope_file" \
+                '{envelope: $envelope[0], attestationId: null}' > "$auth_body"
+              auth_file="$workdir/authorization.json"
+              status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+                --connect-timeout 10 --max-time 30 \
+                --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
+                --data-binary "@$auth_body" \
+                --output "$auth_file" --write-out '%{http_code}' \
+                "${SCRUFFY_ENDPOINT}/v1/release-reports/${report_id}/authorizations")" \
+                || fail "ship authorization failed"
+              if [[ "$status" != "201" ]]; then
+                echo "release-authority-shadow: ship authorization returned HTTP ${status}: $(jq -r '.error // "request failed"' < "$auth_file" 2>/dev/null || echo "request failed")" >&2
+                exit 1
+              fi
+              authorization_id="$(jq -er '.authorizationId' < "$auth_file")" || fail "authorization response is missing an id"
+              [[ "$authorization_id" =~ ^auth_[0-9a-f]{64}$ ]] || fail "authorization id is malformed"
+              jq -e --slurpfile expected "$envelope_file" --arg reportId "$report_id" \
+                '.reportId == $reportId and .envelope == $expected[0] and .outcome == "ship" and .attestationId == null and .shadowOnly == true' \
+                < "$auth_file" > /dev/null \
+                || fail "ship authorization did not match the exact report, envelope, or shadow-only contract"
+              echo "authorization_id=$authorization_id" >> "$GITHUB_OUTPUT"
+              echo "- authorization: \`${authorization_id}\` (automatic ship)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              ;;
+            sign-off-required)
+              # Hand off to the protected Environment job; no authorization here.
+              echo "- routing to the protected sign-off Environment" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              ;;
+            stop|indeterminate)
+              fail "report outcome '${outcome}' never authorizes"
+              ;;
+            *)
+              fail "unknown report outcome '${outcome}'"
+              ;;
+          esac
+
+  # Protected exception job. It runs ONLY for an exact `sign-off-required`
+  # outcome, declares the fixed protected Environment (which pauses for a real
+  # GitHub reviewer), and — after the gate — acquires an Environment-scoped OIDC
+  # token whose identity carries the approval Environment claim. Attestation and
+  # terminal authorization run in this SAME job so they share one workflow
+  # identity, exactly as the service requires.
+  attest-and-authorize-exception:
+    needs: review-and-ship-authorize
+    if: needs.review-and-ship-authorize.outputs.outcome == 'sign-off-required'
+    runs-on: ubuntu-latest
+    environment: scruffy-production-signoff
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      authorization_id: ${{ steps.signoff.outputs.authorization_id }}
+    steps:
+      - name: Attest and authorize the sign-off exception
+        id: signoff
+        env:
+          SCRUFFY_ENDPOINT: https://scruffy-shadow.gentlebeach-f5d64525.swedencentral.azurecontainerapps.io
+          SCRUFFY_AUDIENCE: scruffy-release
+          OUTCOME: ${{ needs.review-and-ship-authorize.outputs.outcome }}
+          REPORT_ID: ${{ needs.review-and-ship-authorize.outputs.report_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PREVIOUS_RELEASE_SHA: ${{ inputs.previous_release_sha }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          EXCEPTION_RATIONALE: ${{ inputs.exception_rationale }}
+          RESPONSIBILITY_ACCEPTED: ${{ inputs.responsibility_accepted }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          fail() { echo "release-authority-shadow: $1" >&2; exit 1; }
+
+          # --- 1. Re-establish the sign-off preconditions inside the gate ---
+          [[ "$OUTCOME" == "sign-off-required" ]] || fail "protected job entered for a non sign-off outcome"
+          [[ "$REPORT_ID" =~ ^rr_[0-9a-f]{64}$ ]] || fail "report id from the review job is malformed"
+          rationale_trimmed="$(printf '%s' "$EXCEPTION_RATIONALE" | tr -d '[:space:]')"
+          [[ -n "$rationale_trimmed" ]] || fail "exception_rationale must be non-empty for a sign-off"
+          [[ "$RESPONSIBILITY_ACCEPTED" == "true" ]] || fail "responsibility_accepted must be true for a sign-off"
+          # Responsibility accepter is the runner-supplied actor identity, never
+          # any caller-supplied reviewer text.
+          [[ -n "$GITHUB_ACTOR" ]] || fail "runner actor login is unavailable"
+          [[ "$GITHUB_ACTOR_ID" =~ ^[0-9]+$ ]] || fail "runner actor id is unavailable"
+
+          # Re-validate and rebuild the exact same envelope.
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "candidate_sha must be a full 40-character lowercase SHA"
+          if [[ -n "$PREVIOUS_RELEASE_SHA" ]]; then
+            [[ "$PREVIOUS_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "previous_release_sha is malformed"
+          fi
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "artifact_digest is malformed"
+          [[ "$TARGET_ENVIRONMENT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "target_environment is malformed"
+
+          envelope_file="$workdir/envelope.json"
+          jq -cn \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg candidateSha "$CANDIDATE_SHA" \
+            --arg previousReleaseSha "$PREVIOUS_RELEASE_SHA" \
+            --arg artifactDigest "$ARTIFACT_DIGEST" \
+            --arg targetEnvironment "$TARGET_ENVIRONMENT" \
+            '{repository: $repository, candidateSha: $candidateSha, previousReleaseSha: (if $previousReleaseSha == "" then null else $previousReleaseSha end), artifactDigest: $artifactDigest, targetEnvironment: $targetEnvironment}' \
+            > "$envelope_file"
+
+          # --- 2. Acquire the OIDC token AFTER the Environment gate ---
+          : "${ACTIONS_ID_TOKEN_REQUEST_URL:?OIDC token request URL is unavailable; the caller must grant id-token: write}"
+          : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?OIDC request token is unavailable}"
+          case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+            https://token.actions.githubusercontent.com/*) : ;;
+            *) fail "OIDC token endpoint is not the expected GitHub issuer" ;;
+          esac
+          oidc_cfg="$workdir/oidc.cfg"
+          printf 'header = "Authorization: Bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$oidc_cfg"
+          token_response="$workdir/token.json"
+          curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 \
+            --config "$oidc_cfg" --header "Accept: application/json" \
+            --output "$token_response" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SCRUFFY_AUDIENCE}" \
+            || fail "OIDC token request failed"
+          jwt="$(jq -er '.value' < "$token_response")" || fail "OIDC token response was malformed"
+          auth_cfg="$workdir/auth.cfg"
+          printf 'header = "Authorization: Bearer %s"\n' "$jwt" > "$auth_cfg"
+          unset jwt
+
+          # --- 3. Post the attestation with the runner actor as accepter ---
+          att_body="$workdir/attest-body.json"
+          jq -cn \
+            --arg rationale "$EXCEPTION_RATIONALE" \
+            --arg login "$GITHUB_ACTOR" \
+            --arg id "$GITHUB_ACTOR_ID" \
+            '{rationale: $rationale, responsibilityAccepted: true, responsibilityAccepter: {login: $login, id: $id}}' \
+            > "$att_body"
+          att_file="$workdir/attestation.json"
+          status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 \
+            --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
+            --data-binary "@$att_body" \
+            --output "$att_file" --write-out '%{http_code}' \
+            "${SCRUFFY_ENDPOINT}/v1/release-reports/${REPORT_ID}/attestations")" \
+            || fail "attestation request failed"
+          if [[ "$status" != "201" ]]; then
+            echo "release-authority-shadow: attestation returned HTTP ${status}: $(jq -r '.error // "request failed"' < "$att_file" 2>/dev/null || echo "request failed")" >&2
+            exit 1
+          fi
+          attestation_id="$(jq -er '.attestationId' < "$att_file")" || fail "attestation response is missing an id"
+          [[ "$attestation_id" =~ ^ra_[0-9a-f]{64}$ ]] || fail "attestation id is malformed"
+          jq -e --slurpfile expected "$envelope_file" --arg reportId "$REPORT_ID" \
+            '.reportId == $reportId and .envelope == $expected[0]' < "$att_file" > /dev/null \
+            || fail "attestation did not bind the exact report and envelope"
+
+          # --- 4. Terminal shadow authorization in the SAME job/identity ---
+          auth_body="$workdir/auth-body.json"
+          jq -cn --slurpfile envelope "$envelope_file" --arg attestationId "$attestation_id" \
+            '{envelope: $envelope[0], attestationId: $attestationId}' > "$auth_body"
+          auth_file="$workdir/authorization.json"
+          status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 10 --max-time 30 \
+            --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
+            --data-binary "@$auth_body" \
+            --output "$auth_file" --write-out '%{http_code}' \
+            "${SCRUFFY_ENDPOINT}/v1/release-reports/${REPORT_ID}/authorizations")" \
+            || fail "sign-off authorization failed"
+          if [[ "$status" != "201" ]]; then
+            echo "release-authority-shadow: sign-off authorization returned HTTP ${status}: $(jq -r '.error // "request failed"' < "$auth_file" 2>/dev/null || echo "request failed")" >&2
+            exit 1
+          fi
+          authorization_id="$(jq -er '.authorizationId' < "$auth_file")" || fail "authorization response is missing an id"
+          [[ "$authorization_id" =~ ^auth_[0-9a-f]{64}$ ]] || fail "authorization id is malformed"
+          jq -e --slurpfile expected "$envelope_file" \
+            --arg reportId "$REPORT_ID" --arg attestationId "$attestation_id" \
+            '.reportId == $reportId and .envelope == $expected[0] and .outcome == "sign-off-required" and .attestationId == $attestationId and .shadowOnly == true' \
+            < "$auth_file" > /dev/null \
+            || fail "sign-off authorization did not match the exact report, envelope, attestation, or shadow-only contract"
+
+          echo "authorization_id=$authorization_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Scruffy shadow sign-off authorization"
+            echo "- report: \`${REPORT_ID}\`"
+            echo "- attestation: \`${attestation_id}\`"
+            echo "- authorization: \`${authorization_id}\`"
+            echo "- responsibility accepter: \`${GITHUB_ACTOR}\`"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
