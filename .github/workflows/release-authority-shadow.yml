@@ -8,10 +8,17 @@
 # beyond the caller's permissions). The Scruffy endpoint, OIDC audience, and the
 # protected approval Environment are FIXED service-controlled literals and must
 # never be exposed as caller inputs — an endpoint input would enable OIDC-token
-# exfiltration. This workflow validates every response field needed for routing,
-# never prints tokens/authorization headers/full reports/full attestations, and
-# creates NO release, package, image, deployment, check, status, issue, PR, or
-# other SCM effect. Every authorization is `shadowOnly: true`.
+# exfiltration. This workflow validates every response field needed for routing
+# and never prints tokens/authorization headers/full reports/full attestations.
+# It carries no deployment authority: it performs no application, infrastructure,
+# package, image, or release deployment or publication, issues no explicit
+# deployment/status/SCM write command, and holds no such write permission, so it
+# creates no release, package, image, check, issue, or PR. The one unavoidable
+# platform effect is that the sign-off path runs in a protected GitHub
+# Environment, so GitHub itself may automatically create protected-Environment
+# deployment/status audit metadata for that job; that GitHub-generated audit
+# record is platform bookkeeping, not a product deployment or publication. Every
+# authorization is `shadowOnly: true`.
 name: Scruffy release-authority shadow
 
 on:
@@ -267,7 +274,11 @@ jobs:
   # GitHub reviewer), and — after the gate — acquires an Environment-scoped OIDC
   # token whose identity carries the approval Environment claim. Attestation and
   # terminal authorization run in this SAME job so they share one workflow
-  # identity, exactly as the service requires.
+  # identity, exactly as the service requires. Declaring this Environment makes
+  # GitHub automatically record deployment/status audit metadata for the job
+  # (a deployment record plus waiting/queued/in_progress/success statuses); that
+  # is GitHub's own bookkeeping, not a product deployment, and this job still
+  # issues no deployment/status write command and holds no deployment permission.
   attest-and-authorize-exception:
     needs: review-and-ship-authorize
     if: needs.review-and-ship-authorize.outputs.outcome == 'sign-off-required'

@@ -253,10 +253,17 @@ The workflow contains exactly two jobs:
 Permissions are the exact least-privilege set (`contents: read`,
 `id-token: write`) with no workflow, SCM, package, deployment, checks, issues, or
 pull-request write authority. Every authorization is `shadowOnly: true`; the
-workflow creates no release, package, image, deployment, check, status, issue,
-pull request, or other SCM effect. It exposes only bounded evidence outputs
-(`report_id`, `outcome`, `authorization_id`, `signoff_used`) and never a JWT or a
-full report.
+workflow performs no application, infrastructure, package, image, or release
+deployment or publication, issues no explicit deployment/status/SCM write
+command, and so creates no release, package, image, check, issue, or pull
+request. The one unavoidable platform effect is that the sign-off path declares a
+protected GitHub Environment, so GitHub itself automatically records
+protected-Environment deployment/status audit metadata for that job (a deployment
+record plus waiting/queued/in_progress/success statuses). That GitHub-generated
+audit trail is the platform's own bookkeeping — it is not a product deployment or
+publication and confers no deployment authority. The workflow exposes only
+bounded evidence outputs (`report_id`, `outcome`, `authorization_id`,
+`signoff_used`) and never a JWT or a full report.
 
 ### Immediate proof is fake/no-model and partial
 

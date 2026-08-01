@@ -310,6 +310,24 @@ describe("release-authority-shadow reusable workflow", () => {
     }
   });
 
+  it("discloses the unavoidable platform-generated Environment audit metadata", () => {
+    // A protected GitHub Environment job necessarily makes GitHub itself create
+    // deployment/status audit metadata; the workflow cannot suppress it. The
+    // comments must DISCLOSE that platform effect rather than make an absolute
+    // no-deployment/no-SCM-effect claim that a protected Environment falsifies.
+    expect(raw).toContain("deployment/status audit metadata");
+    expect(raw.toLowerCase()).toContain("protected-environment");
+    // The corrected fence still asserts no PRODUCT deployment/publication
+    // authority and no explicit deployment/status write command.
+    expect(raw.toLowerCase()).toContain("no deployment authority");
+    expect(raw.toLowerCase()).toContain("deployment/status/scm write command");
+    // The pre-correction absolute wording — claiming the workflow creates no
+    // deployment/status/SCM effect of any kind — must be gone; a protected
+    // Environment makes it factually too strong.
+    expect(raw).not.toContain("deployment, check, status, issue, PR, or");
+    expect(raw).not.toContain("other SCM effect");
+  });
+
   it("documents the fake-backend proof as partial", () => {
     const cd = readFileSync(
       fileURLToPath(new URL("../../docs/product/cd-release-gate.md", import.meta.url)),
