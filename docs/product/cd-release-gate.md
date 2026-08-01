@@ -194,6 +194,14 @@ operations:
 The client is `npm run scruffy:release-client -- <review|attest|authorize> ...`.
 It uses `ACTIONS_ID_TOKEN_REQUEST_URL`/`ACTIONS_ID_TOKEN_REQUEST_TOKEN`; no
 long-lived workflow secret or Scruffy authority credential enters the repository.
+`ACTIONS_ID_TOKEN_REQUEST_URL` is the runner-provided **request** endpoint — a
+regional Actions service host under `*.actions.githubusercontent.com` (e.g.
+`pipelines.actions.githubusercontent.com`) — and is deliberately **not** the JWT
+issuer. The issuer stays fixed at `https://token.actions.githubusercontent.com`
+and is verified independently by the hosted OIDC verifier. Client and workflow
+therefore bound the request URL to an HTTPS subdomain of the Actions zone (no
+credentials, no explicit port) before the request token is sent, rather than
+pinning it to the issuer host.
 The attestation job supplies rationale through `SCRUFFY_RELEASE_RATIONALE` and
 requires `SCRUFFY_RELEASE_RESPONSIBILITY_ACCEPTED=true` rather than hardcoding or
 passing acceptance on the command line. Authorization reads optional

@@ -9,18 +9,61 @@ import { DEFAULT_RELEASE_OIDC_AUDIENCE } from "../src/providers/identity/github-
 
 export type FetchLike = typeof fetch;
 
+// The GitHub-hosted Actions service hands each runner a *regional* token-request
+// endpoint under `*.actions.githubusercontent.com` (for example
+// `pipelines.actions.githubusercontent.com`). That request host is NOT the JWT
+// issuer: the issued token's `iss` is fixed to
+// `https://token.actions.githubusercontent.com`, which the hosted verifier in
+// `src/providers/identity/github-actions-oidc.ts` checks independently. Here we
+// only trust the runner-provided *request* URL, so we bound it to an HTTPS host
+// that is a genuine subdomain of `.actions.githubusercontent.com` — with no
+// credentials, no explicit port, and no malformed/sibling/suffix-confusion host —
+// before the OIDC request token is ever sent, so it can never be exfiltrated.
+const OIDC_REQUEST_HOST_SUFFIX = ".actions.githubusercontent.com";
+
+function isTrustedOidcRequestHostname(hostname: string): boolean {
+  if (!hostname.endsWith(OIDC_REQUEST_HOST_SUFFIX)) return false;
+  const subdomain = hostname.slice(0, -OIDC_REQUEST_HOST_SUFFIX.length);
+  // Require at least one non-empty DNS label before the trusted zone. This
+  // rejects the bare `actions.githubusercontent.com`, a leading empty label, and
+  // suffix-confusion hosts such as `evilactions.githubusercontent.com`.
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(subdomain);
+}
+
+export function assertTrustedOidcRequestUrl(requestUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(requestUrl);
+  } catch {
+    throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL is not a valid URL");
+  }
+  // Parse the raw authority so an explicit port (including the default `:443`)
+  // or embedded credentials are rejected even where WHATWG URL would normalise
+  // them away.
+  const authority = requestUrl.slice(requestUrl.indexOf("://") + 3).split(/[/?#]/, 1)[0] ?? "";
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    authority.includes("@") ||
+    authority.includes(":") ||
+    !isTrustedOidcRequestHostname(url.hostname)
+  ) {
+    throw new Error(
+      "GitHub OIDC token request URL must be an HTTPS subdomain of actions.githubusercontent.com with no credentials or explicit port",
+    );
+  }
+  return url;
+}
+
 export async function requestGithubOidcToken(
   env: Record<string, string | undefined> = process.env,
   fetcher: FetchLike = fetch,
 ): Promise<string> {
   const requestUrl = required(env, "ACTIONS_ID_TOKEN_REQUEST_URL");
   const requestToken = required(env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN");
-  const url = new URL(requestUrl);
-  if (url.origin !== "https://token.actions.githubusercontent.com") {
-    throw new Error(
-      "GitHub OIDC token endpoint must be token.actions.githubusercontent.com over HTTPS",
-    );
-  }
+  const url = assertTrustedOidcRequestUrl(requestUrl);
   url.searchParams.set(
     "audience",
     env.SCRUFFY_RELEASE_OIDC_AUDIENCE ?? DEFAULT_RELEASE_OIDC_AUDIENCE,
