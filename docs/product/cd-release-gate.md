@@ -200,3 +200,66 @@ passing acceptance on the command line. Authorization reads optional
 `SCRUFFY_PREVIOUS_RELEASE_SHA` / `SCRUFFY_RELEASE_ATTESTATION_ID`. `stop` and
 `indeterminate` never authorize. This protocol emits no publication or deployment
 effect.
+
+## Reusable shadow release-authority workflow
+
+A service-controlled reusable workflow now ships at
+`.github/workflows/release-authority-shadow.yml`. It is exposed **only** through
+`workflow_call`, so a disposable caller repository invokes it pinned to an
+immutable full commit SHA:
+
+```yaml
+jobs:
+  release-authority-shadow:
+    permissions:
+      contents: read
+      id-token: write # the caller MUST grant this; a called workflow cannot elevate it
+    uses: esbenwiberg/scruffy/.github/workflows/release-authority-shadow.yml@<full-sha>
+    with:
+      candidate_sha: ${{ needs.build.outputs.candidate_sha }}
+      previous_release_sha: "" # empty only for a first release
+      artifact_digest: ${{ needs.build.outputs.artifact_digest }} # sha256:<64 hex>
+      target_environment: shadow-production
+      exception_rationale: "" # required and non-empty only for a sign-off
+      responsibility_accepted: false # must be true for a sign-off
+```
+
+The Scruffy HTTPS endpoint and the `scruffy-release` OIDC audience are **fixed
+service-controlled literals inside the pinned workflow**. They are deliberately
+not caller inputs and must never become a caller input — an endpoint input would
+allow the short-lived OIDC token to be exfiltrated to an attacker-chosen host.
+The workflow contains exactly two jobs:
+
+1. `review-and-ship-authorize` runs in **no** GitHub Environment, validates the
+   complete envelope before requesting any OIDC token, drives the hosted report,
+   automatically authorizes a `ship` outcome, routes `sign-off-required` to the
+   protected job, and fails closed on `stop`, `indeterminate`, unknown,
+   malformed, or mismatched responses.
+2. `attest-and-authorize-exception` declares the protected
+   `scruffy-production-signoff` Environment, `needs` the review job, and runs
+   only for `sign-off-required`. Attestation and terminal authorization run in
+   that one Environment job so they share a single OIDC workflow identity; the
+   runner-supplied actor login and stable ID are the responsibility accepter and
+   no caller-supplied reviewer identity is accepted.
+
+Permissions are the exact least-privilege set (`contents: read`,
+`id-token: write`) with no workflow, SCM, package, deployment, checks, issues, or
+pull-request write authority. Every authorization is `shadowOnly: true`; the
+workflow creates no release, package, image, deployment, check, status, issue,
+pull request, or other SCM effect. It exposes only bounded evidence outputs
+(`report_id`, `outcome`, `authorization_id`, `signoff_used`) and never a JWT or a
+full report.
+
+### Immediate proof is fake/no-model and partial
+
+The reusable workflow proves the hosted OIDC protocol **mechanics** only. The
+immediate live proof runs against the hosted service's **fake / no-model
+backend** and therefore **cannot satisfy the real-model campaign exit
+criterion**. A real-model backend depends on a Foundry resource that does not yet
+exist; Foundry remains **deferred until a separately provisioned resource is
+available** — it is not abandoned or silently replaced.
+
+Updating the disposable caller workflow, adding the caller repository/ref to the
+Azure OIDC allowlist, changing the protected Environment's administrator-bypass
+setting, deploying a new Azure revision, and performing any live GitHub Actions
+run remain **separate human gates that this code change does not execute**.
