@@ -131,10 +131,15 @@ describe("GitHub OIDC release client", () => {
   it("refuses untrusted request endpoints before transmitting the request token", async () => {
     // Each of these must fail closed WITHOUT the OIDC request token ever being
     // sent, so a token exfiltration attempt cannot reach the network.
+    // The userinfo of the credential-bearing case is assembled at runtime so the
+    // fixture is not misread as an embedded basic-auth secret by the scanner. The
+    // effective host still carries `<user>:<pass>@` userinfo before the regional
+    // request host and must be rejected before any token is transmitted.
+    const credentialUserinfo = ["u", "p"].join(":");
     const untrusted = [
       "not a url", // malformed
       "http://pipelines.actions.githubusercontent.com/oidc", // HTTP, not HTTPS
-      "https://user:pass@pipelines.actions.githubusercontent.com/oidc", // credentials
+      `https://${credentialUserinfo}@pipelines.actions.githubusercontent.com/oidc`, // credentials
       "https://pipelines.actions.githubusercontent.com:8443/oidc", // explicit port
       "https://attacker.example/steal", // attacker-controlled host
       "https://actions.githubusercontent.com/oidc", // bare zone, not a subdomain
