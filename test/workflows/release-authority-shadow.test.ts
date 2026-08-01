@@ -109,11 +109,32 @@ describe("release-authority-shadow reusable workflow", () => {
       expect(String(env.SCRUFFY_ENDPOINT)).not.toContain("inputs.");
     }
 
-    // The OIDC token is requested only from the fixed GitHub issuer with the
-    // fixed audience.
-    const review = runScript(REVIEW_JOB);
-    expect(review).toContain("https://token.actions.githubusercontent.com/*)");
-    expect(review).toContain("audience=${SCRUFFY_AUDIENCE}");
+    // The runner-provided token-request endpoint is validated as a subdomain of
+    // the Actions service zone (NOT gated on the JWT issuer), with the fixed
+    // audience appended. Both jobs must apply the same bounded validation before
+    // any request token is transmitted.
+    for (const jobName of [REVIEW_JOB, EXCEPTION_JOB]) {
+      const script = runScript(jobName);
+      // The request host is bounded to a genuine subdomain of the Actions zone.
+      expect(script).toContain("assert_trusted_oidc_request_url");
+      expect(script).toContain("*.actions.githubusercontent.com)");
+      expect(script).toContain(
+        "OIDC token request host is not a subdomain of actions.githubusercontent.com",
+      );
+      // HTTP, embedded credentials, and explicit ports are all refused.
+      expect(script).toContain("OIDC token request URL must use HTTPS");
+      expect(script).toContain("OIDC token request URL must not contain credentials");
+      expect(script).toContain("OIDC token request URL must not specify a port");
+      // The request endpoint is NOT confused with the fixed JWT issuer: the old
+      // issuer-equality gate on the request URL must be gone.
+      expect(script).not.toContain("https://token.actions.githubusercontent.com/*)");
+      expect(script).not.toContain("OIDC token endpoint is not the expected GitHub issuer");
+      // Validation of the request URL precedes its use to fetch a token.
+      const validation = script.indexOf("assert_trusted_oidc_request_url \"$ACTIONS_ID_TOKEN_REQUEST_URL\"");
+      const tokenFetch = script.indexOf("audience=${SCRUFFY_AUDIENCE}");
+      expect(validation).toBeGreaterThanOrEqual(0);
+      expect(tokenFetch).toBeGreaterThan(validation);
+    }
   });
 
   it("keeps report request outside an Environment and routes every outcome", () => {

@@ -100,6 +100,44 @@ jobs:
           trap 'rm -rf "$workdir"' EXIT
           fail() { echo "release-authority-shadow: $1" >&2; exit 1; }
 
+          # Validate the RUNNER-PROVIDED OIDC token-request URL (never the JWT
+          # issuer). Permit only an HTTPS host whose parsed authority is a genuine
+          # non-empty subdomain of `.actions.githubusercontent.com`, with no
+          # userinfo/credentials and no explicit port. Rejects HTTP, malformed,
+          # bare, sibling, suffix-confusion, and attacker-controlled hosts before
+          # the request token is ever transmitted.
+          assert_trusted_oidc_request_url() {
+            local url="$1" rest authority host label
+            case "$url" in
+              https://*) : ;;
+              *) fail "OIDC token request URL must use HTTPS" ;;
+            esac
+            rest="${url#https://}"
+            authority="${rest%%/*}"
+            authority="${authority%%\?*}"
+            authority="${authority%%#*}"
+            case "$authority" in
+              *@*) fail "OIDC token request URL must not contain credentials" ;;
+            esac
+            case "$authority" in
+              *:*) fail "OIDC token request URL must not specify a port" ;;
+            esac
+            host="$authority"
+            case "$host" in
+              *[!a-zA-Z0-9.-]*) fail "OIDC token request host contains invalid characters" ;;
+            esac
+            case "$host" in
+              .*|*.|*..*) fail "OIDC token request host is malformed" ;;
+            esac
+            case "$host" in
+              *.actions.githubusercontent.com) : ;;
+              *) fail "OIDC token request host is not a subdomain of actions.githubusercontent.com" ;;
+            esac
+            label="${host%.actions.githubusercontent.com}"
+            [[ -n "$label" ]] \
+              || fail "OIDC token request host is not a subdomain of actions.githubusercontent.com"
+          }
+
           # --- 1. Validate the COMPLETE envelope before requesting a token ---
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || fail "candidate_sha must be a full 40-character lowercase SHA"
@@ -126,13 +164,16 @@ jobs:
             '{repository: $repository, candidateSha: $candidateSha, previousReleaseSha: (if $previousReleaseSha == "" then null else $previousReleaseSha end), artifactDigest: $artifactDigest, targetEnvironment: $targetEnvironment}' \
             > "$envelope_file"
 
-          # --- 2. Acquire a short-lived OIDC token from the fixed GitHub issuer ---
+          # --- 2. Acquire a short-lived OIDC token from the runner endpoint ---
+          # The runner-provided request endpoint is a REGIONAL Actions service
+          # host under `*.actions.githubusercontent.com` (e.g.
+          # `pipelines.actions.githubusercontent.com`); it is NOT the JWT issuer,
+          # which the hosted verifier fixes to token.actions.githubusercontent.com.
+          # Bound the request host to a genuine subdomain of the trusted zone
+          # BEFORE the request token is ever sent, so it can never be exfiltrated.
           : "${ACTIONS_ID_TOKEN_REQUEST_URL:?OIDC token request URL is unavailable; the caller must grant id-token: write}"
           : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?OIDC request token is unavailable}"
-          case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
-            https://token.actions.githubusercontent.com/*) : ;;
-            *) fail "OIDC token endpoint is not the expected GitHub issuer" ;;
-          esac
+          assert_trusted_oidc_request_url "$ACTIONS_ID_TOKEN_REQUEST_URL"
 
           # The request bearer and the resulting JWT are written to
           # permission-restricted curl config files (umask 077) so they never
@@ -259,6 +300,44 @@ jobs:
           trap 'rm -rf "$workdir"' EXIT
           fail() { echo "release-authority-shadow: $1" >&2; exit 1; }
 
+          # Validate the RUNNER-PROVIDED OIDC token-request URL (never the JWT
+          # issuer). Permit only an HTTPS host whose parsed authority is a genuine
+          # non-empty subdomain of `.actions.githubusercontent.com`, with no
+          # userinfo/credentials and no explicit port. Rejects HTTP, malformed,
+          # bare, sibling, suffix-confusion, and attacker-controlled hosts before
+          # the request token is ever transmitted.
+          assert_trusted_oidc_request_url() {
+            local url="$1" rest authority host label
+            case "$url" in
+              https://*) : ;;
+              *) fail "OIDC token request URL must use HTTPS" ;;
+            esac
+            rest="${url#https://}"
+            authority="${rest%%/*}"
+            authority="${authority%%\?*}"
+            authority="${authority%%#*}"
+            case "$authority" in
+              *@*) fail "OIDC token request URL must not contain credentials" ;;
+            esac
+            case "$authority" in
+              *:*) fail "OIDC token request URL must not specify a port" ;;
+            esac
+            host="$authority"
+            case "$host" in
+              *[!a-zA-Z0-9.-]*) fail "OIDC token request host contains invalid characters" ;;
+            esac
+            case "$host" in
+              .*|*.|*..*) fail "OIDC token request host is malformed" ;;
+            esac
+            case "$host" in
+              *.actions.githubusercontent.com) : ;;
+              *) fail "OIDC token request host is not a subdomain of actions.githubusercontent.com" ;;
+            esac
+            label="${host%.actions.githubusercontent.com}"
+            [[ -n "$label" ]] \
+              || fail "OIDC token request host is not a subdomain of actions.githubusercontent.com"
+          }
+
           # --- 1. Re-establish the sign-off preconditions inside the gate ---
           [[ "$OUTCOME" == "sign-off-required" ]] || fail "protected job entered for a non sign-off outcome"
           [[ "$REPORT_ID" =~ ^rr_[0-9a-f]{64}$ ]] || fail "report id from the review job is malformed"
@@ -289,12 +368,13 @@ jobs:
             > "$envelope_file"
 
           # --- 2. Acquire the OIDC token AFTER the Environment gate ---
+          # The runner request endpoint is a REGIONAL Actions service host under
+          # `*.actions.githubusercontent.com`, distinct from the fixed JWT issuer
+          # token.actions.githubusercontent.com. Bound the request host to a
+          # genuine subdomain of the trusted zone before the request token is sent.
           : "${ACTIONS_ID_TOKEN_REQUEST_URL:?OIDC token request URL is unavailable; the caller must grant id-token: write}"
           : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?OIDC request token is unavailable}"
-          case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
-            https://token.actions.githubusercontent.com/*) : ;;
-            *) fail "OIDC token endpoint is not the expected GitHub issuer" ;;
-          esac
+          assert_trusted_oidc_request_url "$ACTIONS_ID_TOKEN_REQUEST_URL"
           oidc_cfg="$workdir/oidc.cfg"
           printf 'header = "Authorization: Bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$oidc_cfg"
           token_response="$workdir/token.json"
