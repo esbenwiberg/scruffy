@@ -6,9 +6,20 @@
 
 The OIDC architecture and local implementation were explicitly approved and
 completed in this working tree. Deterministic, database-backed, and offline
-infrastructure validation pass. The campaign gain is not earned because no live
-App permission, Foundry resource, Azure revision, protected-Environment setting,
-or disposable OIDC workflow has been changed or exercised.
+infrastructure validation pass. A disposable-caller OIDC integration has now been
+exercised end to end against the hosted service's **fake / no-model backend**
+(hosted revision `scruffy-shadow--0000004`), proving the hosted OIDC mechanics
+and the authorization boundary — including the protected-Environment sign-off
+path with administrator bypass disabled — as **successful partial fake/no-model
+evidence** (see
+[Hosted disposable-OIDC shadow proof](#hosted-disposable-oidc-shadow-proof--2026-08-01)).
+
+The campaign gain remains **not earned**. No real Foundry resource or model
+deployment exists, so exit-evidence criterion 6 (at least one hosted report
+through a **real** Foundry model backend) is still unmet, and fake/no-model
+evidence cannot earn it. A real Azure Container App revision backed by a Foundry
+model, and controlled publication/visual evidence, are still required before the
+result can move beyond `not yet verified`.
 
 ## Origin
 
@@ -344,13 +355,89 @@ complete.
 
 ### Explicitly not run
 
-- GitHub App `Actions: read` permission change or installation acceptance.
-- Foundry Marketplace/model deployment creation or live model call.
-- Azure PIM activation, RBAC assignment, what-if against live resources, or
-  Container App deployment.
-- Administrator-bypass removal or protected-Environment reconfiguration.
-- Disposable OIDC `ship` and human-exception workflows.
-- Any publication or real deployment.
+This list reflects the state at the end of the local-implementation slice. Items
+tagged _(later exercised against the fake/no-model backend)_ were subsequently
+run in the
+[Hosted disposable-OIDC shadow proof](#hosted-disposable-oidc-shadow-proof--2026-08-01)
+below; those runs do **not** earn the real-model criterion. The items marked
+**still not run** are the genuine live gaps that keep the campaign
+`not yet verified`.
+
+- GitHub App `Actions: read` permission change or installation acceptance
+  _(later exercised against the fake/no-model backend: the sign-off proof read
+  GitHub's approval history to record reviewer `esbenwiberg`)_.
+- Foundry Marketplace/model deployment creation or any live model call — **still
+  not run**; no real Foundry resource or model deployment exists.
+- Azure PIM activation, RBAC assignment, what-if against live resources, or a
+  Container App revision backed by a real model — **still not run** (only the
+  fake/no-model shadow revision `scruffy-shadow--0000004` was deployed).
+- Administrator-bypass removal or protected-Environment reconfiguration _(later
+  exercised: administrator bypass was disabled with `esbenwiberg` as the sole
+  required reviewer)_.
+- Disposable OIDC `ship` and human-exception workflows _(later exercised against
+  the fake/no-model backend — see the proof below)_.
+- Any publication or real product deployment — **still not run**.
+
+### Hosted disposable-OIDC shadow proof — 2026-08-01
+
+Two disposable-caller runs exercised the hosted OIDC release-authority protocol
+end to end against the pinned reusable workflow
+`esbenwiberg/scruffy/.github/workflows/release-authority-shadow.yml@fa9ad8620d150ba638ba4d6ec7a601243c0afa66`
+and hosted revision `scruffy-shadow--0000004`, which runs the **fake / no-model
+backend**. The protected Environment `scruffy-production-signoff` had
+administrator bypass **disabled**, with `esbenwiberg` as the sole required
+reviewer. This is **successful partial fake/no-model evidence** for the hosted
+OIDC mechanics and the authorization boundary; it does **not** earn the
+real-model exit criterion.
+
+**Automatic `ship` run**
+[`30719559408`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30719559408):
+the non-Environment review job validated the envelope, drove report
+`rr_2442a53e806a5986d6078452b464b77d21db3def8e434d8f06964b599a20d70b` (bound by
+request observation
+`rrq_8d23e419ac590ce466f4d6713354870509692ac146b575c081074da0c2cc6b8a` to the
+pinned workflow ref, run, and attempt 1), and posted terminal authorization
+`auth_45659cb156c05e98e61486b044122adb8cc19153763ccfdbfd0cce876eaf2edc` with
+outcome `ship`, `attestationId: null`, and `shadowOnly: true`. This job declared
+no Environment, so GitHub created no deployment metadata for it.
+
+**Protected sign-off run**
+[`30719740050`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30719740050):
+a deterministic `TLS.REJECT_UNAUTHORIZED_FALSE` finding at
+`src/legacy-client.ts:10` (complete coverage, candidate CI passed) produced
+`sign-off-required` report
+`rr_9e541a6fb0ee34ae56362ee60d28246a03daf3e764fbbdad50df5849967bbd20` with
+request observation
+`rrq_612518f1f7b5f3e21cb34c056ab9f20ad83c5fc80a819f749217da275870011d`. The
+protected Environment paused for a real GitHub reviewer; approval-history lookup
+recorded reviewer/responsibility accepter `esbenwiberg` (id `32299026`), matching
+the OIDC actor. Attestation
+`ra_4198fa4d3cb88484730f99481115567dbe50daf17abe3b1c5683a7bb7832e24f` (version 2)
+and terminal authorization
+`auth_7c7eac823172e916e0abf6d9cd4010fc3124021c08776d4635ef200de5029e77` (outcome
+`sign-off-required`, exact report/envelope/workflow/run/attempt binding,
+`shadowOnly: true`) were both posted inside that one protected Environment job.
+
+**Deployment-metadata nuance.** Because the sign-off job declared the protected
+Environment, GitHub itself automatically created an Environment deployment audit
+metadata record `5708556980` plus waiting/queued/in_progress/success statuses for
+that job. That record is GitHub's own platform bookkeeping. No application,
+package, image, release, infrastructure, or other product deployment or
+publication occurred: the reusable workflow holds no `deployments` write
+permission and invokes no deployment/status API or CLI command. The previously
+absolute "creates no deployment/status/SCM effect" phrasing in the workflow
+comments and runbooks was corrected to this precise authority fence.
+
+An earlier disposable run
+[`30716954315`](https://github.com/esbenwiberg/esbenwiberg-scruffy-todo-lab/actions/runs/30716954315)
+demonstrated the protocol failing closed before these two successful runs.
+
+**Why this is still partial.** Both runs used the fake / no-model backend, so
+exit-evidence criterion 6 (at least one hosted report through a real Foundry
+model backend) remains unmet. Fake/no-model evidence cannot earn the real-model
+criterion, and the campaign result stays `not yet verified` until a real Foundry
+model deployment produces and retrieves at least one report and the remaining
+live gaps are closed.
 
 ## Reflection
 

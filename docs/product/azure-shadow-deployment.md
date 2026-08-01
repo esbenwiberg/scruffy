@@ -175,8 +175,14 @@ inside the pinned workflow**. The endpoint must **never become a caller input**:
 a caller-supplied endpoint would let the short-lived OIDC token be exfiltrated.
 The workflow requests the report in a non-Environment job and performs sign-off
 attestation plus authorization inside the protected `scruffy-production-signoff`
-Environment job; it holds only `contents: read` and `id-token: write` and emits
-no deployment, publication, or SCM effect.
+Environment job; it holds only `contents: read` and `id-token: write`, issues no
+explicit deployment/status/SCM write command, and performs no application,
+infrastructure, package, image, or release deployment or publication. Declaring
+the protected Environment does make GitHub itself automatically record
+protected-Environment deployment/status audit metadata for the sign-off job (a
+deployment record plus waiting/queued/in_progress/success statuses); that
+GitHub-generated audit trail is the platform's own bookkeeping, distinct from —
+and conferring no — product deployment or publication authority.
 
 The following remain **separate human gates that merging this code does not
 perform**: updating the disposable caller's own workflow, adding the caller
