@@ -151,6 +151,18 @@ export class ReleaseService {
 
   /** Reconciler entry point: re-drive a reclaimed release run against its frozen range. */
   async reconcile(run: EvaluationRun): Promise<EvaluationRun> {
+    // A release run whose identity carries a workflow-prerequisite evidence digest can
+    // ONLY be driven faithfully by the prerequisite-aware hosted authority path, which
+    // resolves the repository configuration and exact workflow evidence. The reconciler
+    // has no prerequisite context: driving it here would commit a prerequisite-LESS (v2)
+    // report onto a run whose identity is keyed on the prerequisite digest, permanently
+    // poisoning that identity (a later hosted request deduplicates onto the v2 run and,
+    // fail-closed, can never approve it). Leave it non-terminal so the hosted path
+    // re-drives it with prerequisites on the next request; a crashed hosted attempt is
+    // still bounded and abandoned by the reconciler's attempt cap.
+    if (run.releasePrereqEvidenceDigest != null) {
+      return (await this.deps.runs.getRun(run.id)) ?? run;
+    }
     // The reconciler recovers a run that was not driven to terminal synchronously (a
     // rare lease-contention window). It has no upstream prerequisite context; the
     // hosted authority path resolves prerequisites and drives to terminal in one call,

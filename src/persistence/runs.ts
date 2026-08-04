@@ -40,6 +40,7 @@ interface RunRow {
   branch: string | null;
   release_artifact_digest: string | null;
   release_target_environment: string | null;
+  release_prereq_evidence_digest: string | null;
   policy_version: string;
   state: RunState;
   attempt: number;
@@ -58,6 +59,7 @@ function toRun(row: RunRow): EvaluationRun {
     branch: row.branch,
     releaseArtifactDigest: row.release_artifact_digest,
     releaseTargetEnvironment: row.release_target_environment,
+    releasePrereqEvidenceDigest: row.release_prereq_evidence_digest,
     policyVersion: row.policy_version,
     state: row.state,
     attempt: row.attempt,
@@ -477,8 +479,12 @@ export class RunStore implements NightlyRunStore {
     const now = this.clock.now();
     const result = await this.pool.query<RunRow>(
       `select * from evaluation_runs
-         where state = 'pending'
-            or (state = 'analyzing' and lease_expires_at < $1)
+         where (state = 'pending'
+                or (state = 'analyzing' and lease_expires_at < $1))
+           -- A release run keyed on a workflow-prerequisite evidence digest can only be
+           -- driven by the prerequisite-aware hosted authority path; the reconciler has
+           -- no prerequisite context, so it must never reclaim, drive, or abandon it.
+           and not (kind = 'release' and release_prereq_evidence_digest is not null)
          order by updated_at
          limit $2`,
       [now, limit],

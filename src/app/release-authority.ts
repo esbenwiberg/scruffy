@@ -179,7 +179,13 @@ export class ReleaseAuthorityService {
     // and requires a fresh report once the evidence becomes a result.
     if (prerequisite !== undefined && report.decision.outcome === "indeterminate") {
       if (prerequisite.state.kind === "not-approvable") {
-        const retryable = prerequisite.state.reasons.includes("required_workflow_pending");
+        // Retryable ONLY when the workflow aggregate is genuinely not-ready (something is
+        // still pending and nothing is fail-closed). The aggregate's conservative
+        // precedence already collapses a mixed pending+absent/unverifiable set to a
+        // fail-closed outcome, so keying on it — rather than scanning reasons — can never
+        // report a fail-closed prerequisite as retryable. An ineligible configuration
+        // (fail-closed aggregate) is likewise non-retryable.
+        const retryable = prerequisite.aggregate.outcome === "not-ready";
         throw new ReleaseAuthorityError(
           retryable
             ? "release prerequisites are still pending; retry once the required workflows complete"

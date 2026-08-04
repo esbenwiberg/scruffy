@@ -231,51 +231,65 @@ describeDb("hosted prerequisite readiness", () => {
       reasonCodes: ["required_workflow_unverifiable"],
     });
 
-    // A run whose identity carries the prerequisite evidence digest but was decided
-    // WITHOUT resolving prerequisites (the background reconciler drives with no
-    // prerequisite context → a v2 report) must NEVER be handed out as approvable, even
-    // though a fresh request deduplicates onto it. This is the fail-closed guard that
-    // stops the whole workflow lane from being bypassed by an interleaved reconcile.
-    const V2 = "4b".repeat(20);
-    seedGreen(V2);
+    // Only the three approvable candidates (green ship, terminal-failure sign-off,
+    // authority-change sign-off) recorded a report-request observation — the
+    // pending/invalid/absent/unverifiable candidates never began approval ordering.
+    const requests = await h.pool.query<{ count: string }>(
+      "select count(*) from release_report_requests",
+    );
+    expect(Number(requests.rows[0]!.count)).toBe(3);
+
+    // RECOVERY: a run whose identity carries the prerequisite evidence digest but was
+    // left non-terminal (a hosted analysis crashed) must NOT be decided by the
+    // background reconciler — it has no prerequisite context, and deciding it as a
+    // prerequisite-less v2 report would permanently poison the run identity. The
+    // reconciler leaves it untouched, and the next hosted request re-drives the SAME run
+    // WITH prerequisites to a v3 report.
+    const RECOVER = "4b".repeat(20);
+    seedGreen(RECOVER);
     const resolved = await resolveReleasePrerequisites(
-      { repository: REPO, candidateSha: V2, previousReleaseSha: PREV },
+      { repository: REPO, candidateSha: RECOVER, previousReleaseSha: PREV },
       { scm: h.scm, workflowRuns: h.scm },
     );
-    const bypassRun = await h.scruffy.runs.ensureReleaseRun(
-      { repository: REPO, commitSha: V2 },
+    const stuck = await h.scruffy.runs.ensureReleaseRun(
+      { repository: REPO, commitSha: RECOVER },
       PREV,
       ARTIFACT,
       ENVIRONMENT,
       POLICY_VERSION,
       resolved.snapshot.evidenceDigest,
     );
-    const decided = await h.scruffy.release.reconcile(bypassRun);
-    expect(decided.state).toBe("decided");
-    const v2Report = (await store.getReportForRun(bypassRun.id))!;
-    expect(v2Report.reportVersion).toBe("2");
-    expect(v2Report.decision.outcome).toBe("ship");
-    // requestReport deduplicates onto that decided v2 run and REFUSES it (fail closed).
-    await expect(authority.requestReport(requestIdentity, envelope(V2))).rejects.toMatchObject({
-      status: 409,
+    expect(stuck.state).toBe("pending");
+    // The reconciler refuses to decide a prerequisite-digest run: it stays recoverable
+    // and commits no report.
+    const afterReconcile = await h.scruffy.release.reconcile(stuck);
+    expect(afterReconcile.state).toBe("pending");
+    expect(await store.getReportForRun(stuck.id)).toBeNull();
+    // The next hosted request re-drives the same run with prerequisites → a v3 ship report.
+    const recovered = await authority.requestReport(requestIdentity, envelope(RECOVER));
+    expect(recovered.reportVersion).toBe("3");
+    expect(recovered.decision.outcome).toBe("ship");
+
+    // DEFENSE IN DEPTH: even if a non-v3 report reached the boundary, a prerequisite-aware
+    // service refuses to authorize it (the fail-closed guard). A v2 report — produced by
+    // driving a run with NO prerequisite context — cannot be authorized.
+    const V2 = "5c".repeat(20);
+    seedGreen(V2);
+    const v2Run = await h.scruffy.runRelease({
+      repository: REPO,
+      candidate: V2,
+      prevRelease: PREV,
+      artifactDigest: ARTIFACT,
+      targetEnvironment: ENVIRONMENT,
     });
-    // The v2 report cannot be authorized directly either — the freshness/lane bypass is
-    // closed at the terminal boundary too.
+    const v2Report = (await store.getReportForRun(v2Run.id))!;
+    expect(v2Report.reportVersion).toBe("2");
     await expect(
       authority.authorize(identity, v2Report.reportId, {
         envelope: v2Report.subject,
         attestationId: null,
       }),
     ).rejects.toMatchObject({ status: 409 });
-
-    // None of the not-approvable candidates ever recorded a report-request observation —
-    // approval ordering never began for evidence that is not a result.
-    const requests = await h.pool.query<{ count: string }>(
-      "select count(*) from release_report_requests",
-    );
-    // Exactly the two approvable reports (ship + sign-off failure + authority change) —
-    // pending/invalid/absent/unverifiable recorded none.
-    expect(Number(requests.rows[0]!.count)).toBe(3);
   });
 });
 
