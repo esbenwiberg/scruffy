@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { describeDb } from "../support/db.js";
 import { bootHarness, HARNESS_REQUIRED_CI_CONTEXTS, type Harness } from "../harness/boot.js";
 import { REPO } from "../fixtures/scenarios.js";
-import { ReleaseAuthorityService, ReleaseAuthorityError } from "../../src/app/release-authority.js";
+import { ReleaseAuthorityService } from "../../src/app/release-authority.js";
 import { ReleaseAuthorityStore } from "../../src/persistence/release-authority.js";
 import type {
   WorkflowApprovalReader,
