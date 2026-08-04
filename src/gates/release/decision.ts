@@ -1,6 +1,8 @@
 import type { Finding } from "../../domain/evidence/types.js";
 import type { AnalysisCoverage } from "../../domain/evidence/coverage.js";
 import type { ReleasePolicy } from "../../domain/policy/types.js";
+import type { ReleaseAuthorityAssessment } from "../../domain/release/authority-change.js";
+import type { RequiredWorkflowAggregate } from "../../domain/release/required-workflow-evidence.js";
 
 /**
  * The release decision kernel: a pure function over immutable, already-validated
@@ -60,7 +62,31 @@ export type ReleaseReasonCode =
   // A required candidate-CI lane is incomplete: a policy-named check/status context
   // was missing, non-success, wrong-SHA, or ambiguous for the exact candidate. An
   // incomplete required lane escalates — never a silent ship, never a fabricated stop.
-  | "ci_lane_incomplete";
+  | "ci_lane_incomplete"
+  // --- Workflow-prerequisite reason codes (kept in parity with report.ts) ---------
+  // A configured required workflow completed with a terminal non-success conclusion.
+  // A completed failure is an observed result a responsible human may sign off.
+  | "required_workflow_failed"
+  // First adoption / no readable previous configuration: a mandatory baseline sign-off.
+  | "release_authority_baseline_required"
+  // Repository release configuration or `.github` workflow/action authority changed
+  // across the range: a mandatory sign-off even when current runs are green.
+  | "release_authority_changed"
+  // A required workflow is still pending/queued/in-progress. Not an approvable result;
+  // it is retryable and must never enter the approval Environment early.
+  | "required_workflow_pending"
+  // No matching run for the exact configured workflow/candidate. Fail closed — a
+  // missing run is not a failure a human may accept.
+  | "required_workflow_absent"
+  // A workflow's evidence could not be verified (provider fault / ambiguity / malformed
+  // identity). Indeterminate — an outage must never be mistaken for a failure.
+  | "required_workflow_unverifiable"
+  // The candidate repository release configuration is absent or empty. Authorization-
+  // ineligible: you cannot approve what you cannot read.
+  | "release_config_missing"
+  // The candidate repository release configuration is malformed / self-referential /
+  // unsupported. Authorization-ineligible, never an approvable workflow failure.
+  | "release_config_invalid";
 
 /** How a single finding affected the release outcome. */
 export type ReleaseEffect = "stops" | "escalates" | "cleared" | "not_relevant";
@@ -180,6 +206,64 @@ export interface ReleaseCiLane {
   complete: boolean;
 }
 
+/**
+ * The workflow-prerequisite lane's contribution to the decision. This is the
+ * repository-owned release-prerequisite contract, resolved from the release-authority
+ * assessment and the required-workflow aggregate (see `derivePrerequisiteState`). It
+ * is deliberately reduced to three service-owned kinds:
+ *  - `satisfied`: every configured workflow passed AND authority is unchanged — the
+ *    normal Scruffy decision proceeds untouched.
+ *  - `sign-off`: an OBSERVED result a responsible human may accept — a terminal
+ *    workflow failure, a first-adoption baseline, or an authority change (even when
+ *    the current runs are green). It escalates like any other required-lane gap.
+ *  - `not-approvable`: evidence that is NOT a result and cannot be converted into
+ *    approval merely by asking — pending, absent, unverifiable, or an ineligible
+ *    configuration. It fails closed to `indeterminate`.
+ *
+ * Absent (undefined) means no prerequisite contract was resolved for this run (the
+ * local/corpus context-based candidate-CI path); the kernel then behaves exactly as
+ * before. A `stop` always dominates every prerequisite state — see `evaluateRelease`.
+ */
+export type ReleasePrerequisiteState =
+  | { kind: "satisfied" }
+  | { kind: "sign-off"; reasons: ReleaseReasonCode[] }
+  | { kind: "not-approvable"; reasons: ReleaseReasonCode[] };
+
+/**
+ * Derive the prerequisite contribution from the pure release-authority assessment and
+ * the required-workflow aggregate. Conservative precedence, most-blocking first:
+ *
+ *  1. an INELIGIBLE candidate configuration (missing / malformed) → not-approvable;
+ *  2. a `fail-closed` aggregate (a workflow absent or unverifiable) → not-approvable;
+ *  3. a `not-ready` aggregate (a workflow still pending) → not-approvable;
+ *  4. an `exception-eligible` aggregate (a terminal workflow failure) → sign-off;
+ *  5. an authority `sign-off-required` (baseline or change) → sign-off;
+ *  6. otherwise (all passed AND authority clean) → satisfied.
+ *
+ * Missing/unverifiable evidence (1–3) dominates the sign-off routes (4–5): you can
+ * neither approve nor even establish the prerequisite yet. When BOTH a terminal
+ * workflow failure and an authority change hold, both reasons are surfaced.
+ */
+export function derivePrerequisiteState(
+  authority: ReleaseAuthorityAssessment,
+  aggregate: RequiredWorkflowAggregate,
+): ReleasePrerequisiteState {
+  if (authority.outcome === "ineligible") {
+    return { kind: "not-approvable", reasons: [authority.reasonCode as ReleaseReasonCode] };
+  }
+  if (aggregate.outcome === "fail-closed" || aggregate.outcome === "not-ready") {
+    return { kind: "not-approvable", reasons: [aggregate.reasonCode as ReleaseReasonCode] };
+  }
+
+  const reasons: ReleaseReasonCode[] = [];
+  if (aggregate.outcome === "exception-eligible") reasons.push("required_workflow_failed");
+  if (authority.outcome === "sign-off-required") {
+    reasons.push(authority.reasonCode as ReleaseReasonCode);
+  }
+  if (reasons.length > 0) return { kind: "sign-off", reasons };
+  return { kind: "satisfied" };
+}
+
 /** `coverage` is required for the same reason it is on evaluatePoison — a
  * defaulted argument would make a blind run look like a clean one. */
 export function evaluateRelease(
@@ -188,6 +272,7 @@ export function evaluateRelease(
   coverage: AnalysisCoverage,
   llm?: ReleaseLlmLane,
   ci?: ReleaseCiLane,
+  prerequisite?: ReleasePrerequisiteState,
 ): ReleaseDecision {
   const dispositions: ReleaseFindingDisposition[] = findings.map((finding) => {
     const { effect, reason } = classify(finding, policy);
@@ -220,26 +305,53 @@ export function evaluateRelease(
 
   const stops = dispositions.filter((d) => d.effect === "stops");
   if (stops.length > 0) {
-    // A coverage gap — deterministic, the LLM lane's risk/incompleteness, OR an
-    // incomplete required candidate-CI lane — cannot soften a confirmed
-    // deterministic stop. Stop wins, full stop.
+    // A coverage gap — deterministic, the LLM lane's risk/incompleteness, an
+    // incomplete required candidate-CI lane, OR any workflow-prerequisite state —
+    // cannot soften a confirmed deterministic stop. A confirmed Scruffy stop
+    // dominates every prerequisite state and remains non-overridable. Stop wins.
     return { outcome: "stop", reasons: dedupe(stops.map((d) => d.reason)), dispositions, summary, coverage };
+  }
+
+  // A non-approvable prerequisite (pending / absent / unverifiable / ineligible
+  // configuration) is evidence that is NOT a result: it can neither ship nor enter a
+  // human sign-off Environment. It fails closed to `indeterminate` — the one
+  // non-approvable, non-stop outcome — ahead of every escalation route, because we
+  // cannot even establish the prerequisite yet. It never softens the stop above.
+  if (prerequisite?.kind === "not-approvable") {
+    return {
+      outcome: "indeterminate",
+      reasons: dedupe(prerequisite.reasons),
+      dispositions,
+      summary,
+      coverage,
+    };
   }
 
   const modelRisk = (llm?.retainedRiskCount ?? 0) > 0;
   const llmIncomplete = llm !== undefined && !llm.complete;
   const ciIncomplete = ci !== undefined && ci.required && !ci.complete;
+  const prereqSignoff = prerequisite?.kind === "sign-off";
   const escalations = dispositions.filter((d) => d.effect === "escalates");
-  if (escalations.length > 0 || !coverage.complete || modelRisk || llmIncomplete || ciIncomplete) {
-    // An incomplete analysis, a retained model risk, OR an incomplete required
-    // evidence lane escalates on its own: shipping code we never fully reviewed —
-    // or whose required CI is missing/failing — is a human's call, not ours.
+  if (
+    escalations.length > 0 ||
+    !coverage.complete ||
+    modelRisk ||
+    llmIncomplete ||
+    ciIncomplete ||
+    prereqSignoff
+  ) {
+    // An incomplete analysis, a retained model risk, an incomplete required evidence
+    // lane, OR a workflow-prerequisite sign-off (a terminal workflow failure, a first
+    // baseline, or an authority change) escalates on its own: shipping code we never
+    // fully reviewed — or whose required workflows failed / whose release authority
+    // changed — is a human's call, not ours.
     const reasons = dedupe(escalations.map((d) => d.reason));
     if (!coverage.complete) reasons.push("analysis_incomplete");
     if (modelRisk) reasons.push("model_risk_present");
     if (llmIncomplete) reasons.push("llm_lane_incomplete");
     if (ciIncomplete) reasons.push("ci_lane_incomplete");
-    return { outcome: "sign-off-required", reasons, dispositions, summary, coverage };
+    if (prereqSignoff) reasons.push(...prerequisite.reasons);
+    return { outcome: "sign-off-required", reasons: dedupe(reasons), dispositions, summary, coverage };
   }
 
   // Ship: nothing stops or escalates, and we reviewed the whole range. Reasons

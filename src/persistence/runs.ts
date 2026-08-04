@@ -220,6 +220,14 @@ export class RunStore implements NightlyRunStore {
    * a different prevRelease is a no-op on base_sha (only updated_at is touched), and
    * the original range wins. This is deliberate — reconciliation must re-drive the
    * exact range the run was created for, not a range that moved underneath it.
+   *
+   * `prereqEvidenceDigest` binds the canonical workflow-prerequisite snapshot into
+   * release-run identity: for the SAME deployment envelope + policy, a CHANGED digest
+   * (a rerun, a newly green attempt, a changed configuration or authority path)
+   * creates a distinct SUCCESSOR run — and therefore a successor report — while an
+   * exact-unchanged retry dedupes onto the original run. Null preserves the pre-
+   * prerequisite behavior for the local / corpus context-based candidate-CI path (it
+   * coalesces to '' in the identity, exactly as historical rows already do).
    */
   async ensureReleaseRun(
     candidate: SubjectRevision,
@@ -227,6 +235,7 @@ export class RunStore implements NightlyRunStore {
     artifactDigest: string,
     targetEnvironment: string,
     policyVersion: string,
+    prereqEvidenceDigest: string | null = null,
   ): Promise<EvaluationRun> {
     const now = this.clock.now();
     const id = this.ids.next("run");
@@ -234,10 +243,11 @@ export class RunStore implements NightlyRunStore {
       `insert into evaluation_runs
          (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch,
           release_artifact_digest, release_target_environment,
-          policy_version, state, attempt, created_at, updated_at)
-       values ($1, 'release', $2, $3, null, $4, null, $5, $6, $7, 'pending', 0, $8, $8)
+          policy_version, release_prereq_evidence_digest, state, attempt, created_at, updated_at)
+       values ($1, 'release', $2, $3, null, $4, null, $5, $6, $7, $8, 'pending', 0, $9, $9)
        on conflict (repository, commit_sha, (coalesce(base_sha, '')), release_artifact_digest,
-                    release_target_environment, policy_version)
+                    release_target_environment, policy_version,
+                    (coalesce(release_prereq_evidence_digest, '')))
          where kind = 'release' and release_artifact_digest is not null and release_target_environment is not null
        do update set updated_at = evaluation_runs.updated_at
        returning *`,
@@ -249,6 +259,7 @@ export class RunStore implements NightlyRunStore {
         artifactDigest,
         targetEnvironment,
         policyVersion,
+        prereqEvidenceDigest,
         now,
       ],
     );

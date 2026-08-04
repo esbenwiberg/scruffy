@@ -10,6 +10,7 @@ import {
   type ReleaseShadowAuthorization as ReleaseShadowAuthorizationType,
 } from "../domain/release/authority.js";
 import {
+  isPrerequisiteAuthoritative,
   parseReleaseReport,
   parseStoredReleaseReport,
   releaseEnvelopeLockKey,
@@ -35,6 +36,19 @@ export class ReleaseAuthorityStore {
   async getCurrentReport(reportId: string): Promise<ReleaseRiskReport | null> {
     const stored = await this.getReport(reportId);
     if (stored === null || stored.reportVersion !== "2") return null;
+    return parseReleaseReport(stored);
+  }
+
+  /**
+   * The report as eligible for the WORKFLOW-PREREQUISITE authority contract, or null.
+   * Only a v3 report carrying a prerequisite snapshot qualifies. Historical v1/v2
+   * reports remain inspectable through `getReport`, but are structurally ineligible
+   * here — they never resolved repository-owned workflow prerequisites, so they can
+   * never satisfy the new contract without silently rewriting history.
+   */
+  async getPrerequisiteReport(reportId: string): Promise<ReleaseRiskReport | null> {
+    const stored = await this.getReport(reportId);
+    if (stored === null || !isPrerequisiteAuthoritative(stored)) return null;
     return parseReleaseReport(stored);
   }
 
