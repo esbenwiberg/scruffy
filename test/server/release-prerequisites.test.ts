@@ -14,6 +14,9 @@ import type {
   RequiredWorkflowEvidence,
   WorkflowRunResolution,
 } from "../../src/domain/release/required-workflow-evidence.js";
+import { resolveReleasePrerequisites } from "../../src/gates/release/prerequisites.js";
+
+const POLICY_VERSION = "policy-v1";
 
 /**
  * Wiring of the repository-owned workflow-prerequisite lane into the authenticated
@@ -162,6 +165,7 @@ describeDb("hosted prerequisite readiness", () => {
     h = await bootHarness({ publishReleaseCheck: false });
     seedPreviousBaseline();
     const { authority } = service();
+    const store = new ReleaseAuthorityStore(h.pool);
 
     // 1. GREEN — all workflows passed, authority unchanged: reaches analysis and ships.
     const GREEN = "b2".repeat(20);
@@ -226,6 +230,43 @@ describeDb("hosted prerequisite readiness", () => {
       retryable: false,
       reasonCodes: ["required_workflow_unverifiable"],
     });
+
+    // A run whose identity carries the prerequisite evidence digest but was decided
+    // WITHOUT resolving prerequisites (the background reconciler drives with no
+    // prerequisite context → a v2 report) must NEVER be handed out as approvable, even
+    // though a fresh request deduplicates onto it. This is the fail-closed guard that
+    // stops the whole workflow lane from being bypassed by an interleaved reconcile.
+    const V2 = "4b".repeat(20);
+    seedGreen(V2);
+    const resolved = await resolveReleasePrerequisites(
+      { repository: REPO, candidateSha: V2, previousReleaseSha: PREV },
+      { scm: h.scm, workflowRuns: h.scm },
+    );
+    const bypassRun = await h.scruffy.runs.ensureReleaseRun(
+      { repository: REPO, commitSha: V2 },
+      PREV,
+      ARTIFACT,
+      ENVIRONMENT,
+      POLICY_VERSION,
+      resolved.snapshot.evidenceDigest,
+    );
+    const decided = await h.scruffy.release.reconcile(bypassRun);
+    expect(decided.state).toBe("decided");
+    const v2Report = (await store.getReportForRun(bypassRun.id))!;
+    expect(v2Report.reportVersion).toBe("2");
+    expect(v2Report.decision.outcome).toBe("ship");
+    // requestReport deduplicates onto that decided v2 run and REFUSES it (fail closed).
+    await expect(authority.requestReport(requestIdentity, envelope(V2))).rejects.toMatchObject({
+      status: 409,
+    });
+    // The v2 report cannot be authorized directly either — the freshness/lane bypass is
+    // closed at the terminal boundary too.
+    await expect(
+      authority.authorize(identity, v2Report.reportId, {
+        envelope: v2Report.subject,
+        attestationId: null,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
 
     // None of the not-approvable candidates ever recorded a report-request observation —
     // approval ordering never began for evidence that is not a result.

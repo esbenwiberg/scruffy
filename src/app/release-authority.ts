@@ -98,6 +98,36 @@ export class ReleaseAuthorityService {
     return this.deps.approvalEnvironment;
   }
 
+  /**
+   * True when the service is wired to resolve repository-owned workflow prerequisites
+   * (both the exact-SHA source reader and the read-only Actions run reader). When true,
+   * EVERY report this service hands out for approval or authorization MUST be
+   * prerequisite-authoritative (v3): a non-v3 report means its durable run was decided
+   * WITHOUT resolving prerequisites — e.g. the background reconciler drove it with no
+   * prerequisite context — and returning/authorizing it would silently bypass the
+   * fail-closed workflow lane. Such a report is refused (fail closed).
+   */
+  get #prerequisiteAware(): boolean {
+    return this.deps.scm !== undefined && this.deps.workflowRuns !== undefined;
+  }
+
+  /**
+   * A prerequisite-aware service refuses any report that is not prerequisite-
+   * authoritative (v3 with a snapshot). This is the single guard that stops a v2 report
+   * — one decided without resolving repository workflow prerequisites — from entering
+   * approval or authorization, where it would otherwise skip the fail-closed workflow
+   * lane and the authorization-time freshness revalidation. A legacy (non-aware) service
+   * is unaffected: its v2 reports remain approvable exactly as before.
+   */
+  #requirePrerequisiteAuthoritative(report: ReleaseRiskReport): void {
+    if (this.#prerequisiteAware && !isPrerequisiteAuthoritative(report)) {
+      throw new ReleaseAuthorityError(
+        "release report was not resolved against repository workflow prerequisites; request a fresh report",
+        409,
+      );
+    }
+  }
+
   async requestReport(identity: WorkflowIdentity, raw: unknown): Promise<ReleaseRiskReport> {
     const input = HostedReleaseRequest.parse(raw);
     this.#requireRepository(identity, input.repository);
@@ -134,6 +164,13 @@ export class ReleaseAuthorityService {
     if (report === null) {
       throw new ReleaseAuthorityError("release report is not yet available", 409);
     }
+    // Fail closed if a prerequisite-aware request deduped onto a run that was decided
+    // WITHOUT resolving prerequisites (a non-v3 report). The run's evidence digest is
+    // part of its identity, so a decided run can carry a v2 report only when something
+    // other than this path (the reconciler, with no prerequisite context) drove it.
+    // Returning it would bypass the whole workflow lane, so refuse before it can be
+    // recorded or approved.
+    this.#requirePrerequisiteAuthoritative(report);
     // A not-approvable prerequisite (pending / absent / unverifiable / ineligible
     // configuration) resolves to an `indeterminate` decision: the durable report exists
     // (successor semantics) but it can neither ship nor enter the approval Environment.
@@ -222,6 +259,9 @@ export class ReleaseAuthorityService {
   ): Promise<ReleaseApprovalAttestationType> {
     const input = CreateAttestationInput.parse(raw);
     const report = await this.getReport(identity, reportId);
+    // A prerequisite-aware service never attests a report that never resolved workflow
+    // prerequisites — the same fail-closed guard requestReport and authorize apply.
+    this.#requirePrerequisiteAuthoritative(report);
     if (report.decision.outcome !== "sign-off-required") {
       throw new ReleaseAuthorityError("only sign-off-required reports accept attestations", 409);
     }
@@ -341,6 +381,10 @@ export class ReleaseAuthorityService {
   ): Promise<ReleaseShadowAuthorizationType> {
     const input = CreateAuthorizationInput.parse(raw);
     const report = await this.getReport(identity, reportId);
+    // A prerequisite-aware service never authorizes a report that never resolved workflow
+    // prerequisites (a v2 report decided without a prerequisite snapshot); doing so would
+    // skip the freshness revalidation below and the fail-closed workflow lane entirely.
+    this.#requirePrerequisiteAuthoritative(report);
     if (!sameEnvelope(report.subject, ReleaseReportSubject.parse(input.envelope))) {
       throw new ReleaseAuthorityError("authorization envelope does not match report", 409);
     }
