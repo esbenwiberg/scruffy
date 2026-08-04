@@ -158,8 +158,9 @@ export class ReleaseService {
     // report onto a run whose identity is keyed on the prerequisite digest, permanently
     // poisoning that identity (a later hosted request deduplicates onto the v2 run and,
     // fail-closed, can never approve it). Leave it non-terminal so the hosted path
-    // re-drives it with prerequisites on the next request; a crashed hosted attempt is
-    // still bounded and abandoned by the reconciler's attempt cap.
+    // re-drives it with prerequisites on the next request. `findReconcilable` already
+    // excludes these runs, so the reconciler never reaches here in the timer loop; this
+    // guard is defense-in-depth for any direct reconcile call.
     if (run.releasePrereqEvidenceDigest != null) {
       return (await this.deps.runs.getRun(run.id)) ?? run;
     }
