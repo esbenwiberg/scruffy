@@ -53,17 +53,21 @@ Create the App under the account that should own it
 
 Grant exactly these, and nothing more:
 
-| Permission        | Access       | Why                                                                          |
-| ----------------- | ------------ | ---------------------------------------------------------------------------- |
-| **Checks**        | Read & write | post the native `scruffy/poison` check-run                                   |
-| **Contents**      | Read & write | read the diff; commit fix branches (nightly)                                 |
-| **Pull requests** | Read & write | resolve the associated PR; open fix PRs                                      |
-| **Issues**        | Read & write | publish the nightly parent issue and its child sub-issues                    |
-| **Actions**       | Read-only    | verify the actual protected-Environment reviewer for hosted release sign-off |
-| **Metadata**      | Read-only    | mandatory baseline (repo listing, refs)                                      |
+| Permission        | Access       | Why                                                                                                         |
+| ----------------- | ------------ | ----------------------------------------------------------------------------------------------------------- |
+| **Checks**        | Read & write | post the native `scruffy/poison` check-run                                                                  |
+| **Contents**      | Read & write | read the diff; commit fix branches (nightly)                                                                |
+| **Pull requests** | Read & write | resolve the associated PR; open fix PRs                                                                     |
+| **Issues**        | Read & write | publish the nightly parent issue and its child sub-issues                                                   |
+| **Actions**       | Read-only    | verify the protected-Environment reviewer AND read required-workflow run evidence for release prerequisites |
+| **Metadata**      | Read-only    | mandatory baseline (repo listing, refs)                                                                     |
 
 `Actions: read` is needed only when the hosted OIDC release protocol is enabled.
-It permits `GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals`; Scruffy
+It permits `GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals` and the
+read-only workflow/run listing used to resolve each `.github/scruffy-release.yml`
+required workflow to its exact current-attempt run (id, attempt, status,
+conclusion, URL) for the candidate SHA. This required-workflow reader is a narrow
+read-only Actions capability, separate from source reads and SCM writes; Scruffy
 does not dispatch, approve, reject, cancel, rerun, or modify a workflow. Adding
 this permission to an installed App requires a separate operator review and
 installation permission acceptance. Leave every other permission at **No access**.

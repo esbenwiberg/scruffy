@@ -240,6 +240,25 @@ This reviews `(previous release, candidate]` and publishes the advisory
 `scruffy/release` result. If the previous release is omitted, Scruffy treats the
 candidate as the first release.
 
+A repository enrolled in the hosted release gate declares its existing required
+GitHub Actions workflows in a narrow, repository-owned
+[`.github/scruffy-release.yml`](docs/product/cd-release-gate.md#repository-owned-workflow-prerequisites):
+
+```yaml
+version: 1
+
+requiredWorkflows:
+  - .github/workflows/ci.yml
+```
+
+Scruffy reads it at the exact candidate SHA and resolves the workflow runs itself.
+A green result ships; a completed workflow **failure** or a release-authority change
+routes to a protected sign-off; a **pending** workflow is retried then refused; and a
+**missing**/unverifiable run or configuration fails closed. See
+[CD-native release gate](docs/product/cd-release-gate.md#repository-owned-workflow-prerequisites)
+for first-adoption baseline, incremental adoption, rerun invalidation, and the
+administrator opt-out.
+
 ## Run the webhook server
 
 The hosted entry point serves:
@@ -297,18 +316,18 @@ webhook, verification, and rollback procedure is in
 
 ### Server configuration
 
-| Variable                        | Purpose                                      | Default                |
-| ------------------------------- | -------------------------------------------- | ---------------------- |
-| `DATABASE_URL`                  | Postgres connection string                   | Local Compose database |
-| `SCRUFFY_WEBHOOK_SECRET`        | HMAC secret used to verify GitHub deliveries | Required               |
-| `PORT`                          | HTTP listen port                             | `8080`                 |
-| `SCRUFFY_RECONCILE_INTERVAL_MS` | Reconcile and outbox flush interval          | `10000`                |
-| `SCRUFFY_SCM_READER`            | GitHub read adapter                          | `gh-cli`               |
-| `SCRUFFY_SCM_WRITER`            | GitHub write adapter                         | `gh-cli`               |
-| `SCRUFFY_NIGHTLY_CADENCE_MS`    | Nightly cadence per repository/branch        | unset (no schedule)    |
-| `SCRUFFY_NIGHTLY_TICK_MS`       | How often the nightly schedule is polled     | `300000`               |
-| `SCRUFFY_NIGHTLY_LEASE_MS`      | Lease held by one nightly attempt            | `1800000`              |
-| `SCRUFFY_NIGHTLY_BATCH_SIZE`    | Repositories driven per schedule tick        | `20`                   |
+| Variable                        | Purpose                                      | Default                   |
+| ------------------------------- | -------------------------------------------- | ------------------------- |
+| `DATABASE_URL`                  | Postgres connection string                   | Local Compose database    |
+| `SCRUFFY_WEBHOOK_SECRET`        | HMAC secret used to verify GitHub deliveries | Required                  |
+| `PORT`                          | HTTP listen port                             | `8080`                    |
+| `SCRUFFY_RECONCILE_INTERVAL_MS` | Reconcile and outbox flush interval          | `10000`                   |
+| `SCRUFFY_SCM_READER`            | GitHub read adapter                          | `gh-cli`                  |
+| `SCRUFFY_SCM_WRITER`            | GitHub write adapter                         | `gh-cli`                  |
+| `SCRUFFY_NIGHTLY_CADENCE_MS`    | Nightly cadence per repository/branch        | unset (no schedule)       |
+| `SCRUFFY_NIGHTLY_TICK_MS`       | How often the nightly schedule is polled     | `300000`                  |
+| `SCRUFFY_NIGHTLY_LEASE_MS`      | Lease held by one nightly attempt            | `1800000`                 |
+| `SCRUFFY_NIGHTLY_BATCH_SIZE`    | Repositories driven per schedule tick        | `20`                      |
 | `SCRUFFY_NIGHTLY_OWNER`         | Lease owner recorded in the schedule         | `nightly-scheduler:<pid>` |
 
 Unknown backend values and malformed positive-integer settings fail at startup
