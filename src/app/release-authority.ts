@@ -8,8 +8,8 @@ import type {
 } from "../providers/scm/port.js";
 import {
   resolveReleasePrerequisites,
-  type ResolvedPrerequisite,
-} from "./release-prerequisites.js";
+  type ResolvedReleasePrerequisites,
+} from "../gates/release/prerequisites.js";
 import type { ReleaseReasonCode } from "../gates/release/decision.js";
 import {
   CreateAttestationInput,
@@ -168,14 +168,14 @@ export class ReleaseAuthorityService {
    * unchanged. Shared by report creation and authorization revalidation so the two can
    * never resolve evidence differently.
    */
-  async #resolvePrerequisites(input: {
+  async #resolvePrerequisites(range: {
     repository: string;
     candidateSha: string;
     previousReleaseSha: string | null;
-  }): Promise<ResolvedPrerequisite | undefined> {
+  }): Promise<ResolvedReleasePrerequisites | undefined> {
     const { scm, workflowRuns } = this.deps;
     if (scm === undefined || workflowRuns === undefined) return undefined;
-    return resolveReleasePrerequisites({ scm, workflowRuns }, input);
+    return resolveReleasePrerequisites(range, { scm, workflowRuns });
   }
 
   async #recordReportRequest(identity: WorkflowIdentity, report: ReleaseRiskReport): Promise<void> {
