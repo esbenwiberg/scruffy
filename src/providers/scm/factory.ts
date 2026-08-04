@@ -4,6 +4,7 @@ import type {
   ScmReader,
   ScmWriter,
   WorkflowApprovalReader,
+  WorkflowRunReader,
 } from "./port.js";
 import { GhCliScm } from "./gh-cli.js";
 import { GithubAppScmWriter } from "./github-app.js";
@@ -11,6 +12,7 @@ import { GithubAppScmReader } from "./github-app-reader.js";
 import { GithubAppLifecycleReader } from "./github-app-lifecycle.js";
 import { createGithubAppApi, githubAppConfigFromEnv } from "./github-app-auth.js";
 import { GithubAppWorkflowApprovalReader } from "./github-app-approvals.js";
+import { GithubAppWorkflowRunReader } from "./github-app-workflow-runs.js";
 
 /**
  * Selects the SCM writer backend. Defaults to the gh-cli shadow-status adapter
@@ -153,6 +155,29 @@ export function createScmInstallationReader(
       return null;
     case "github-app":
       return new GithubAppScmReader({ api: createGithubAppApi(githubAppConfigFromEnv()) });
+    default: {
+      const _exhaustive: never = backend;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * The narrow, read-only Actions capability that resolves required-workflow run
+ * evidence for an exact candidate. Same null-for-gh-cli shape as the other
+ * App-only readers: resolving a workflow's runs needs the App installation's
+ * `Actions: read`, which a developer's `gh` session is not the right credential
+ * for, so a shadow-status deployment is told at wiring time that it cannot supply
+ * workflow-prerequisite evidence rather than degrading into a false signal.
+ */
+export function createWorkflowRunReader(
+  backend: ScmReaderBackend = resolveScmReaderBackend(),
+): WorkflowRunReader | null {
+  switch (backend) {
+    case "gh-cli":
+      return null;
+    case "github-app":
+      return new GithubAppWorkflowRunReader(createGithubAppApi(githubAppConfigFromEnv()));
     default: {
       const _exhaustive: never = backend;
       return _exhaustive;

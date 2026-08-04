@@ -20,10 +20,15 @@ import type {
   ScmLifecycleReader,
   ScmReader,
   ScmWriter,
+  WorkflowRunReader,
 } from "./port.js";
 import { withIssueMarker } from "../../domain/findings/work-publication.js";
 import { commitCarriesProposal, fixCommitMessage } from "../../domain/fixes/delivery.js";
 import type { CiEvidence, PullRequestObservation } from "../../domain/fixes/lifecycle.js";
+import type {
+  RequiredWorkflowQuery,
+  WorkflowRunResolution,
+} from "../../domain/release/required-workflow-evidence.js";
 
 /** One published issue as the fake holds it; `input.body` carries the marker. */
 export interface FakeIssue {
@@ -59,11 +64,15 @@ export interface FakePullRequest {
   input: PullRequestInput;
 }
 
-export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmInstallationReader {
+export class FakeScm
+  implements ScmReader, ScmWriter, ScmLifecycleReader, ScmInstallationReader, WorkflowRunReader
+{
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #fileContent = new Map<string, FileContentResult>();
   readonly #candidateCi = new Map<string, CandidateCiEvidence>();
+  /** Seeded required-workflow resolutions keyed by repository/path/candidate/branch. */
+  readonly #workflowRuns = new Map<string, WorkflowRunResolution>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, FakePullRequest>();
   /** `repository#branch` -> the branch's head commit, mirroring a git ref. */
@@ -135,6 +144,25 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     // missing -> the lane is incomplete -> sign-off, exactly as intended.
     return (
       this.#candidateCi.get(this.#subjectKey(subject)) ?? { sha: subject.commitSha, records: [] }
+    );
+  }
+
+  /**
+   * Seed a deterministic required-workflow resolution for an exact query. Mirrors
+   * the real reader's discipline: an unseeded query is a genuine `absent` (no
+   * matching run), NEVER a fabricated pass — the fake simulates no provider fault.
+   * A test that wants a fault seeds an explicit `unverifiable` resolution.
+   */
+  seedRequiredWorkflowRun(query: RequiredWorkflowQuery, resolution: WorkflowRunResolution): void {
+    this.#workflowRuns.set(this.#workflowRunKey(query), resolution);
+  }
+
+  async resolveRequiredWorkflowRun(query: RequiredWorkflowQuery): Promise<WorkflowRunResolution> {
+    return (
+      this.#workflowRuns.get(this.#workflowRunKey(query)) ?? {
+        kind: "absent",
+        workflowPath: query.workflowPath,
+      }
     );
   }
 
@@ -546,6 +574,10 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
 
   #contentKey(subject: SubjectRevision, path: string): string {
     return `${this.#subjectKey(subject)}::${path}`;
+  }
+
+  #workflowRunKey(query: RequiredWorkflowQuery): string {
+    return `${query.repository}@${query.candidateSha}#${query.defaultBranch}::${query.workflowPath}`;
   }
 }
 
