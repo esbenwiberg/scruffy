@@ -1,0 +1,54 @@
+contract_version: 1
+title: "Expose repository prerequisite routing in the reusable release workflow"
+depends_on: ["04-hosted-revalidation"]
+scenarios:
+  - id: reusable-prerequisite-routing
+    given:
+      - "the reusable release workflow receives hosted prerequisite responses"
+    when:
+      - "green, terminal failure, pending, invalid/absent, authority-change and stale states occur"
+    then:
+      - "green continues, terminal failure/change enters exact protected sign-off, pending retries or fails explicitly, and invalid/absent/stale states fail closed"
+      - "no non-approvable state enters the protected Environment"
+  - id: prerequisite-summary-redaction
+    given:
+      - "a prerequisite-aware report response"
+    when:
+      - "the reusable workflow writes job summaries"
+    then:
+      - "workflow paths, run links, attempts, conclusions and authority changes are visible"
+      - "tokens, authorization headers, full reports and sensitive findings are not printed"
+  - id: progressive-adoption-documentation
+    given:
+      - "a team adopting Scruffy with existing GitHub workflows"
+    when:
+      - "maintainers follow repository integration documentation"
+    then:
+      - "they can add a narrow repository config, establish the first baseline, add workflows incrementally and understand failure sign-off versus pending/missing refusal"
+required_facts:
+  - id: fact-reusable-prerequisite-routing
+    proves: [reusable-prerequisite-routing]
+    kind: integration-test
+    artifact:
+      path: test/workflows/release-prerequisite-routing.test.ts
+      change: create
+    command: npm test -- test/workflows/release-prerequisite-routing.test.ts -t "reusable prerequisite routing"
+  - id: fact-prerequisite-summary-redaction
+    proves: [prerequisite-summary-redaction]
+    kind: unit-test
+    artifact:
+      path: test/workflows/release-prerequisite-routing.test.ts
+      change: create
+    command: npm test -- test/workflows/release-prerequisite-routing.test.ts -t "prerequisite release summary redaction"
+  - id: fact-progressive-adoption-docs
+    proves: [progressive-adoption-documentation]
+    kind: custom-command
+    artifact:
+      path: docs/product/cd-release-gate.md
+      change: update
+    command: npm run format:check
+human_review:
+  - id: review-reusable-workflow-authority
+    covers: [reusable-prerequisite-routing, prerequisite-summary-redaction]
+    criterion: "The reusable workflow retains only contents:read and id-token:write, exposes no endpoint/audience override, prints no credential or full sensitive report, and performs no publication/deployment/SCM write effect."
+    reason: "The final workflow permission and information-flow boundary requires operator review."

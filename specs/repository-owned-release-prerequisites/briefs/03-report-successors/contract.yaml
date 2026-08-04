@@ -1,0 +1,69 @@
+contract_version: 1
+title: "Bind reports and persistence to workflow prerequisite snapshots"
+depends_on: ["02-workflow-evidence"]
+scenarios:
+  - id: prerequisite-report-identity
+    given:
+      - "a complete release report with canonical repository configuration and exact required workflow evidence"
+    when:
+      - "identity-bearing prerequisite fields are replayed or mutated"
+    then:
+      - "exact replay keeps the same report ID"
+      - "changing config, authority paths, workflow identity, run, attempt, status or conclusion changes report ID"
+  - id: prerequisite-decision-routing
+    given:
+      - "release analysis plus classified prerequisite state"
+    when:
+      - "the pure release outcome is derived"
+    then:
+      - "all green preserves normal routing"
+      - "terminal failure, first baseline or authority change forces sign-off"
+      - "pending, absent, invalid and unverifiable evidence is not approvable"
+      - "a confirmed deterministic stop remains stop"
+  - id: evidence-successor-persistence
+    given:
+      - "one deployment envelope whose required workflow evidence changes through rerun"
+    when:
+      - "reports are persisted through the real PostgreSQL store"
+    then:
+      - "unchanged retries deduplicate"
+      - "changed evidence creates a distinct successor report"
+      - "the previous report remains historical but is no longer current for authorization"
+  - id: historical-prerequisite-compatibility
+    given:
+      - "reports persisted before repository workflow prerequisites became authority"
+    when:
+      - "they are read after additive migration"
+    then:
+      - "they remain inspectable"
+      - "they are structurally ineligible for new prerequisite-aware authorization"
+required_facts:
+  - id: fact-prerequisite-report-identity
+    proves: [prerequisite-report-identity]
+    kind: unit-test
+    artifact:
+      path: src/gates/release/report.test.ts
+      change: update
+    command: npm test -- src/gates/release/report.test.ts -t "workflow prerequisite report identity"
+  - id: fact-prerequisite-decision-routing
+    proves: [prerequisite-decision-routing]
+    kind: unit-test
+    artifact:
+      path: src/gates/release/decision.test.ts
+      change: update
+    command: npm test -- src/gates/release/decision.test.ts -t "workflow prerequisite decision routing"
+  - id: fact-evidence-successor-persistence
+    proves: [evidence-successor-persistence]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-prerequisite-successor.test.ts
+      change: create
+    command: npm test -- test/persistence/release-prerequisite-successor.test.ts -t "workflow evidence successor persistence"
+  - id: fact-historical-prerequisite-compatibility
+    proves: [historical-prerequisite-compatibility]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-prerequisite-successor.test.ts
+      change: create
+    command: npm test -- test/persistence/release-prerequisite-successor.test.ts -t "historical prerequisite report compatibility"
+human_review: []

@@ -1,0 +1,50 @@
+contract_version: 1
+title: "Parse repository-owned release prerequisites and detect authority changes"
+depends_on: []
+scenarios:
+  - id: repository-config-schema
+    given:
+      - "untrusted candidate content at .github/scruffy-release.yml"
+    when:
+      - "Scruffy parses the versioned repository release configuration"
+    then:
+      - "only version 1 with a non-empty unique list of canonical .github/workflows YAML paths is accepted"
+      - "unknown fields, aliases, duplicate keys, unsafe tags, malformed paths, empty lists and self-reference are rejected"
+  - id: authority-change-baseline
+    given:
+      - "an immutable previous-release and candidate range with valid repository configuration"
+    when:
+      - "Scruffy compares release-authority configuration and paths"
+    then:
+      - "first adoption and any change under the config, workflow or local-action authority paths requires sign-off"
+      - "unchanged authority remains clean and unrelated source changes do not manufacture an authority change"
+  - id: invalid-config-ineligible
+    given:
+      - "a missing, malformed, empty or unsupported candidate configuration"
+    when:
+      - "release prerequisite assessment runs"
+    then:
+      - "the candidate is authorization-ineligible rather than exception-approvable"
+required_facts:
+  - id: fact-repository-config-schema
+    proves: [repository-config-schema]
+    kind: unit-test
+    artifact:
+      path: test/domain/repository-release-config.test.ts
+      change: create
+    command: npm test -- test/domain/repository-release-config.test.ts -t "repository release config parsing"
+  - id: fact-authority-change-baseline
+    proves: [authority-change-baseline]
+    kind: unit-test
+    artifact:
+      path: test/gates/release-authority-change.test.ts
+      change: create
+    command: npm test -- test/gates/release-authority-change.test.ts -t "release authority change detection"
+  - id: fact-invalid-config-ineligible
+    proves: [invalid-config-ineligible]
+    kind: unit-test
+    artifact:
+      path: test/gates/release-authority-change.test.ts
+      change: create
+    command: npm test -- test/gates/release-authority-change.test.ts -t "invalid repository release config"
+human_review: []

@@ -1,0 +1,72 @@
+contract_version: 1
+title: "Read and classify exact required GitHub workflow runs"
+depends_on: ["01-repository-config"]
+scenarios:
+  - id: exact-workflow-identity
+    given:
+      - "a configured workflow path and candidate SHA"
+    when:
+      - "the GitHub App reads workflow runs"
+    then:
+      - "evidence is bound to exact workflow ID/path, candidate SHA, default branch and accepted event"
+      - "display-name collisions and wrong workflow/branch/event/SHA runs cannot satisfy it"
+  - id: workflow-state-classification
+    given:
+      - "provider workflow runs in success, terminal non-success, pending, absent or malformed states"
+    when:
+      - "Scruffy classifies required workflow evidence"
+    then:
+      - "only completed success passes"
+      - "completed terminal non-success is exception-eligible"
+      - "pending, absent and unverifiable remain distinct and non-approvable"
+  - id: rerun-current-attempt
+    given:
+      - "a workflow run with multiple attempts"
+    when:
+      - "the current attempt is read"
+    then:
+      - "the newest current attempt supersedes all earlier conclusions"
+      - "a pending rerun invalidates an earlier green or failed attempt"
+  - id: workflow-aggregation
+    given:
+      - "multiple configured required workflows"
+    when:
+      - "their classified states are aggregated"
+    then:
+      - "all passed is satisfied"
+      - "all terminal with any failure is exception-eligible"
+      - "pending, absent and unverifiable prevent authorization with conservative precedence"
+required_facts:
+  - id: fact-workflow-run-identity
+    proves: [exact-workflow-identity]
+    kind: unit-test
+    artifact:
+      path: test/providers/github-app-workflow-runs.test.ts
+      change: create
+    command: npm test -- test/providers/github-app-workflow-runs.test.ts -t "required workflow run identity"
+  - id: fact-workflow-state-classification
+    proves: [workflow-state-classification]
+    kind: unit-test
+    artifact:
+      path: test/domain/required-workflow-evidence.test.ts
+      change: create
+    command: npm test -- test/domain/required-workflow-evidence.test.ts -t "required workflow state classification"
+  - id: fact-rerun-selection
+    proves: [rerun-current-attempt]
+    kind: unit-test
+    artifact:
+      path: test/providers/github-app-workflow-runs.test.ts
+      change: create
+    command: npm test -- test/providers/github-app-workflow-runs.test.ts -t "required workflow rerun selection"
+  - id: fact-workflow-aggregation
+    proves: [workflow-aggregation]
+    kind: unit-test
+    artifact:
+      path: test/domain/required-workflow-evidence.test.ts
+      change: create
+    command: npm test -- test/domain/required-workflow-evidence.test.ts -t "multiple required workflow aggregation"
+human_review:
+  - id: review-actions-read-boundary
+    covers: [exact-workflow-identity]
+    criterion: "The implementation uses only read-only GitHub Actions endpoints and introduces no workflow dispatch, rerun, cancel, approval, deployment, or administration operation."
+    reason: "The external permission and endpoint boundary requires explicit operator review."
