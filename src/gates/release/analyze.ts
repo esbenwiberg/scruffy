@@ -6,7 +6,13 @@ import type { Analyzer } from "../../providers/analyzers/port.js";
 import type { ScmReader, RevisionRange, ChangedFile, CandidateCiEvidence } from "../../providers/scm/port.js";
 import type { ReleaseRiskAnalyst, ReleaseRiskAssessment } from "../../providers/release-risk/port.js";
 import { dedupeFindings } from "../../domain/findings/identity.js";
-import { evaluateRelease, type ReleaseDecision, type ReleaseLlmLane, type ReleaseCiLane } from "./decision.js";
+import {
+  evaluateRelease,
+  type ReleaseDecision,
+  type ReleaseLlmLane,
+  type ReleaseCiLane,
+  type ReleasePrerequisiteState,
+} from "./decision.js";
 import { evaluateCandidateCi, type CandidateCiEvaluation } from "./candidate-ci.js";
 
 /**
@@ -35,6 +41,16 @@ export async function runReleaseAnalysis(
      * source-analysis only — so a run without a model backend stays honest.
      */
     releaseRisk?: ReleaseRiskAnalyst;
+    /**
+     * The repository-owned workflow-prerequisite contribution, resolved upstream from
+     * the release-authority assessment and required-workflow evidence. When present it
+     * feeds the decision kernel exactly like the other required lanes: a terminal
+     * workflow failure / authority change escalates to sign-off, a not-approvable
+     * (pending / absent / unverifiable / ineligible config) state fails closed to
+     * indeterminate, and a confirmed deterministic stop still dominates it. Absent for
+     * the local/corpus context-based candidate-CI path — unchanged behavior.
+     */
+    prerequisite?: ReleasePrerequisiteState;
   },
 ): Promise<{
   findings: Finding[];
@@ -104,7 +120,7 @@ export async function runReleaseAnalysis(
 
   return {
     findings,
-    decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps), llm, ci),
+    decision: evaluateRelease(findings, deps.policy, coverageFrom(gaps), llm, ci, deps.prerequisite),
     candidateCi,
     ...(releaseRisk ? { releaseRisk } : {}),
   };

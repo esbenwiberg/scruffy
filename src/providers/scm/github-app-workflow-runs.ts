@@ -50,6 +50,11 @@ const WorkflowIdentity = z.object({
   path: z.string().min(1),
 });
 
+/** Minimal repository metadata: only the provider's own default-branch answer. */
+const RepositoryInfo = z.object({
+  default_branch: z.string().min(1),
+});
+
 /**
  * One workflow-run row. `status` is required and non-null (a run always has one);
  * `conclusion` is null until completion; `head_branch` may be null on a detached
@@ -81,6 +86,20 @@ const WorkflowRunsPage = z.object({
 
 export class GithubAppWorkflowRunReader implements WorkflowRunReader {
   constructor(private readonly api: GhApi) {}
+
+  /**
+   * The repository's default branch, read from the provider. THROWS on any non-200
+   * or malformed shape — a failed read must never degrade into a guessed `main` that
+   * would mis-scope required-workflow evidence.
+   */
+  async resolveDefaultBranch(repository: string): Promise<string> {
+    const { owner, repo } = splitRepository(repository);
+    const res = await this.api("GET /repos/{owner}/{repo}", { owner, repo });
+    if (res.status !== 200) {
+      throw new Error(`repository metadata for '${repository}' returned HTTP ${res.status}`);
+    }
+    return RepositoryInfo.parse(res.data).default_branch;
+  }
 
   async resolveRequiredWorkflowRun(query: RequiredWorkflowQuery): Promise<WorkflowRunResolution> {
     const { owner, repo } = splitRepository(query.repository);

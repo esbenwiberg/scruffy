@@ -176,6 +176,15 @@ export interface WorkflowApprovalReader {
  */
 export interface WorkflowRunReader {
   resolveRequiredWorkflowRun(query: RequiredWorkflowQuery): Promise<WorkflowRunResolution>;
+  /**
+   * The repository's default branch, as the PROVIDER reports it — never assumed
+   * `main`. Required-workflow evidence is only the candidate's release evidence when
+   * it ran on this branch, so the branch name is a Scruffy-resolved provider fact the
+   * run resolution is filtered against, co-located with this App-only Actions/repo
+   * read capability. THROWS on any provider fault: a failed read must never degrade
+   * into a guessed branch that silently mis-scopes (or false-greens) the evidence.
+   */
+  resolveDefaultBranch(repository: string): Promise<string>;
 }
 
 export interface ScmReader {

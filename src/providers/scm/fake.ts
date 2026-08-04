@@ -73,6 +73,10 @@ export class FakeScm
   readonly #candidateCi = new Map<string, CandidateCiEvidence>();
   /** Seeded required-workflow resolutions keyed by repository/path/candidate/branch. */
   readonly #workflowRuns = new Map<string, WorkflowRunResolution>();
+  /** `repository` -> its provider default branch (never a silent `main`). */
+  readonly #defaultBranches = new Map<string, string>();
+  /** When set for a repository, its next default-branch read throws — a provider fault. */
+  readonly #defaultBranchFaults = new Map<string, Error>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, FakePullRequest>();
   /** `repository#branch` -> the branch's head commit, mirroring a git ref. */
@@ -164,6 +168,26 @@ export class FakeScm
         workflowPath: query.workflowPath,
       }
     );
+  }
+
+  /** Seed the provider default branch for a repository. */
+  seedDefaultBranch(repository: string, branch: string): void {
+    this.#defaultBranches.set(repository, branch);
+  }
+
+  /** Make the next default-branch read for a repository throw — a provider fault. */
+  failDefaultBranch(repository: string, error = new Error("default-branch read failed")): void {
+    this.#defaultBranchFaults.set(repository, error);
+  }
+
+  async resolveDefaultBranch(repository: string): Promise<string> {
+    const fault = this.#defaultBranchFaults.get(repository);
+    if (fault !== undefined) {
+      this.#defaultBranchFaults.delete(repository);
+      throw fault;
+    }
+    // Default to "main" ONLY for the fake's convenience; a test that cares seeds it.
+    return this.#defaultBranches.get(repository) ?? "main";
   }
 
   /** Context-only view over the fake's currently open issues and PRs. */
