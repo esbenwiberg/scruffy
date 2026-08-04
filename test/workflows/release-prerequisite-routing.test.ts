@@ -26,7 +26,6 @@ const workflowPath = fileURLToPath(
 const raw = readFileSync(workflowPath, "utf8");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const doc = parse(raw) as any;
-const on = doc.on ?? doc[true as unknown as string] ?? doc["on"];
 
 function job(name: string): Record<string, unknown> {
   const j = doc.jobs?.[name];
