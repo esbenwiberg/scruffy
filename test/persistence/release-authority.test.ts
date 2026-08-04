@@ -16,12 +16,28 @@ import {
   type ReleaseReportRequestObservation as ReleaseReportRequestObservationType,
   type WorkflowIdentity,
 } from "../../src/domain/release/authority.js";
-import type { ReleaseRiskReport } from "../../src/domain/release/report.js";
+import {
+  assembleReleaseReport,
+  type ReleaseRiskReport,
+} from "../../src/domain/release/report.js";
+import {
+  buildPrerequisiteSnapshot,
+  type ReleasePrerequisiteSnapshot,
+} from "../../src/domain/release/prerequisite-snapshot.js";
+import { COMPLETE_COVERAGE } from "../../src/domain/evidence/coverage.js";
+import type { ReleaseDecision } from "../../src/gates/release/decision.js";
+import type { ReleaseAuthorityAssessment } from "../../src/domain/release/authority-change.js";
+import type {
+  RequiredWorkflowAggregate,
+  RequiredWorkflowEvidence,
+} from "../../src/domain/release/required-workflow-evidence.js";
 
 const PREV = "a1".repeat(20);
 const CAND = "b2".repeat(20);
 const OTHER_CAND = "c3".repeat(20);
 const ARTIFACT = `sha256:${"d4".repeat(32)}`;
+const ENV = "shadow-production";
+const POLICY_VERSION = "policy-v1";
 const APPROVAL_ENVIRONMENT = "scruffy-production-signoff";
 const WORKFLOW_REF = "acme/control/.github/workflows/release.yml@deadbeef";
 const identity: WorkflowIdentity = {
@@ -134,6 +150,115 @@ function authorizationFor(
 async function count(table: string): Promise<string> {
   const result = await h.pool.query<{ count: string }>(`select count(*) from ${table}`);
   return result.rows[0]!.count;
+}
+
+// ── v3 prerequisite-aware report/authorization builders ─────────────────────────
+
+const SHIP: ReleaseDecision = {
+  outcome: "ship",
+  reasons: ["no_release_findings"],
+  dispositions: [],
+  summary: { stopped: 0, escalated: 0, cleared: 0, notRelevant: 0 },
+  coverage: COMPLETE_COVERAGE,
+};
+
+function wfEvidence(over: Partial<RequiredWorkflowEvidence> = {}): RequiredWorkflowEvidence {
+  return {
+    workflowId: 7,
+    workflowPath: ".github/workflows/ci.yml",
+    runId: 100,
+    runAttempt: 1,
+    event: "push",
+    branch: "main",
+    candidateSha: CAND,
+    status: "completed",
+    conclusion: "success",
+    url: `https://github.com/${REPO}/actions/runs/100`,
+    ...over,
+  };
+}
+
+function cleanAuthority(): ReleaseAuthorityAssessment {
+  const cfg = { version: 1 as const, requiredWorkflows: [".github/workflows/ci.yml"] };
+  return {
+    outcome: "clean",
+    reasonCode: "authority_unchanged",
+    firstAdoption: false,
+    configChanged: false,
+    changedAuthorityPaths: [],
+    addedRequiredWorkflows: [],
+    removedRequiredWorkflows: [],
+    candidate: { config: cfg, digest: "cfg-a" },
+    previous: { config: cfg, digest: "cfg-a" },
+    detail: "",
+  };
+}
+
+function passedAggregate(ev: RequiredWorkflowEvidence): RequiredWorkflowAggregate {
+  return {
+    outcome: "satisfied",
+    reasonCode: "required_workflows_satisfied",
+    workflows: [{ workflowPath: ev.workflowPath, state: "passed", evidence: ev }],
+  };
+}
+
+function shipReport(snapshot: ReleasePrerequisiteSnapshot): ReleaseRiskReport {
+  return assembleReleaseReport({
+    subject: {
+      repository: REPO,
+      previousReleaseSha: PREV,
+      candidateSha: CAND,
+      artifactDigest: ARTIFACT,
+      targetEnvironment: ENV,
+    },
+    policyVersion: POLICY_VERSION,
+    generatedAt: "2026-07-15T00:00:00.000Z",
+    provenance: { analyzers: [{ id: "secret-scan" }] },
+    findings: [],
+    decision: SHIP,
+    prerequisite: snapshot,
+  });
+}
+
+async function persistShip(report: ReleaseRiskReport, digest: string): Promise<void> {
+  const run = await h.scruffy.runs.ensureReleaseRun(
+    { repository: REPO, commitSha: CAND },
+    PREV,
+    ARTIFACT,
+    ENV,
+    POLICY_VERSION,
+    digest,
+  );
+  if (run.state !== "pending") return; // a dedup retry needs no re-commit
+  const lease = await h.scruffy.runs.claimForAnalysis(run.id, "test", 60_000);
+  await h.scruffy.runs.commitReleaseDecision({
+    runId: run.id,
+    from: "analyzing",
+    to: "decided",
+    reason: "release ship",
+    decision: SHIP,
+    report,
+    findings: [],
+    fenceLease: lease!,
+  });
+}
+
+function shipAuthorization(report: ReleaseRiskReport, digest: string) {
+  const content = {
+    authorizationVersion: "1" as const,
+    reportId: report.reportId,
+    envelope: report.subject,
+    outcome: "ship" as const,
+    attestationId: null,
+    workflow: identity,
+    prereqEvidenceDigest: digest,
+    shadowOnly: true as const,
+  };
+  return ReleaseShadowAuthorization.parse({
+    ...content,
+    authorizationId: computeAuthorizationId(content),
+    authorizedAt: "2026-07-15T00:00:00.000Z",
+  });
 }
 
 describeDb("report request observation idempotency", () => {
@@ -252,6 +377,59 @@ describeDb("terminal ordering revalidation", () => {
     await expect(store.putAuthorization(authorization)).resolves.toMatchObject({
       authorizationId: authorization.authorizationId,
     });
+    expect(await count("release_shadow_authorizations")).toBe("1");
+  });
+});
+
+describeDb("terminal prerequisite authority atomicity", () => {
+  it("terminal prerequisite authority atomicity", async () => {
+    h = await bootHarness({ publishReleaseCheck: false });
+    const store = new ReleaseAuthorityStore(h.pool);
+
+    // A v3 ship report A bound to evidence snapshot dA (a first green attempt).
+    const snapA = buildPrerequisiteSnapshot(cleanAuthority(), passedAggregate(wfEvidence()));
+    const reportA = shipReport(snapA);
+    await persistShip(reportA, snapA.evidenceDigest);
+
+    // A successor v3 ship report B (a green rerun → a new attempt → a new digest) for the
+    // SAME envelope. B becomes latest through the envelope authority fence.
+    const snapB = buildPrerequisiteSnapshot(
+      cleanAuthority(),
+      passedAggregate(wfEvidence({ runAttempt: 2 })),
+    );
+    const reportB = shipReport(snapB);
+    expect(snapB.evidenceDigest).not.toBe(snapA.evidenceDigest);
+    expect(reportB.reportId).not.toBe(reportA.reportId);
+    await persistShip(reportB, snapB.evidenceDigest);
+    expect((await store.latestReportForEnvelope(reportA.subject))?.reportId).toBe(reportB.reportId);
+
+    // FORCED RACE: many concurrent attempts to authorize the SUPERSEDED report A. The
+    // terminal transaction takes the envelope advisory lock and re-checks the latest
+    // report under the same transaction that would record the authorization, so every
+    // attempt refuses and NO partial authority record is left behind.
+    const authA = shipAuthorization(reportA, snapA.evidenceDigest);
+    const raced = await Promise.allSettled(
+      Array.from({ length: 5 }, () => store.putAuthorization(authA)),
+    );
+    expect(raced.every((r) => r.status === "rejected")).toBe(true);
+    for (const r of raced) {
+      if (r.status === "rejected") {
+        expect(r.reason).toBeInstanceOf(ReleaseAuthorityIntegrityError);
+      }
+    }
+    expect(await count("release_shadow_authorizations")).toBe("0");
+
+    // Even the CURRENT report B refuses an authorization carrying report A's STALE
+    // evidence digest — the digest binding fails under the same terminal transaction.
+    await expect(
+      store.putAuthorization(shipAuthorization(reportB, snapA.evidenceDigest)),
+    ).rejects.toBeInstanceOf(ReleaseAuthorityIntegrityError);
+    expect(await count("release_shadow_authorizations")).toBe("0");
+
+    // The exact current report B with its matching evidence digest authorizes.
+    await expect(
+      store.putAuthorization(shipAuthorization(reportB, snapB.evidenceDigest)),
+    ).resolves.toMatchObject({ outcome: "ship", shadowOnly: true });
     expect(await count("release_shadow_authorizations")).toBe("1");
   });
 });

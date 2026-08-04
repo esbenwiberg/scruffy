@@ -2,6 +2,18 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ReleaseReportSubject } from "./report.js";
 
+/**
+ * The canonical workflow-prerequisite evidence digest (`pe_<sha256>`), as computed by
+ * `computePrerequisiteEvidenceDigest` and carried by a v3 report's snapshot. It is the
+ * audit + freshness key threaded through the report-request observation, the sign-off
+ * attestation, and the terminal authorization: every authority record can be traced to
+ * the EXACT evidence snapshot it relied on, and the terminal store refuses a record
+ * whose digest no longer equals the current report's. Optional and absent on the legacy
+ * context-based candidate-CI path (v2 reports), so those record identities are
+ * unchanged — an undefined value is dropped from the content hash.
+ */
+export const PrerequisiteEvidenceDigest = z.string().regex(/^pe_[0-9a-f]{64}$/);
+
 export const GithubIdentity = z.object({
   login: z.string().min(1),
   id: z.string().regex(/^\d+$/),
@@ -40,6 +52,12 @@ export const ReleaseReportRequestObservation = z.object({
   workflowRef: z.string().min(1),
   runId: z.string().regex(/^\d+$/),
   runAttempt: z.number().int().positive(),
+  /**
+   * The workflow-prerequisite evidence snapshot this request was resolved against, so
+   * an audit can see exactly which prerequisite evidence preceded an approval. Present
+   * on the prerequisite-aware (v3) path; absent on the legacy v2 path.
+   */
+  prereqEvidenceDigest: PrerequisiteEvidenceDigest.optional(),
   /** Service-observed request time (our clock). NOT a provider field. */
   observedAt: z.string().datetime(),
 });
@@ -108,6 +126,13 @@ export const ReleaseApprovalAttestation = z.object({
   responsibilityAccepted: z.literal(true),
   responsibilityAccepter: GithubIdentity,
   reviewer: GithubIdentity,
+  /**
+   * The workflow-prerequisite evidence snapshot this attestation binds. Present on the
+   * prerequisite-aware (v3) path; absent on the legacy v2 path. The terminal store
+   * refuses to authorize when it no longer equals the current report's snapshot, so an
+   * attestation can never carry forward onto a successor report's evidence.
+   */
+  prereqEvidenceDigest: PrerequisiteEvidenceDigest.optional(),
   /** Service-owned time at which the GitHub approval was verified. NOT GitHub's. */
   approvalVerifiedAt: z.string().datetime(),
   verificationProvenance: ApprovalVerificationProvenance,
@@ -140,6 +165,13 @@ export const ReleaseShadowAuthorization = z.object({
     .regex(/^ra_[0-9a-f]{64}$/)
     .nullable(),
   workflow: WorkflowIdentity,
+  /**
+   * The workflow-prerequisite evidence snapshot this authorization was granted against.
+   * Present on the prerequisite-aware (v3) path; absent on the legacy v2 path. The
+   * terminal store binds it to the current report's snapshot under the same transaction
+   * as the latest-report fence, so a superseded evidence snapshot can never authorize.
+   */
+  prereqEvidenceDigest: PrerequisiteEvidenceDigest.optional(),
   shadowOnly: z.literal(true),
   authorizedAt: z.string().datetime(),
 });

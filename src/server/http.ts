@@ -168,7 +168,14 @@ export function createWebhookServer(scruffy: Scruffy, options: WebhookServerOpti
         return json(res, 401, { error: "invalid bearer token" });
       if (error instanceof ZodError) return json(res, 400, { error: "invalid request" });
       if (error instanceof ReleaseAuthorityError)
-        return json(res, error.status, { error: error.message });
+        return json(res, error.status, {
+          error: error.message,
+          // `retryable` distinguishes a still-pending prerequisite (retry the same
+          // request) from every fail-closed/mismatch case (request a fresh report);
+          // `reasonCodes` names the stable prerequisite cause when there is one.
+          retryable: error.retryable,
+          ...(error.reasonCodes.length > 0 ? { reasonCodes: error.reasonCodes } : {}),
+        });
       log(
         `release-authority: request failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
       );
