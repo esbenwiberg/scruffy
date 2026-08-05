@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Finding, ValidationOutcome } from "../../domain/evidence/types.js";
 import type { ReleasePolicy } from "../../domain/policy/types.js";
-import { evaluateRelease } from "./decision.js";
+import { derivePrerequisiteState, evaluateRelease } from "./decision.js";
 import { COMPLETE_COVERAGE } from "../../domain/evidence/coverage.js";
+import type { ReleaseAuthorityAssessment } from "../../domain/release/authority-change.js";
+import type { RequiredWorkflowAggregate } from "../../domain/release/required-workflow-evidence.js";
 
 const SUBJECT = { repository: "acme/web", commitSha: "a".repeat(40) };
 
@@ -196,6 +198,134 @@ describe("evaluateRelease", () => {
       { required: true, complete: false },
     );
     expect(bothIncomplete.outcome).toBe("stop");
+  });
+
+  // --- Workflow-prerequisite decision routing -----------------------------------
+  function auth(over: Partial<ReleaseAuthorityAssessment> = {}): ReleaseAuthorityAssessment {
+    const cfg = { version: 1 as const, requiredWorkflows: [".github/workflows/ci.yml"] };
+    return {
+      outcome: "clean",
+      reasonCode: "authority_unchanged",
+      firstAdoption: false,
+      configChanged: false,
+      changedAuthorityPaths: [],
+      addedRequiredWorkflows: [],
+      removedRequiredWorkflows: [],
+      candidate: { config: cfg, digest: "d" },
+      previous: { config: cfg, digest: "d" },
+      detail: "",
+      ...over,
+    };
+  }
+  const agg = (
+    outcome: RequiredWorkflowAggregate["outcome"],
+    reasonCode: RequiredWorkflowAggregate["reasonCode"],
+  ): RequiredWorkflowAggregate => ({ outcome, reasonCode, workflows: [] });
+
+  it("workflow prerequisite decision routing", () => {
+    // 1. All green preserves the normal routing: a clean range ships; a serious
+    // finding still signs off exactly as it would without a prerequisite lane.
+    const green = { kind: "satisfied" } as const;
+    expect(evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, undefined, green).outcome).toBe("ship");
+    expect(evaluateRelease([tls()], POLICY, COMPLETE_COVERAGE, undefined, undefined, green).outcome).toBe(
+      "sign-off-required",
+    );
+
+    // 2. A terminal workflow failure, a first baseline, or an authority change forces
+    // sign-off over an otherwise-clean range, carrying its stable reason code.
+    for (const reason of [
+      "required_workflow_failed",
+      "release_authority_baseline_required",
+      "release_authority_changed",
+    ] as const) {
+      const d = evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, undefined, {
+        kind: "sign-off",
+        reasons: [reason],
+      });
+      expect(d.outcome).toBe("sign-off-required");
+      expect(d.reasons).toContain(reason);
+    }
+
+    // 3. Pending, absent, unverifiable, and an ineligible configuration are NOT
+    // approvable: they fail closed to `indeterminate`, never ship, never a sign-off
+    // Environment — and a serious finding cannot upgrade them into an approvable report.
+    for (const reason of [
+      "required_workflow_pending",
+      "required_workflow_absent",
+      "required_workflow_unverifiable",
+      "release_config_missing",
+      "release_config_invalid",
+    ] as const) {
+      const d = evaluateRelease([], POLICY, COMPLETE_COVERAGE, undefined, undefined, {
+        kind: "not-approvable",
+        reasons: [reason],
+      });
+      expect(d.outcome).toBe("indeterminate");
+      expect(d.reasons).toContain(reason);
+    }
+    expect(
+      evaluateRelease([tls()], POLICY, COMPLETE_COVERAGE, undefined, undefined, {
+        kind: "not-approvable",
+        reasons: ["required_workflow_pending"],
+      }).outcome,
+    ).toBe("indeterminate");
+
+    // 4. A confirmed deterministic stop dominates EVERY prerequisite state and stays stop.
+    expect(
+      evaluateRelease([secret()], POLICY, COMPLETE_COVERAGE, undefined, undefined, {
+        kind: "not-approvable",
+        reasons: ["required_workflow_absent"],
+      }).outcome,
+    ).toBe("stop");
+    expect(
+      evaluateRelease([secret()], POLICY, COMPLETE_COVERAGE, undefined, undefined, {
+        kind: "sign-off",
+        reasons: ["required_workflow_failed"],
+      }).outcome,
+    ).toBe("stop");
+
+    // The pure combiner maps the domain assessment + aggregate onto those states.
+    expect(derivePrerequisiteState(auth(), agg("satisfied", "required_workflows_satisfied"))).toEqual({
+      kind: "satisfied",
+    });
+    expect(
+      derivePrerequisiteState(auth(), agg("exception-eligible", "required_workflow_failed")),
+    ).toEqual({ kind: "sign-off", reasons: ["required_workflow_failed"] });
+    expect(
+      derivePrerequisiteState(
+        auth({ outcome: "sign-off-required", reasonCode: "release_authority_baseline_required", firstAdoption: true }),
+        agg("satisfied", "required_workflows_satisfied"),
+      ),
+    ).toEqual({ kind: "sign-off", reasons: ["release_authority_baseline_required"] });
+    for (const reason of ["required_workflow_pending"] as const) {
+      expect(derivePrerequisiteState(auth(), agg("not-ready", reason))).toEqual({
+        kind: "not-approvable",
+        reasons: [reason],
+      });
+    }
+    expect(derivePrerequisiteState(auth(), agg("fail-closed", "required_workflow_absent"))).toEqual({
+      kind: "not-approvable",
+      reasons: ["required_workflow_absent"],
+    });
+    expect(
+      derivePrerequisiteState(auth(), agg("fail-closed", "required_workflow_unverifiable")),
+    ).toEqual({ kind: "not-approvable", reasons: ["required_workflow_unverifiable"] });
+    // An ineligible configuration is not approvable and dominates the aggregate.
+    expect(
+      derivePrerequisiteState(
+        auth({ outcome: "ineligible", reasonCode: "release_config_invalid", candidate: null }),
+        agg("fail-closed", "required_workflow_absent"),
+      ),
+    ).toEqual({ kind: "not-approvable", reasons: ["release_config_invalid"] });
+    // A terminal failure AND an authority change surface both sign-off reasons.
+    const both = derivePrerequisiteState(
+      auth({ outcome: "sign-off-required", reasonCode: "release_authority_changed", configChanged: true }),
+      agg("exception-eligible", "required_workflow_failed"),
+    );
+    expect(both).toEqual({
+      kind: "sign-off",
+      reasons: ["required_workflow_failed", "release_authority_changed"],
+    });
   });
 
   it("is order-independent: shuffled input yields the same ranked output and outcome", () => {

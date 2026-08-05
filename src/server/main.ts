@@ -9,6 +9,7 @@ import type {
   ScmReader,
   ScmWriter,
   WorkflowApprovalReader,
+  WorkflowRunReader,
 } from "../providers/scm/port.js";
 import {
   createScmInstallationReader,
@@ -16,6 +17,7 @@ import {
   createScmReader,
   createScmWriter,
   createWorkflowApprovalReader,
+  createWorkflowRunReader,
   resolveScmReaderBackend,
   resolveScmWriterBackend,
   type ScmReaderBackend,
@@ -94,6 +96,11 @@ export interface ResolvedScmBackends {
   scmInstallationReader: ScmInstallationReader | null;
   /** Null on gh-cli; the App implementation requires read-only Actions permission. */
   workflowApprovalReader: WorkflowApprovalReader | null;
+  /**
+   * Null on gh-cli. The narrow read-only Actions capability that resolves exact
+   * required-workflow run evidence for the repository-owned prerequisite lane.
+   */
+  workflowRunReader: WorkflowRunReader | null;
   readerBackend: ScmReaderBackend;
   writerBackend: ScmWriterBackend;
 }
@@ -117,6 +124,7 @@ export function createScmBackends(
     scmLifecycleReader: createScmLifecycleReader(readerBackend),
     scmInstallationReader: createScmInstallationReader(readerBackend),
     workflowApprovalReader: createWorkflowApprovalReader(readerBackend),
+    workflowRunReader: createWorkflowRunReader(readerBackend),
   };
 }
 
@@ -202,6 +210,7 @@ async function main(): Promise<void> {
     scmLifecycleReader,
     scmInstallationReader,
     workflowApprovalReader,
+    workflowRunReader,
     readerBackend,
     writerBackend,
   } = createScmBackends();
@@ -259,14 +268,25 @@ async function main(): Promise<void> {
       "hosted release OIDC is enabled but the SCM reader cannot read workflow approvals; use github-app with Actions: read",
     );
   }
+  // The repository-owned prerequisite lane is a REQUIRED part of hosted release
+  // authority: without it the service could return an approvable report that never
+  // resolved the repository's required workflows. So OIDC also requires the read-only
+  // Actions run reader — fail the boot rather than silently ship the legacy path.
+  if (oidcTrust !== null && workflowRunReader === null) {
+    throw new Error(
+      "hosted release OIDC is enabled but the SCM reader cannot read workflow runs; use github-app with Actions: read",
+    );
+  }
   const oidcVerifier = oidcTrust === null ? null : new GithubActionsOidcVerifier(oidcTrust);
   const releaseAuthority =
-    oidcTrust === null || workflowApprovalReader === null
+    oidcTrust === null || workflowApprovalReader === null || workflowRunReader === null
       ? null
       : new ReleaseAuthorityService({
           scruffy,
           store: new ReleaseAuthorityStore(pool),
           approvals: workflowApprovalReader,
+          scm: scmReader,
+          workflowRuns: workflowRunReader,
           clock: new SystemClock(),
           targetEnvironment: oidcTrust.targetEnvironment,
           approvalEnvironment: oidcTrust.approvalEnvironment,

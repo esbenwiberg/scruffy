@@ -156,7 +156,9 @@ The Container App's dedicated identity receives `Cognitive Services User` on
 that same-resource-group Foundry account and requests Entra tokens for
 `https://ai.azure.com/.default`. No Foundry API key is created or stored. The
 GitHub App separately needs `Actions: read` to retrieve workflow-run approval
-history. Both RBAC and App permission changes are human gates.
+history and to read the required-workflow run evidence for the repository-owned
+`.github/scruffy-release.yml` prerequisites. Both RBAC and App permission changes
+are human gates.
 
 ### Reusable shadow release-authority workflow (pinned by full SHA)
 
@@ -175,7 +177,13 @@ inside the pinned workflow**. The endpoint must **never become a caller input**:
 a caller-supplied endpoint would let the short-lived OIDC token be exfiltrated.
 The workflow requests the report in a non-Environment job and performs sign-off
 attestation plus authorization inside the protected `scruffy-production-signoff`
-Environment job; it holds only `contents: read` and `id-token: write`, issues no
+Environment job. Repository-owned required-workflow prerequisites (resolved by
+Scruffy at the exact candidate SHA, never caller inputs) drive routing: a green
+result ships, a terminal workflow failure or release-authority change routes to the
+protected sign-off, a still-pending prerequisite is retried under a bounded backoff
+and then fails closed (never entering the protected Environment), and an
+absent/unverifiable/missing/invalid prerequisite fails closed. It holds only
+`contents: read` and `id-token: write`, issues no
 explicit deployment/status/SCM write command, and performs no application,
 infrastructure, package, image, or release deployment or publication. Declaring
 the protected Environment does make GitHub itself automatically record

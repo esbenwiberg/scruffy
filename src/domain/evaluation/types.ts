@@ -54,6 +54,18 @@ export const EvaluationRun = z.object({
     .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
     .nullable()
     .optional(),
+  /**
+   * The workflow-prerequisite evidence digest bound into this release run's identity,
+   * or null when it has none (non-release, historical, or the legacy context-CI path).
+   * A non-null value means the run can ONLY be driven faithfully by the prerequisite-
+   * aware hosted authority path — the reconciler, which has no prerequisite context,
+   * must leave it alone rather than deciding it as a prerequisite-less (v2) report.
+   */
+  releasePrereqEvidenceDigest: z
+    .string()
+    .regex(/^pe_[0-9a-f]{64}$/)
+    .nullable()
+    .optional(),
   policyVersion: z.string().min(1),
   state: RunState,
   attempt: z.number().int().nonnegative(),

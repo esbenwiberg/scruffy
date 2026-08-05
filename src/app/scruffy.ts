@@ -15,7 +15,7 @@ import { PatchAppliedVerifier, type PostMergeVerifier } from "../gates/nightly/v
 import { PoisonService } from "../gates/poison/service.js";
 import { NightlyService, type ReviewResult } from "../gates/nightly/service.js";
 import type { RemediationDeps } from "../gates/nightly/remediation.js";
-import { ReleaseService } from "../gates/release/service.js";
+import { ReleaseService, type ReleasePrerequisiteInput } from "../gates/release/service.js";
 import { Reconciler } from "./reconciler.js";
 import type { EvaluationRun } from "../domain/evaluation/types.js";
 import type { EffectivePolicy } from "../domain/policy/types.js";
@@ -364,6 +364,12 @@ export class Scruffy {
     artifactDigest: string;
     targetEnvironment: string;
     prevRelease?: string | null;
+    /**
+     * The repository-owned workflow-prerequisite contribution, resolved by the hosted
+     * authority path BEFORE the run is ensured (its evidence digest is part of run
+     * identity). Absent for the local/corpus context-based candidate-CI path.
+     */
+    prerequisite?: ReleasePrerequisiteInput;
   }): Promise<EvaluationRun> {
     const subject = SubjectRevision.parse({
       repository: input.repository,
@@ -380,6 +386,7 @@ export class Scruffy {
       artifactDigest: ArtifactDigest.parse(input.artifactDigest),
       targetEnvironment: TargetEnvironment.parse(input.targetEnvironment),
       prevRelease,
+      ...(input.prerequisite !== undefined ? { prerequisite: input.prerequisite } : {}),
     });
   }
 

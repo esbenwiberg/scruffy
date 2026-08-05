@@ -40,6 +40,7 @@ interface RunRow {
   branch: string | null;
   release_artifact_digest: string | null;
   release_target_environment: string | null;
+  release_prereq_evidence_digest: string | null;
   policy_version: string;
   state: RunState;
   attempt: number;
@@ -58,6 +59,7 @@ function toRun(row: RunRow): EvaluationRun {
     branch: row.branch,
     releaseArtifactDigest: row.release_artifact_digest,
     releaseTargetEnvironment: row.release_target_environment,
+    releasePrereqEvidenceDigest: row.release_prereq_evidence_digest,
     policyVersion: row.policy_version,
     state: row.state,
     attempt: row.attempt,
@@ -220,6 +222,14 @@ export class RunStore implements NightlyRunStore {
    * a different prevRelease is a no-op on base_sha (only updated_at is touched), and
    * the original range wins. This is deliberate — reconciliation must re-drive the
    * exact range the run was created for, not a range that moved underneath it.
+   *
+   * `prereqEvidenceDigest` binds the canonical workflow-prerequisite snapshot into
+   * release-run identity: for the SAME deployment envelope + policy, a CHANGED digest
+   * (a rerun, a newly green attempt, a changed configuration or authority path)
+   * creates a distinct SUCCESSOR run — and therefore a successor report — while an
+   * exact-unchanged retry dedupes onto the original run. Null preserves the pre-
+   * prerequisite behavior for the local / corpus context-based candidate-CI path (it
+   * coalesces to '' in the identity, exactly as historical rows already do).
    */
   async ensureReleaseRun(
     candidate: SubjectRevision,
@@ -227,6 +237,7 @@ export class RunStore implements NightlyRunStore {
     artifactDigest: string,
     targetEnvironment: string,
     policyVersion: string,
+    prereqEvidenceDigest: string | null = null,
   ): Promise<EvaluationRun> {
     const now = this.clock.now();
     const id = this.ids.next("run");
@@ -234,10 +245,11 @@ export class RunStore implements NightlyRunStore {
       `insert into evaluation_runs
          (id, kind, repository, commit_sha, merge_group_sha, base_sha, branch,
           release_artifact_digest, release_target_environment,
-          policy_version, state, attempt, created_at, updated_at)
-       values ($1, 'release', $2, $3, null, $4, null, $5, $6, $7, 'pending', 0, $8, $8)
+          policy_version, release_prereq_evidence_digest, state, attempt, created_at, updated_at)
+       values ($1, 'release', $2, $3, null, $4, null, $5, $6, $7, $8, 'pending', 0, $9, $9)
        on conflict (repository, commit_sha, (coalesce(base_sha, '')), release_artifact_digest,
-                    release_target_environment, policy_version)
+                    release_target_environment, policy_version,
+                    (coalesce(release_prereq_evidence_digest, '')))
          where kind = 'release' and release_artifact_digest is not null and release_target_environment is not null
        do update set updated_at = evaluation_runs.updated_at
        returning *`,
@@ -249,6 +261,7 @@ export class RunStore implements NightlyRunStore {
         artifactDigest,
         targetEnvironment,
         policyVersion,
+        prereqEvidenceDigest,
         now,
       ],
     );
@@ -466,8 +479,12 @@ export class RunStore implements NightlyRunStore {
     const now = this.clock.now();
     const result = await this.pool.query<RunRow>(
       `select * from evaluation_runs
-         where state = 'pending'
-            or (state = 'analyzing' and lease_expires_at < $1)
+         where (state = 'pending'
+                or (state = 'analyzing' and lease_expires_at < $1))
+           -- A release run keyed on a workflow-prerequisite evidence digest can only be
+           -- driven by the prerequisite-aware hosted authority path; the reconciler has
+           -- no prerequisite context, so it must never reclaim, drive, or abandon it.
+           and not (kind = 'release' and release_prereq_evidence_digest is not null)
          order by updated_at
          limit $2`,
       [now, limit],

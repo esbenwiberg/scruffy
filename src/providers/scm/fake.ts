@@ -20,10 +20,15 @@ import type {
   ScmLifecycleReader,
   ScmReader,
   ScmWriter,
+  WorkflowRunReader,
 } from "./port.js";
 import { withIssueMarker } from "../../domain/findings/work-publication.js";
 import { commitCarriesProposal, fixCommitMessage } from "../../domain/fixes/delivery.js";
 import type { CiEvidence, PullRequestObservation } from "../../domain/fixes/lifecycle.js";
+import type {
+  RequiredWorkflowQuery,
+  WorkflowRunResolution,
+} from "../../domain/release/required-workflow-evidence.js";
 
 /** One published issue as the fake holds it; `input.body` carries the marker. */
 export interface FakeIssue {
@@ -59,11 +64,19 @@ export interface FakePullRequest {
   input: PullRequestInput;
 }
 
-export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmInstallationReader {
+export class FakeScm
+  implements ScmReader, ScmWriter, ScmLifecycleReader, ScmInstallationReader, WorkflowRunReader
+{
   readonly #files = new Map<string, ChangedFile[]>();
   readonly #rangeFiles = new Map<string, ChangedFile[]>();
   readonly #fileContent = new Map<string, FileContentResult>();
   readonly #candidateCi = new Map<string, CandidateCiEvidence>();
+  /** Seeded required-workflow resolutions keyed by repository/path/candidate/branch. */
+  readonly #workflowRuns = new Map<string, WorkflowRunResolution>();
+  /** `repository` -> its provider default branch (never a silent `main`). */
+  readonly #defaultBranches = new Map<string, string>();
+  /** When set for a repository, its next default-branch read throws — a provider fault. */
+  readonly #defaultBranchFaults = new Map<string, Error>();
   readonly #checkRuns = new Map<string, { id: string; input: CheckRunInput }>();
   readonly #pullRequests = new Map<string, FakePullRequest>();
   /** `repository#branch` -> the branch's head commit, mirroring a git ref. */
@@ -136,6 +149,45 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
     return (
       this.#candidateCi.get(this.#subjectKey(subject)) ?? { sha: subject.commitSha, records: [] }
     );
+  }
+
+  /**
+   * Seed a deterministic required-workflow resolution for an exact query. Mirrors
+   * the real reader's discipline: an unseeded query is a genuine `absent` (no
+   * matching run), NEVER a fabricated pass — the fake simulates no provider fault.
+   * A test that wants a fault seeds an explicit `unverifiable` resolution.
+   */
+  seedRequiredWorkflowRun(query: RequiredWorkflowQuery, resolution: WorkflowRunResolution): void {
+    this.#workflowRuns.set(this.#workflowRunKey(query), resolution);
+  }
+
+  async resolveRequiredWorkflowRun(query: RequiredWorkflowQuery): Promise<WorkflowRunResolution> {
+    return (
+      this.#workflowRuns.get(this.#workflowRunKey(query)) ?? {
+        kind: "absent",
+        workflowPath: query.workflowPath,
+      }
+    );
+  }
+
+  /** Seed the provider default branch for a repository. */
+  seedDefaultBranch(repository: string, branch: string): void {
+    this.#defaultBranches.set(repository, branch);
+  }
+
+  /** Make the next default-branch read for a repository throw — a provider fault. */
+  failDefaultBranch(repository: string, error = new Error("default-branch read failed")): void {
+    this.#defaultBranchFaults.set(repository, error);
+  }
+
+  async resolveDefaultBranch(repository: string): Promise<string> {
+    const fault = this.#defaultBranchFaults.get(repository);
+    if (fault !== undefined) {
+      this.#defaultBranchFaults.delete(repository);
+      throw fault;
+    }
+    // Default to "main" ONLY for the fake's convenience; a test that cares seeds it.
+    return this.#defaultBranches.get(repository) ?? "main";
   }
 
   /** Context-only view over the fake's currently open issues and PRs. */
@@ -546,6 +598,10 @@ export class FakeScm implements ScmReader, ScmWriter, ScmLifecycleReader, ScmIns
 
   #contentKey(subject: SubjectRevision, path: string): string {
     return `${this.#subjectKey(subject)}::${path}`;
+  }
+
+  #workflowRunKey(query: RequiredWorkflowQuery): string {
+    return `${query.repository}@${query.candidateSha}#${query.defaultBranch}::${query.workflowPath}`;
   }
 }
 

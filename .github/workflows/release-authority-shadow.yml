@@ -10,6 +10,16 @@
 # never be exposed as caller inputs — an endpoint input would enable OIDC-token
 # exfiltration. This workflow validates every response field needed for routing
 # and never prints tokens/authorization headers/full reports/full attestations.
+# Repository-owned workflow prerequisites are resolved by Scruffy at the exact
+# candidate SHA (never caller inputs): a green result ships, a terminal workflow
+# failure or release-authority change routes to the protected sign-off job, a
+# still-pending prerequisite is retried under a bounded backoff and then fails
+# closed with a rerun instruction (never entering the protected Environment), and
+# an absent/unverifiable/missing/invalid prerequisite fails closed. Job summaries
+# surface only the typed prerequisite evidence (required workflow paths, run
+# links, run id/attempt, conclusions, changed authority paths, old/new required
+# sets, and sign-off reason codes) — never the model risk findings, observations,
+# or coverage gaps.
 # It carries no deployment authority: it performs no application, infrastructure,
 # package, image, or release deployment or publication, issues no explicit
 # deployment/status/SCM write command, and holds no such write permission, so it
@@ -200,17 +210,65 @@ jobs:
           unset jwt
 
           # --- 3. Request the hosted release report for the exact envelope ---
+          # A prerequisite-aware hosted service does NOT return an approvable report
+          # for a candidate whose repository-owned required workflows are not yet a
+          # result. It answers HTTP 409 instead, distinguished by a `retryable` flag:
+          #   * retryable:true  — the required workflows are still PENDING (evidence
+          #     that is not a result yet). Retry the SAME request under a bounded
+          #     backoff; if it never settles, fail closed with an explicit rerun
+          #     instruction. A pending prerequisite is NEVER routed to the protected
+          #     sign-off Environment.
+          #   * retryable:false — the prerequisite is ABSENT or UNVERIFIABLE, or the
+          #     repository configuration is MISSING/INVALID. None of those is a result
+          #     a human may approve, so fail closed immediately (request a fresh report
+          #     after fixing the cause). Terminal workflow FAILURE and release-AUTHORITY
+          #     CHANGE are, by contrast, real 200 `sign-off-required` results.
+          # Any other non-200 (including a 503 infrastructure abstain) also fails closed.
           report_file="$workdir/report.json"
-          status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
-            --connect-timeout 10 --max-time 30 \
-            --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
-            --data-binary "@$envelope_file" \
-            --output "$report_file" --write-out '%{http_code}' \
-            "${SCRUFFY_ENDPOINT}/v1/release-reports")" || fail "release report request failed"
-          if [[ "$status" != "200" ]]; then
+          max_attempts=6      # bounded: the retry loop always terminates
+          backoff=10          # seconds; doubles each pending retry, capped
+          backoff_cap=60
+          attempt=0
+          while : ; do
+            attempt=$((attempt + 1))
+            status="$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+              --connect-timeout 10 --max-time 30 \
+              --config "$auth_cfg" --header "Accept: application/json" --header "Content-Type: application/json" \
+              --data-binary "@$envelope_file" \
+              --output "$report_file" --write-out '%{http_code}' \
+              "${SCRUFFY_ENDPOINT}/v1/release-reports")" || fail "release report request failed"
+            [[ "$status" == "200" ]] && break
+            if [[ "$status" == "409" ]]; then
+              retryable="$(jq -r 'if .retryable == true then "true" else "false" end' < "$report_file" 2>/dev/null || echo "false")"
+              reason_codes="$(jq -r '(.reasonCodes // []) | join(", ")' < "$report_file" 2>/dev/null || echo "")"
+              [[ -n "$reason_codes" ]] || reason_codes="unspecified"
+              if [[ "$retryable" == "true" ]]; then
+                # Pending prerequisites: bounded retry, then fail closed. Never approvable.
+                if (( attempt >= max_attempts )); then
+                  {
+                    echo "### Scruffy shadow release authority — prerequisites pending"
+                    echo "- required workflows still pending after ${attempt} attempts (${reason_codes})"
+                    echo "- rerun this workflow once the required workflows complete"
+                  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+                  fail "release prerequisites still pending after ${attempt} attempts (${reason_codes}); rerun once the required workflows complete"
+                fi
+                echo "release-authority-shadow: prerequisites pending (${reason_codes}); retry ${attempt}/${max_attempts} in ${backoff}s" >&2
+                sleep "$backoff"
+                if (( backoff < backoff_cap )); then backoff=$((backoff * 2)); fi
+                if (( backoff > backoff_cap )); then backoff=$backoff_cap; fi
+                continue
+              fi
+              # Non-retryable fail-closed prerequisite: absent / unverifiable / config missing / invalid.
+              {
+                echo "### Scruffy shadow release authority — prerequisites not approvable"
+                echo "- release prerequisites cannot be approved (${reason_codes})"
+                echo "- fix the repository configuration or required-workflow evidence, then request a fresh report"
+              } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fail "release prerequisites cannot be approved (${reason_codes}); request a fresh report after fixing the cause"
+            fi
             echo "release-authority-shadow: report request returned HTTP ${status}: $(jq -r '.error // "request failed"' < "$report_file" 2>/dev/null || echo "request failed")" >&2
             exit 1
-          fi
+          done
 
           report_id="$(jq -er '.reportId' < "$report_file")" || fail "report response is missing reportId"
           outcome="$(jq -er '.decision.outcome' < "$report_file")" || fail "report response is missing an outcome"
@@ -222,11 +280,57 @@ jobs:
             echo "report_id=$report_id"
             echo "outcome=$outcome"
           } >> "$GITHUB_OUTPUT"
-          {
-            echo "### Scruffy shadow release authority"
-            echo "- report: \`${report_id}\`"
-            echo "- outcome: \`${outcome}\`"
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          # Bounded, non-secret prerequisite summary. It surfaces ONLY the typed
+          # workflow-prerequisite evidence and identity — report/candidate/artifact,
+          # the required-workflow sets, each workflow's exact run link/id/attempt/
+          # status/conclusion (failed ones flagged prominently), the changed release-
+          # authority paths, and the sign-off reason codes. It reads a fixed set of
+          # fields with `jq`, so it never emits the OIDC token, an Authorization
+          # header, the unrestricted report JSON, or the model risk findings /
+          # observations / coverage gaps. Arrays are sliced to a bounded length.
+          if jq -e '.prerequisite != null' < "$report_file" > /dev/null 2>&1; then
+            prereq_md="$workdir/prereq.md"
+            jq -r --argjson maxwf 200 '
+              def code($s): "`" + ($s | tostring) + "`";
+              def wfset($a): if (($a // []) | length) == 0 then "(none)" else ([($a // [])[] | code(.)] | join(", ")) end;
+              . as $r | $r.prerequisite as $p
+              | ( [ "### Scruffy shadow release authority",
+                    "- report: " + code($r.reportId),
+                    "- candidate: " + code($r.subject.candidateSha),
+                    "- artifact: " + code($r.subject.artifactDigest),
+                    "- previous release: " + code($r.subject.previousReleaseSha // "(first-release)"),
+                    "- outcome: " + code($r.decision.outcome),
+                    "- prerequisite aggregate: " + code($p.aggregate.outcome) + " (" + code($p.aggregate.reasonCode) + ")",
+                    "- release authority: " + code($p.authority.reasonCode) + " (firstAdoption=" + code($p.authority.firstAdoption) + ", configChanged=" + code($p.authority.configChanged) + ")" ]
+                  + (if ($r.decision.outcome == "sign-off-required") and (($r.decision.reasons | length) > 0)
+                       then [ "- sign-off requested because: " + ([$r.decision.reasons[] | code(.)] | join(", ")) ] else [] end)
+                  + [ "- previous required workflows: " + wfset($p.previousConfig.requiredWorkflows),
+                      "- current required workflows: " + wfset($p.candidateConfig.requiredWorkflows) ]
+                  + (if (($p.authority.addedRequiredWorkflows | length) + ($p.authority.removedRequiredWorkflows | length)) > 0
+                       then [ "- required-workflow set change: added " + wfset($p.authority.addedRequiredWorkflows) + "; removed " + wfset($p.authority.removedRequiredWorkflows) ] else [] end)
+                  + (if ($p.authority.changedAuthorityPaths | length) > 0
+                       then [ "- changed release-authority paths:" ] + [ $p.authority.changedAuthorityPaths[:$maxwf][] | "  - " + code(.) ] else [] end)
+                  + [ "- required workflow evidence:" ]
+                  + [ $p.workflows[:$maxwf][]
+                      | "  - " + (if .state == "terminal-failed" then "⚠️ FAILED " elif .state != "passed" then "⚠️ " else "" end)
+                        + code(.workflowPath) + " — state " + code(.state)
+                        + (if .evidence
+                             then " — run " + code(.evidence.runId) + " attempt " + code(.evidence.runAttempt)
+                                  + " status " + code(.evidence.status) + " conclusion " + code(.evidence.conclusion // "null")
+                                  + " — " + (.evidence.url)
+                             else "" end) ]
+                  + (if ($p.workflows | length) > $maxwf then [ "  - … " + code(($p.workflows | length) - $maxwf) + " more workflows (truncated)" ] else [] end)
+                  | .[] )
+            ' < "$report_file" > "$prereq_md" || fail "failed to render the prerequisite summary"
+            cat "$prereq_md" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            {
+              echo "### Scruffy shadow release authority"
+              echo "- report: \`${report_id}\`"
+              echo "- outcome: \`${outcome}\`"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
 
           # --- 4. Route strictly on the validated outcome ---
           case "$outcome" in

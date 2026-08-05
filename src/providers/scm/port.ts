@@ -1,5 +1,9 @@
 import type { SubjectRevision } from "../../domain/evidence/types.js";
 import type { CiEvidence, PullRequestObservation } from "../../domain/fixes/lifecycle.js";
+import type {
+  RequiredWorkflowQuery,
+  WorkflowRunResolution,
+} from "../../domain/release/required-workflow-evidence.js";
 
 /**
  * SCM adapter port. GitHub-specific mechanics live behind this; the domain and
@@ -148,6 +152,39 @@ export interface WorkflowApprovalHistory {
 
 export interface WorkflowApprovalReader {
   getWorkflowRunApprovals(repository: string, runId: string): Promise<WorkflowApprovalHistory>;
+}
+
+/**
+ * Narrow, read-only GitHub Actions capability that resolves ONE configured required
+ * workflow to its provider identity and the current applicable run/attempt for an
+ * exact candidate SHA and default branch. It is deliberately separate from
+ * `ScmReader` (analysis-time source reads) and `ScmWriter` (effects): it needs only
+ * the App's existing `Actions: read` permission and NEVER dispatches, reruns,
+ * cancels, approves, or modifies a workflow.
+ *
+ * RESULT DISCIPLINE, load-bearing:
+ *  - `resolved` carries the exact current-attempt evidence bound to the candidate;
+ *  - `absent` is a GENUINE "no matching run for this workflow/candidate" (an empty
+ *    result), never a stand-in for a fault;
+ *  - `unverifiable` is a provider fault, incomplete pagination, malformed data, or
+ *    an ambiguous current run.
+ *
+ * The three are never interchangeable: a provider failure must not present as an
+ * empty-and-green lane, and a genuine absence must not be mistaken for a failure.
+ * Identity is the workflow ID/path resolved here — never a display name or a
+ * check-run/status context.
+ */
+export interface WorkflowRunReader {
+  resolveRequiredWorkflowRun(query: RequiredWorkflowQuery): Promise<WorkflowRunResolution>;
+  /**
+   * The repository's default branch, as the PROVIDER reports it — never assumed
+   * `main`. Required-workflow evidence is only the candidate's release evidence when
+   * it ran on this branch, so the branch name is a Scruffy-resolved provider fact the
+   * run resolution is filtered against, co-located with this App-only Actions/repo
+   * read capability. THROWS on any provider fault: a failed read must never degrade
+   * into a guessed branch that silently mis-scopes (or false-greens) the evidence.
+   */
+  resolveDefaultBranch(repository: string): Promise<string>;
 }
 
 export interface ScmReader {

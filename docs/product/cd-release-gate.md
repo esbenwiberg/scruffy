@@ -265,6 +265,118 @@ publication and confers no deployment authority. The workflow exposes only
 bounded evidence outputs (`report_id`, `outcome`, `authorization_id`,
 `signoff_used`) and never a JWT or a full report.
 
+## Repository-owned workflow prerequisites
+
+A repository declares its existing required GitHub Actions workflows in one narrow,
+repository-owned file at `.github/scruffy-release.yml`. Scruffy reads and parses it
+**at the exact candidate SHA** and resolves every provider fact (workflow identity,
+runs, attempts, status, conclusion, URLs) itself through the GitHub App — none of
+those facts, and none of the workflow paths, come from a caller input. The reusable
+workflow above passes only the release envelope; the required-workflow paths are
+whatever the candidate configuration names.
+
+### The configuration file
+
+```yaml
+# .github/scruffy-release.yml
+version: 1
+
+requiredWorkflows:
+  - .github/workflows/ci.yml
+  - .github/workflows/integration.yml
+```
+
+The v1 schema is intentionally minimal — a `version` and a non-empty
+`requiredWorkflows` list of existing workflow files under `.github/workflows/`
+ending in `.yml`/`.yaml`. A repository can name **any** existing workflow paths
+without adopting Scruffy-specific job names. The file cannot configure branch,
+event, result mapping, approval behaviour, freshness, endpoint, audience, or waiver
+semantics; Scruffy owns all of those. Unknown keys, unknown versions, duplicate or
+non-string entries, YAML aliases, and custom tags are rejected. The configuration is
+integration routing, not release policy — it selects which repository-owned
+workflows provide evidence, and nothing more.
+
+### First-adoption baseline sign-off
+
+The first release, the first Scruffy adoption, or any release with no readable
+previous configuration requires a sign-off to establish a **baseline**. This is not
+a failure — it is the deliberate act of a responsible human anchoring the comparison
+point. After that approved release, its exact candidate becomes the comparison
+baseline for the next release.
+
+### Incremental workflow adoption
+
+A team adopts Scruffy one workflow at a time:
+
+1. add one existing workflow to `.github/scruffy-release.yml`;
+2. approve the first release to establish the baseline;
+3. let subsequent clean, green releases follow the normal automatic `ship` path;
+4. add further workflows over time.
+
+Every change to the repository release configuration **or** to GitHub workflow
+authority forces a sign-off, even when all current required workflow runs are green.
+Across `(previous release, candidate]` Scruffy detects changes to
+`.github/scruffy-release.yml`, `.github/workflows/**`, and `.github/actions/**` — the
+broad path rule deliberately catches local reusable workflows and composite actions
+that a directly-configured file could otherwise hide. The sign-off summary shows the
+changed paths and the old/new required-workflow sets.
+
+### Failure exception versus pending/missing refusal
+
+Each configured workflow resolves to exactly one service-owned state for the exact
+candidate:
+
+| State             | Meaning                                                   | Effect                                                          |
+| ----------------- | --------------------------------------------------------- | --------------------------------------------------------------- |
+| `passed`          | current attempt completed with conclusion `success`       | satisfied                                                       |
+| `terminal-failed` | current attempt completed with any non-success conclusion | **exception-eligible** — routes to protected sign-off           |
+| `pending`         | requested, queued, waiting, or in progress                | **not a result** — retried, then fails closed; never approvable |
+| `absent`          | no matching run for the exact workflow/candidate          | fail closed; not exception-eligible                             |
+| `unverifiable`    | API/schema/pagination/identity fault or ambiguous run     | fail closed; not exception-eligible                             |
+
+Only an exact `success` is green. A **completed** workflow failure is an explicit
+observed result a responsible human may accept through the protected sign-off path.
+A **pending** workflow is evidence that is not a result yet: the reusable workflow
+retries the report request under a bounded backoff and then fails closed with a rerun
+instruction — it never enters the protected Environment, so no one can approve a
+workflow before it finishes. A **missing** (`absent`) or **unverifiable** workflow,
+and a **missing/malformed** configuration, are not results either: they fail closed
+and cannot be converted into an approval merely by asking early. Removing or emptying
+the configuration is invalid, not a sign-off route.
+
+A confirmed deterministic Scruffy `stop` dominates every prerequisite state and
+stays non-overridable even when CI failed or authority changed.
+
+### Rerun invalidation
+
+Release-run identity binds a canonical prerequisite-evidence digest over the
+configuration authority and the exact workflow run attempts, so changed CI evidence
+produces a **successor** report rather than silently reusing a stale one:
+
+- an exact retry with unchanged evidence returns the same report;
+- a failed workflow rerun creates a new attempt and invalidates the prior evidence
+  snapshot while it is pending;
+- a rerun that succeeds produces a successor report eligible for the normal path
+  when no other reason requires sign-off;
+- a previously green workflow rerun makes its old report stale immediately — it
+  cannot authorize while the current attempt is pending or failed.
+
+Terminal authorization re-reads the current workflow state immediately before
+persisting and refuses if any evidence changed (a newer attempt, a changed
+status/conclusion, a changed identity/branch/event, a changed authority file, or a
+newer report for the envelope). A mismatch instructs the caller to request a fresh
+report; an old approval is never carried forward.
+
+### Recommended repository controls and administrator opt-out
+
+Protect `.github/scruffy-release.yml`, `.github/workflows/**`, and
+`.github/actions/**` with `CODEOWNERS` and branch protection so a release-authority
+change cannot merge without the right review — those repository controls complement,
+but never replace, Scruffy's service-owned sign-off. Disabling Scruffy is an explicit
+repository-**administrator opt-out** (uninstalling the App or removing the release
+workflow and protected Environment) taken outside the release protocol; it is not
+achieved by deleting or emptying the configuration file.
+
 ### Immediate proof is fake/no-model and partial
 
 The reusable workflow proves the hosted OIDC protocol **mechanics** only. The

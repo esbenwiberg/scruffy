@@ -1,0 +1,67 @@
+contract_version: 1
+title: "Enforce prerequisite readiness and freshness in hosted release authority"
+depends_on: ["03-report-successors"]
+scenarios:
+  - id: hosted-prerequisite-readiness
+    given:
+      - "an authenticated hosted release request and repository prerequisite state"
+    when:
+      - "the service resolves readiness before returning a report"
+    then:
+      - "green proceeds normally and terminal failure or authority change can route to sign-off"
+      - "pending returns retryable not-ready"
+      - "invalid, absent and unverifiable evidence cannot enter approval or authorization"
+  - id: authorization-freshness
+    given:
+      - "a prerequisite-aware current report and optional exact attestation"
+    when:
+      - "terminal authorization re-reads provider and repository authority state"
+    then:
+      - "only an exact unchanged evidence snapshot authorizes"
+      - "new attempts, pending reruns, conclusion changes, authority changes, mismatches and provider failures refuse"
+  - id: prerequisite-attestation-binding
+    given:
+      - "a sign-off-required report caused by terminal workflow failure or authority change"
+    when:
+      - "a protected-environment reviewer attests and a successor report later exists"
+    then:
+      - "the attestation binds the exact prerequisite snapshot"
+      - "it cannot authorize the successor report"
+  - id: terminal-authority-atomicity
+    given:
+      - "concurrent report succession and authorization attempts"
+    when:
+      - "the terminal store transaction executes"
+    then:
+      - "a superseded or stale report cannot be authorized"
+      - "no partial authority record remains after refusal"
+required_facts:
+  - id: fact-hosted-prerequisite-readiness
+    proves: [hosted-prerequisite-readiness]
+    kind: integration-test
+    artifact:
+      path: test/server/release-prerequisites.test.ts
+      change: create
+    command: npm test -- test/server/release-prerequisites.test.ts -t "hosted prerequisite readiness"
+  - id: fact-authorization-workflow-freshness
+    proves: [authorization-freshness]
+    kind: integration-test
+    artifact:
+      path: test/server/release-prerequisites.test.ts
+      change: create
+    command: npm test -- test/server/release-prerequisites.test.ts -t "authorization workflow freshness"
+  - id: fact-prerequisite-bound-attestation
+    proves: [prerequisite-attestation-binding]
+    kind: integration-test
+    artifact:
+      path: test/server/release-prerequisites.test.ts
+      change: create
+    command: npm test -- test/server/release-prerequisites.test.ts -t "prerequisite-bound attestation"
+  - id: fact-terminal-prerequisite-atomicity
+    proves: [terminal-authority-atomicity]
+    kind: integration-test
+    artifact:
+      path: test/persistence/release-authority.test.ts
+      change: update
+    command: npm test -- test/persistence/release-authority.test.ts -t "terminal prerequisite authority atomicity"
+human_review: []

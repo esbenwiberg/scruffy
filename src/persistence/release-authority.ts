@@ -10,6 +10,7 @@ import {
   type ReleaseShadowAuthorization as ReleaseShadowAuthorizationType,
 } from "../domain/release/authority.js";
 import {
+  isPrerequisiteAuthoritative,
   parseReleaseReport,
   parseStoredReleaseReport,
   releaseEnvelopeLockKey,
@@ -34,7 +35,26 @@ export class ReleaseAuthorityStore {
 
   async getCurrentReport(reportId: string): Promise<ReleaseRiskReport | null> {
     const stored = await this.getReport(reportId);
-    if (stored === null || stored.reportVersion !== "2") return null;
+    // Both the legacy context-based candidate-CI report (v2) and the workflow-
+    // prerequisite-aware report (v3) are current, authorizable schemas. Only the
+    // historical v1 shape is ineligible — it is inspectable through `getReport` but was
+    // never bound to a durable ordering observation.
+    if (stored === null || (stored.reportVersion !== "2" && stored.reportVersion !== "3")) {
+      return null;
+    }
+    return parseReleaseReport(stored);
+  }
+
+  /**
+   * The report as eligible for the WORKFLOW-PREREQUISITE authority contract, or null.
+   * Only a v3 report carrying a prerequisite snapshot qualifies. Historical v1/v2
+   * reports remain inspectable through `getReport`, but are structurally ineligible
+   * here — they never resolved repository-owned workflow prerequisites, so they can
+   * never satisfy the new contract without silently rewriting history.
+   */
+  async getPrerequisiteReport(reportId: string): Promise<ReleaseRiskReport | null> {
+    const stored = await this.getReport(reportId);
+    if (stored === null || !isPrerequisiteAuthoritative(stored)) return null;
     return parseReleaseReport(stored);
   }
 
@@ -132,7 +152,12 @@ export class ReleaseAuthorityStore {
   ): Promise<ReleaseApprovalAttestationType> {
     const parsed = ReleaseApprovalAttestation.parse(attestation);
     return withTransaction(this.pool, async (client) => {
-      await this.#requireCurrentReport(client, parsed.reportId, parsed.envelope);
+      const report = await this.#requireCurrentReport(client, parsed.reportId, parsed.envelope);
+      // Bind the attestation to the CURRENT report's exact prerequisite evidence snapshot.
+      // A v3 report requires the attestation to carry the matching digest; a v2 report
+      // requires the attestation to carry none. This is what stops an attestation minted
+      // against one evidence snapshot from being replayed after the evidence changed.
+      requireMatchingPrereqDigest(report, parsed.prereqEvidenceDigest);
       await client.query(
         `insert into release_approval_attestations
            (attestation_id, attestation_version, report_id, repository, candidate_sha,
@@ -190,6 +215,12 @@ export class ReleaseAuthorityStore {
       if (report.decision.outcome !== parsed.outcome) {
         throw new ReleaseAuthorityIntegrityError("authorization outcome does not match report");
       }
+      // Bind the authorization to the CURRENT report's exact prerequisite evidence
+      // snapshot, under the SAME transaction as the latest-report fence. A report
+      // superseded by fresh workflow evidence is already rejected by the fence; this
+      // additionally refuses an authorization whose bound digest no longer matches the
+      // report it names, so stale evidence can never be authorized even under a race.
+      requireMatchingPrereqDigest(report, parsed.prereqEvidenceDigest);
       if (parsed.outcome === "ship") {
         if (parsed.attestationId !== null) {
           throw new ReleaseAuthorityIntegrityError(
@@ -347,6 +378,21 @@ function isUniqueViolation(error: unknown): boolean {
     "code" in error &&
     (error as { code?: unknown }).code === "23505"
   );
+}
+
+/**
+ * Require an authority record's bound prerequisite evidence digest to equal the current
+ * report's. A v3 report carries a `pe_<sha256>` snapshot digest and the record must
+ * match it exactly; a v2 report carries none and the record must carry none. A mismatch
+ * fails the terminal transaction closed rather than authorizing stale evidence.
+ */
+function requireMatchingPrereqDigest(report: ReleaseRiskReport, recordDigest: string | undefined): void {
+  const reportDigest = report.prerequisite?.evidenceDigest;
+  if ((reportDigest ?? null) !== (recordDigest ?? null)) {
+    throw new ReleaseAuthorityIntegrityError(
+      "prerequisite evidence digest does not match the current report",
+    );
+  }
 }
 
 export function sameEnvelope(left: ReleaseReportSubject, right: ReleaseReportSubject): boolean {

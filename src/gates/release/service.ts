@@ -18,7 +18,8 @@ import {
 import { withLeaseHeartbeat } from "../../app/lease-heartbeat.js";
 import { runReleaseAnalysis } from "./analyze.js";
 import type { CandidateCiEvaluation } from "./candidate-ci.js";
-import type { ReleaseDecision } from "./decision.js";
+import type { ReleaseDecision, ReleasePrerequisiteState } from "./decision.js";
+import type { ReleasePrerequisiteSnapshot } from "../../domain/release/prerequisite-snapshot.js";
 import {
   assembleReleaseReport,
   type ReleaseRiskReport,
@@ -77,6 +78,25 @@ export interface ReleaseInput {
    * which case the range is the candidate's own full change set.
    */
   prevRelease: string | null;
+  /**
+   * The repository-owned workflow-prerequisite contribution, resolved upstream (in the
+   * hosted authority path) BEFORE the run is ensured — its `evidenceDigest` is part of
+   * release-run identity, so a changed current attempt / configuration / authority path
+   * yields a successor run and report. Absent for the local/corpus context-based
+   * candidate-CI path, which keeps producing v2 reports unchanged.
+   */
+  prerequisite?: ReleasePrerequisiteInput;
+}
+
+/**
+ * A resolved prerequisite carried into a release run: the identity-bearing snapshot
+ * (bound into the v3 report and the run's evidence digest) and the service-owned
+ * decision state (fed to the decision kernel). Both come from the SAME upstream
+ * resolution so the report content and run identity can never disagree.
+ */
+export interface ReleasePrerequisiteInput {
+  snapshot: ReleasePrerequisiteSnapshot;
+  state: ReleasePrerequisiteState;
 }
 
 /**
@@ -120,16 +140,38 @@ export class ReleaseService {
       input.artifactDigest,
       input.targetEnvironment,
       policy.version,
+      // The prerequisite evidence digest is part of release-run identity: an
+      // exact-unchanged retry dedupes, a changed current attempt/config/authority
+      // becomes a successor run. Null keeps the local/corpus path deduping on the
+      // envelope alone.
+      input.prerequisite?.snapshot.evidenceDigest ?? null,
     );
-    return this.#drive(run);
+    return this.#drive(run, input.prerequisite);
   }
 
   /** Reconciler entry point: re-drive a reclaimed release run against its frozen range. */
   async reconcile(run: EvaluationRun): Promise<EvaluationRun> {
-    return this.#drive(run);
+    // A release run whose identity carries a workflow-prerequisite evidence digest can
+    // ONLY be driven faithfully by the prerequisite-aware hosted authority path, which
+    // resolves the repository configuration and exact workflow evidence. The reconciler
+    // has no prerequisite context: driving it here would commit a prerequisite-LESS (v2)
+    // report onto a run whose identity is keyed on the prerequisite digest, permanently
+    // poisoning that identity (a later hosted request deduplicates onto the v2 run and,
+    // fail-closed, can never approve it). Leave it non-terminal so the hosted path
+    // re-drives it with prerequisites on the next request. `findReconcilable` already
+    // excludes these runs, so the reconciler never reaches here in the timer loop; this
+    // guard is defense-in-depth for any direct reconcile call.
+    if (run.releasePrereqEvidenceDigest != null) {
+      return (await this.deps.runs.getRun(run.id)) ?? run;
+    }
+    // The reconciler recovers a run that was not driven to terminal synchronously (a
+    // rare lease-contention window). It has no upstream prerequisite context; the
+    // hosted authority path resolves prerequisites and drives to terminal in one call,
+    // and a changed snapshot is picked up as a successor run on the next request.
+    return this.#drive(run, undefined);
   }
 
-  async #drive(run: EvaluationRun): Promise<EvaluationRun> {
+  async #drive(run: EvaluationRun, prerequisite?: ReleasePrerequisiteInput): Promise<EvaluationRun> {
     const { runs } = this.deps;
     if (run.state === "decided" || run.state === "indeterminate" || run.state === "superseded") {
       return run;
@@ -157,6 +199,7 @@ export class ReleaseService {
               validator: this.deps.validator,
               policy: this.deps.policy.release,
               ...(this.deps.releaseRisk ? { releaseRisk: this.deps.releaseRisk } : {}),
+              ...(prerequisite ? { prerequisite: prerequisite.state } : {}),
             }),
             this.#readOutstandingWork(run),
           ]),
@@ -173,6 +216,7 @@ export class ReleaseService {
         releaseRisk,
         candidateCi,
         outstandingWork,
+        prerequisite?.snapshot,
       );
       const effect = this.#publishCheck ? this.#checkEffect(run, report) : undefined;
 
@@ -263,6 +307,7 @@ export class ReleaseService {
     releaseRisk?: ReleaseRiskAssessment,
     candidateCi?: CandidateCiEvaluation,
     outstandingWork?: ReleaseOutstandingWork,
+    prerequisite?: ReleasePrerequisiteSnapshot,
   ): ReleaseRiskReport {
     if (run.releaseArtifactDigest == null || run.releaseTargetEnvironment == null) {
       throw new Error(`release run ${run.id} has no complete deployment envelope`);
@@ -283,6 +328,7 @@ export class ReleaseService {
       // Lane required/applicable booleans come from service-owned policy, not an
       // assumption — every policy-declared lane appears with its true posture.
       laneDeclarations: this.deps.policy.release.evidence,
+      ...(prerequisite !== undefined ? { prerequisite } : {}),
       ...(outstandingWork !== undefined ? { outstandingWork } : {}),
       ...(releaseRisk
         ? { releaseRisk: this.#releaseRiskLane(releaseRisk, this.deps.releaseRisk!) }

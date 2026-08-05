@@ -8,6 +8,7 @@ import {
   ReleaseOutstandingWork,
   type ReleaseOutstandingWork as ReleaseOutstandingWorkType,
 } from "./outstanding-work.js";
+import { ReleasePrerequisiteSnapshot } from "./prerequisite-snapshot.js";
 
 /**
  * The versioned, schema-validated ReleaseRiskReport — the first-class, inspectable
@@ -28,6 +29,17 @@ import {
  */
 
 export const RELEASE_REPORT_VERSION = "2" as const;
+
+/**
+ * Report schema version that carries the typed workflow-prerequisite snapshot. A v3
+ * report binds repository configuration identity, the release-authority baseline/
+ * change assessment, and exact required-workflow run evidence into its content
+ * identity. A report is authoritative for the new prerequisite contract IFF it is v3
+ * (see `isPrerequisiteAuthoritative`); v1/v2 reports remain inspectable but can never
+ * satisfy that contract. v2 (context-based candidate-CI) is preserved for the
+ * local/corpus compatibility path until separately retired.
+ */
+export const RELEASE_REPORT_VERSION_V3 = "3" as const;
 
 export const ArtifactDigest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 export type ArtifactDigest = z.infer<typeof ArtifactDigest>;
@@ -168,6 +180,17 @@ const ReleaseReasonCode = z.enum([
   "model_risk_present",
   "llm_lane_incomplete",
   "ci_lane_incomplete",
+  // Workflow-prerequisite reason codes (kept in parity with decision.ts). Only the
+  // first three can lead to a protected sign-off; the pending/absent/unverifiable/
+  // config codes are non-approvable (they route to `indeterminate`).
+  "required_workflow_failed",
+  "release_authority_baseline_required",
+  "release_authority_changed",
+  "required_workflow_pending",
+  "required_workflow_absent",
+  "required_workflow_unverifiable",
+  "release_config_missing",
+  "release_config_invalid",
 ]);
 const ReleaseEffect = z.enum(["stops", "escalates", "cleared", "not_relevant"]);
 const ReleaseFindingDisposition = z.object({
@@ -214,7 +237,7 @@ void _decisionParity;
 void _decisionParityBack;
 
 export const ReleaseRiskReport = z.object({
-  reportVersion: z.literal(RELEASE_REPORT_VERSION),
+  reportVersion: z.enum([RELEASE_REPORT_VERSION, RELEASE_REPORT_VERSION_V3]),
   reportId: z.string().min(1),
   subject: ReleaseReportSubject,
   policyVersion: z.string().min(1),
@@ -226,10 +249,29 @@ export const ReleaseRiskReport = z.object({
   risks: z.array(ReleaseRisk),
   /** Additive for v1 compatibility: older persisted reports legitimately omit it. */
   outstandingWork: ReleaseOutstandingWork.optional(),
+  /**
+   * The typed workflow-prerequisite snapshot. Present exactly on v3 reports (see the
+   * refinement in `parseReleaseReport`); absent on v2/v1 reports. It is content-bound
+   * to `reportId`, so any prerequisite mutation changes the report identity.
+   */
+  prerequisite: ReleasePrerequisiteSnapshot.optional(),
   findings: z.array(Finding),
   decision: ReleaseDecisionSchema,
 });
 export type ReleaseRiskReport = z.infer<typeof ReleaseRiskReport>;
+
+/**
+ * A report is authoritative for the workflow-prerequisite contract IFF it is v3 and
+ * carries a prerequisite snapshot. Historical v1/v2 reports are structurally
+ * ineligible — they never resolved repository-owned workflow prerequisites, so they
+ * remain inspectable but can never satisfy the new authority contract.
+ */
+export function isPrerequisiteAuthoritative(report: {
+  reportVersion: string;
+  prerequisite?: unknown;
+}): boolean {
+  return report.reportVersion === RELEASE_REPORT_VERSION_V3 && report.prerequisite != null;
+}
 
 /**
  * The identity-bearing content of a report: everything except the assigned
@@ -321,6 +363,12 @@ export interface AssembleReleaseReportInput {
   candidateCi?: CandidateCiLaneInput;
   /** Factual repository/nightly context. Never consumed by the decision kernel. */
   outstandingWork?: ReleaseOutstandingWorkType;
+  /**
+   * The typed workflow-prerequisite snapshot. When present the report is assembled at
+   * schema version 3 and binds the snapshot into its content identity; when absent the
+   * report stays at version 2 (the context-based candidate-CI / local-corpus shape).
+   */
+  prerequisite?: ReleasePrerequisiteSnapshot;
   /**
    * Service-owned lane declarations. When present, each lane's required/applicable
    * booleans are read from policy rather than assumed. Absent for the slice-01
@@ -445,7 +493,8 @@ export function assembleReleaseReport(input: AssembleReleaseReportInput): Releas
     ...(input.candidateCi ? [candidateCiLane(input.subject.candidateSha, input.candidateCi)] : []),
   ];
   const content: ReleaseReportContent = {
-    reportVersion: RELEASE_REPORT_VERSION,
+    reportVersion:
+      input.prerequisite !== undefined ? RELEASE_REPORT_VERSION_V3 : RELEASE_REPORT_VERSION,
     subject: input.subject,
     policyVersion: input.policyVersion,
     provenance: {
@@ -466,10 +515,11 @@ export function assembleReleaseReport(input: AssembleReleaseReportInput): Releas
     evidenceLanes,
     risks: llm?.risks ?? input.risks ?? [],
     ...(input.outstandingWork !== undefined ? { outstandingWork: input.outstandingWork } : {}),
+    ...(input.prerequisite !== undefined ? { prerequisite: input.prerequisite } : {}),
     findings: input.findings,
     decision: input.decision,
   };
-  return ReleaseRiskReport.parse({
+  return parseReleaseReport({
     ...content,
     reportId: computeReportId(content),
     generatedAt: input.generatedAt,
@@ -496,8 +546,31 @@ export type LegacyReleaseRiskReportV1 = z.infer<typeof LegacyReleaseRiskReportV1
 export const StoredReleaseRiskReport = z.union([ReleaseRiskReport, LegacyReleaseRiskReportV1]);
 export type StoredReleaseRiskReport = z.infer<typeof StoredReleaseRiskReport>;
 
+/**
+ * The report schema plus the v3⟺prerequisite coupling invariant. A v3 report MUST
+ * carry a prerequisite snapshot, and only a v3 report may — so the schema version and
+ * the presence of prerequisite authority can never disagree at the trust boundary.
+ */
+const ReleaseRiskReportChecked = ReleaseRiskReport.superRefine((report, ctx) => {
+  const isV3 = report.reportVersion === RELEASE_REPORT_VERSION_V3;
+  if (isV3 && report.prerequisite === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["prerequisite"],
+      message: "a v3 release report must carry a prerequisite snapshot",
+    });
+  }
+  if (!isV3 && report.prerequisite !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["prerequisite"],
+      message: "only a v3 release report may carry a prerequisite snapshot",
+    });
+  }
+});
+
 export function parseReleaseReport(raw: unknown): ReleaseRiskReport {
-  return ReleaseRiskReport.parse(raw);
+  return ReleaseRiskReportChecked.parse(raw);
 }
 
 /** Historical reports remain inspectable but are structurally ineligible for v2 authority. */
